@@ -1,0 +1,41 @@
+services:
+  vllm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sooniverse/vllm-qwen3.5:v1.0.0
+    container_name: vllm-qwen
+    runtime: nvidia
+    environment:
+      - MODEL_NAME=${MODEL_NAME:-cyankiwi/Qwen3.5-2B-AWQ-4bit}
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
+      - MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-16384}
+      - GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.75}
+      - MAX_NUM_SEQS=${MAX_NUM_SEQS:-2}
+      - ENFORCE_EAGER=${ENFORCE_EAGER:-1}
+      - DTYPE=${DTYPE:-half}
+      - KV_CACHE_DTYPE=${KV_CACHE_DTYPE:-auto}
+      - TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-1}
+      - QUANTIZATION=${QUANTIZATION:-}
+      - CUDA_MODULE_LOADING=LAZY
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - VLLM_ATTENTION_BACKEND=FLASH_ATTN
+      - VLLM_USE_FLASHINFER_SAMPLER=0
+      - VLLM_MM_INPUT_CACHE_GIB=8
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - VLLM_IMAGE_FETCH_TIMEOUT=30
+      - PYTHONUNBUFFERED=1
+      - HF_HOME=/root/.cache/huggingface
+    ports:
+      - "8007:8007"
+    volumes:
+      - ./hf_cache:/root/.cache/huggingface
+      - ./entrypoint.sh:/usr/local/bin/entrypoint.sh
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
