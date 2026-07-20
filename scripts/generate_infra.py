@@ -150,49 +150,54 @@ class SkyYamlBuilder:
             "ENTORNO": self.cliente["entorno"],
             "MODO": self.cliente["modo"],
             "MODEL_NAME": primary_wl.get("hf_repo", "cyankiwi/Qwen3.5-2B-AWQ-4bit"),
-            "GPU_MEMORY_UTILIZATION": str(frac.get("gpu_memory_utilization", 0.75)),
+            "GPU_MEMORY_UTILIZATION": str(frac.get("gpu_memory_utilization", 0.95)),
             "MAX_MODEL_LEN": str(frac.get("max_model_len", 16384)),
         }
 
-        # Configuración del setup remoto (instalación de Docker + nvidia toolkit + clonado/preparación)
+        # Configuración del setup remoto (instalación robusta de GPU y Docker)
         setup_script = """
 set -euo pipefail
 
-echo "===> [1/4] Actualizando paquetes e instalando dependencias..."
-sudo apt-get update -y
-sudo apt-get install -y curl git ca-certificates gnupg lsb-release
+# A. Instalar dependencias esenciales, el driver estable y la utilidad modprobe faltante
+sudo apt-get update && sudo apt-get install -y ubuntu-drivers-common build-essential nvidia-driver-535-server nvidia-utils-535-server nvidia-modprobe
 
-echo "===> [2/4] Verificando e instalando Docker Engine y Docker Compose..."
+# B. Carga manual de módulos en caliente (Corrige el error de comunicación de la GPU sin reiniciar)
+sudo modprobe nvidia
+sudo modprobe nvidia-uvm
+sudo nvidia-modprobe -u -c=0
+
+# D. Instalar Docker Engine (si no está presente)
 if ! command -v docker &> /dev/null; then
-    sudo mkdir -p /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-    sudo apt-get update -y
-    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-    sudo usermod -aG docker $USER || true
+    curl -fsSL https://get.docker.com -o get-docker.sh
+    sudo sh get-docker.sh
+    sudo usermod -aG docker ubuntu
 fi
 
-echo "===> [3/4] Instalando NVIDIA Container Toolkit para soporte GPU..."
-if ! command -v nvidia-ctk &> /dev/null; then
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
-      && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-        sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    sudo apt-get update -y
-    sudo apt-get install -y nvidia-container-toolkit
-    sudo nvidia-ctk runtime configure --runtime=docker
-    sudo systemctl restart docker
-fi
+# E. Instalar NVIDIA Container Toolkit (Permite a Docker ver la GPU)
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
 
-echo "===> [4/4] Preparando persistencia de HuggingFace cache..."
-mkdir -p ~/sooniverse_infra/docker_images/qwen3.5/hf_cache
+# F. Configurar Docker para usar el runtime de NVIDIA y reiniciar el servicio
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+sudo chmod 666 /var/run/docker.sock
+
+# G. Verificación final de salud del entorno
+nvidia-smi
+
+# H. Preparar persistencia del cache de modelos (hf_cache)
+mkdir -p /home/ubuntu/sooniverse_infra/docker_images/qwen3.5/hf_cache
 """
 
         # Script de ejecución remota
         run_script = """
 set -euo pipefail
 echo "===> Desplegando servicios Sooniverse vía Docker Compose..."
-cd ~/sooniverse_infra/docker_images/qwen3.5
+cd /home/ubuntu/sooniverse_infra/docker_images/qwen3.5
 
 # Exportar variables de entorno para docker-compose
 export MODEL_NAME="${MODEL_NAME}"
@@ -200,7 +205,7 @@ export GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN}"
 
 echo "Iniciando contenedores para el cliente ${CLIENTE_ID} (${ENTORNO})..."
-sudo docker compose up -d --build
+sudo docker compose up -d
 
 echo "===> Despliegue completado con éxito. Estado de contenedores:"
 sudo docker compose ps
@@ -210,7 +215,7 @@ sudo docker compose ps
             "name": cluster_name,
             "resources": resources,
             "file_mounts": {
-                "~/sooniverse_infra": ".",
+                "/home/ubuntu/sooniverse_infra/docker_images/qwen3.5": "./docker_images/qwen3.5",
             },
             "envs": envs,
             "setup": setup_script.strip(),

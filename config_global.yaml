@@ -26,9 +26,9 @@ workloads:
     modelo: "qwen3.5"
     hf_repo: "cyankiwi/Qwen3.5-2B-AWQ-4bit"
     tipo_tarea: "llm-texto"    # Tipo de tarea: llm-texto | embeddings
-    accelerator: "T4"          # Especificación de GPU (ej. T4, A10g, A100)
+    accelerator: "L4"          # Especificación de GPU (ej. T4, A10g, A100)
     cantidad_gpus: 1           # Número de GPUs requeridas
-    tipo_instancia: "g4dn.xlarge" # Tipo de instancia en AWS (opcional u override)
+    tipo_instancia: "g6.xlarge" # Tipo de instancia en AWS (opcional u override)
     puerto: 8007               # Puerto de la API expuesto por la carga
     asignacion_fraccional:
       habilitado: true

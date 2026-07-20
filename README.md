@@ -59,7 +59,7 @@ workloads:
     puerto: 8007               # [Integer] Puerto local y de red expuesto por la API
     asignacion_fraccional:
       habilitado: true         # [Boolean] Activa la optimización fraccional de GPU
-      gpu_memory_utilization: 0.75 # [Float] Límite de VRAM dedicada (0.0 a 1.0)
+      gpu_memory_utilization: 0.95 # [Float] Límite de VRAM dedicada (0.0 a 1.0)
       max_model_len: 16384     # [Integer] Contexto máximo permitido del modelo
 ```
 
