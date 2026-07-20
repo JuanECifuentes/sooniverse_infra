@@ -58,6 +58,7 @@ __pycache__/
 *.pyd
 .Python
 venv/
+venv_linux/
 env/
 .env
 db.sqlite3
@@ -72,3 +73,7 @@ Thumbs.db
 
 pyrightconfig.json
 nul
+
+# SkyPilot Generated Artifacts
+.sky_generated.yaml
+
