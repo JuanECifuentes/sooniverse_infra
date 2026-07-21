@@ -159,7 +159,7 @@ class SkyYamlBuilder:
 set -euo pipefail
 
 # A. Instalar dependencias esenciales, el driver estable y la utilidad modprobe faltante
-sudo apt-get update && sudo apt-get install -y ubuntu-drivers-common build-essential nvidia-driver-535-server nvidia-utils-535-server nvidia-modprobe
+sudo apt-get update && sudo apt-get install -y ubuntu-drivers-common build-essential nvidia-driver-550-server nvidia-utils-550-server nvidia-modprobe
 
 # B. Carga manual de módulos en caliente (Corrige el error de comunicación de la GPU sin reiniciar)
 sudo modprobe nvidia
