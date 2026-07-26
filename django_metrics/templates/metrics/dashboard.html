@@ -1,0 +1,266 @@
+{% extends "metrics/base.html" %}
+{% load humanize %}
+
+{% block titulo %}Métricas de consumo{% endblock %}
+
+{% block contenido %}
+<div class="l-page-head">
+    <div class="l-page-head__text">
+        <span class="sv-eyebrow">Consumo de tokens</span>
+        <h2>Métricas {{ metricas.granularity_label|lower }}s</h2>
+        <p class="sv-body">
+            Contadores agregados de tokens. No se almacenan prompts ni respuestas:
+            únicamente <span class="sv-strong">prompt_tokens</span>,
+            <span class="sv-strong">completion_tokens</span>,
+            <span class="sv-strong">total_tokens</span>, timestamp e ID de API Key.
+        </p>
+    </div>
+
+    <div class="l-page-head__actions">
+        {# Particiones Diaria / Semanal / Mensual #}
+        <div class="sv-segment" role="tablist">
+            {% for valor, etiqueta in granularities %}
+                <a class="sv-segment__item {% if granularity_activa == valor %}sv-segment__item--active{% endif %}"
+                   role="tab" aria-selected="{% if granularity_activa == valor %}true{% else %}false{% endif %}"
+                   href="?granularity={{ valor }}{% if api_key_activa %}&api_key={{ api_key_activa }}{% endif %}">{{ etiqueta }}</a>
+            {% endfor %}
+        </div>
+
+        <form method="post" action="{% url 'metrics:refrescar' %}" class="l-inline-form">
+            {% csrf_token %}
+            <input type="hidden" name="next" value="{{ request.get_full_path }}">
+            <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm">Refrescar datos</button>
+        </form>
+    </div>
+</div>
+
+{# ------------------------------------------------------------------ FILTROS #}
+<section class="sv-panel l-mb-lg">
+    <form method="get" class="l-grid l-grid--filters">
+        <div class="l-field">
+            <label class="sv-label" for="id_granularity">Agrupación</label>
+            <select class="sv-select" name="granularity" id="id_granularity">
+                {% for valor, etiqueta in granularities %}
+                    <option value="{{ valor }}" {% if granularity_activa == valor %}selected{% endif %}>{{ etiqueta }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="l-field">
+            <label class="sv-label" for="id_api_key">API Key</label>
+            <select class="sv-select" name="api_key" id="id_api_key">
+                <option value="">Todas las API Keys</option>
+                {% for k in api_keys %}
+                    <option value="{{ k.id }}" {% if api_key_activa == k.id %}selected{% endif %}>
+                        {{ k.key_alias }}{% if not k.is_active %} (inactiva){% endif %}
+                    </option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="l-field">
+            <label class="sv-label" for="id_modelo">Modelo</label>
+            {{ form.modelo }}
+        </div>
+
+        <div class="l-field">
+            <label class="sv-label" for="id_dias">Ventana (días)</label>
+            {{ form.dias }}
+        </div>
+
+        <div class="l-field">
+            <label class="sv-label">&nbsp;</label>
+            <button type="submit" class="sv-btn sv-btn--primary">Aplicar filtro</button>
+        </div>
+    </form>
+</section>
+
+{# --------------------------------------------------------------------- KPIs #}
+<section class="l-grid l-grid--kpi l-mb-lg">
+    <article class="sv-card sv-card--metric">
+        <div class="l-kpi">
+            <span class="sv-eyebrow">Tokens totales</span>
+            <span class="l-kpi__value"><span class="sv-metric">{{ metricas.total_tokens|intcomma }}</span></span>
+            <span class="l-kpi__foot sv-mono sv-muted">{{ metricas.tokens_por_request|intcomma }} por petición</span>
+        </div>
+    </article>
+
+    <article class="sv-card sv-card--infra">
+        <div class="l-kpi">
+            <span class="sv-eyebrow">Entrada · Salida</span>
+            <span class="l-kpi__value">
+                <span class="sv-metric-sm">{{ metricas.prompt_tokens|intcomma }}</span>
+                <span class="sv-mono sv-muted">/</span>
+                <span class="sv-metric-sm">{{ metricas.completion_tokens|intcomma }}</span>
+            </span>
+            <span class="l-kpi__foot sv-mono sv-muted">{{ metricas.ratio_completion }}% generación</span>
+        </div>
+    </article>
+
+    <article class="sv-card sv-card--metric">
+        <div class="l-kpi">
+            <span class="sv-eyebrow">Peticiones</span>
+            <span class="l-kpi__value"><span class="sv-metric">{{ metricas.request_count|intcomma }}</span></span>
+            <span class="l-kpi__foot">
+                {% if metricas.error_count %}
+                    <span class="sv-badge sv-badge--danger">{{ metricas.error_count|intcomma }} con error</span>
+                {% else %}
+                    <span class="sv-badge sv-badge--success">sin errores</span>
+                {% endif %}
+            </span>
+        </div>
+    </article>
+
+    <article class="sv-card sv-card--secure">
+        <div class="l-kpi">
+            <span class="sv-eyebrow">Gasto estimado</span>
+            <span class="l-kpi__value"><span class="sv-metric">${{ metricas.spend_usd|floatformat:4 }}</span></span>
+            <span class="l-kpi__foot sv-mono sv-muted">USD · ventana actual</span>
+        </div>
+    </article>
+</section>
+
+{# ------------------------------------------------------- GRÁFICA + POOL VPC #}
+<section class="l-grid l-grid--split l-mb-lg">
+    <article class="sv-card l-card--flush">
+        <div class="l-card__head">
+            <div class="l-stack l-stack--tight">
+                <span class="sv-eyebrow">Serie {{ metricas.granularity_label|lower }}</span>
+                <h3>Evolución del consumo</h3>
+            </div>
+            {% if api_key_activa %}
+                <span class="sv-badge sv-badge--info">filtrado por API Key #{{ api_key_activa }}</span>
+            {% else %}
+                <span class="sv-badge sv-badge--muted">todas las API Keys</span>
+            {% endif %}
+        </div>
+        <div class="l-card__body">
+            {% include "metrics/_chart.html" %}
+        </div>
+    </article>
+
+    <article class="sv-card">
+        <div class="l-stack l-stack--tight l-mb-md">
+            <span class="sv-eyebrow">Pool vLLM</span>
+            <h3>Workers en la VPC</h3>
+        </div>
+
+        <div class="l-row l-mb-md">
+            <span class="sv-dot {% if pool.litellm_ok %}sv-dot--on{% else %}sv-dot--off{% endif %}"></span>
+            <span class="sv-mono">LiteLLM {% if pool.litellm_ok %}operativo{% else %}inalcanzable{% endif %}</span>
+            <span class="l-spacer"></span>
+            <span class="sv-badge {% if pool.nodos_sanos %}sv-badge--success{% else %}sv-badge--danger{% endif %}">
+                {{ pool.nodos_sanos }}/{{ pool.nodos_totales }} nodos
+            </span>
+        </div>
+
+        <div class="sv-divider"></div>
+
+        <div class="l-stack l-stack--tight">
+            {% for nodo in pool.nodos %}
+                <div class="l-row">
+                    <span class="sv-dot {% if nodo.is_healthy %}sv-dot--on{% else %}sv-dot--off{% endif %}"></span>
+                    <span class="sv-mono">{{ nodo.private_ip }}:{{ nodo.port }}</span>
+                    <span class="l-spacer"></span>
+                    <span class="sv-badge sv-badge--muted">{{ nodo.accelerator|default:"—" }}</span>
+                </div>
+            {% empty %}
+                <p class="sv-help">Sin workers registrados. Ejecuta
+                   <span class="sv-mono">python scripts/sync_endpoints.py --apply</span>.</p>
+            {% endfor %}
+        </div>
+
+        {% if pool.modelos %}
+            <div class="sv-divider"></div>
+            <span class="sv-eyebrow">Modelos publicados</span>
+            <div class="l-row" style="margin-top:8px">
+                {% for m in pool.modelos %}<span class="sv-badge sv-badge--secure">{{ m }}</span>{% endfor %}
+            </div>
+        {% endif %}
+    </article>
+</section>
+
+{# ------------------------------------------------------------ DESGLOSES #}
+<section class="l-grid l-grid--halves">
+    <article class="sv-card l-card--flush">
+        <div class="l-card__head">
+            <div class="l-stack l-stack--tight">
+                <span class="sv-eyebrow">Desglose</span>
+                <h3>Consumo por modelo</h3>
+            </div>
+        </div>
+        <div class="l-table-wrap">
+            <table class="sv-table">
+                <thead>
+                    <tr>
+                        <th>Modelo</th>
+                        <th class="sv-num">Peticiones</th>
+                        <th class="sv-num">Tokens</th>
+                        <th class="sv-num">USD</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for fila in metricas.por_modelo %}
+                        <tr>
+                            <td class="sv-mono">{{ fila.model_name }}</td>
+                            <td class="sv-num">{{ fila.request_count|intcomma }}</td>
+                            <td class="sv-num sv-num--accent">{{ fila.total_tokens|intcomma }}</td>
+                            <td class="sv-num">${{ fila.spend_usd|floatformat:4 }}</td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="4" class="sv-help">Sin datos en la ventana seleccionada.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </article>
+
+    {% if not api_key_activa %}
+    <article class="sv-card l-card--flush">
+        <div class="l-card__head">
+            <div class="l-stack l-stack--tight">
+                <span class="sv-eyebrow">Desglose</span>
+                <h3>Consumo por API Key</h3>
+            </div>
+            <a class="sv-btn sv-btn--ghost sv-btn--sm" href="{% url 'metrics:api_keys' %}">Gestionar</a>
+        </div>
+        <div class="l-table-wrap">
+            <table class="sv-table">
+                <thead>
+                    <tr>
+                        <th>API Key</th>
+                        <th class="sv-num">Peticiones</th>
+                        <th class="sv-num">Tokens</th>
+                        <th class="sv-num">USD</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for fila in metricas.por_api_key %}
+                        <tr>
+                            <td>
+                                <span class="sv-strong">{{ fila.api_key__key_alias|default:"(sin registro)" }}</span>
+                                {% if fila.api_key__is_active is False %}
+                                    <span class="sv-badge sv-badge--muted">inactiva</span>
+                                {% endif %}
+                            </td>
+                            <td class="sv-num">{{ fila.request_count|intcomma }}</td>
+                            <td class="sv-num sv-num--accent">{{ fila.total_tokens|intcomma }}</td>
+                            <td class="sv-num">${{ fila.spend_usd|floatformat:4 }}</td>
+                            <td class="sv-num">
+                                {% if fila.api_key_id %}
+                                    <a href="?granularity={{ granularity_activa }}&api_key={{ fila.api_key_id }}"
+                                       class="sv-mono">filtrar</a>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="5" class="sv-help">Sin datos en la ventana seleccionada.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </article>
+    {% endif %}
+</section>
+{% endblock %}

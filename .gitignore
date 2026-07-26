@@ -74,6 +74,16 @@ Thumbs.db
 pyrightconfig.json
 nul
 
-# SkyPilot Generated Artifacts
+# ──────────────────────────────────────────────
+# Artefactos generados (FASE 1) - NO versionar
+# ──────────────────────────────────────────────
+# Manifiestos SkyPilot: los produce scripts/generate_infra.py
 .sky_generated.yaml
+.sky_generated.*.yaml
+# Config de cliente SkyPilot con VPC / bastion / IPs internas
+.sky_config_workers.yaml
+# Pool de endpoints privados descubierto por scripts/sync_endpoints.py
+.sooniverse_endpoints.json
+# config.yaml de LiteLLM: contiene IPs privadas de la VPC del cliente
+docker_images/gateway/litellm_config.yaml
 

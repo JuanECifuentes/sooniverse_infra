@@ -1,0 +1,176 @@
+# ==============================================================================
+# SOONIVERSE :: NODO GATEWAY (FASE 1)
+# ==============================================================================
+# Única superficie pública del clúster. Los workers vLLM viven en la subred
+# privada y solo son alcanzables desde aquí por IP interna de la VPC.
+#
+# Arranque:  sudo docker compose --env-file ../../.env up -d --build
+#
+# PostgreSQL: por defecto se asume una instancia EXISTENTE (RDS o externa)
+# definida en `.env`. Para levantar una local incluida en el stack:
+#     sudo docker compose --env-file ../../.env --profile local-db up -d
+#     (y fijar DB_HOST=postgres en el .env)
+# ==============================================================================
+
+name: sooniverse-gateway
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL opcional (perfil local-db). Métricas + LiteLLM Spend/Usage.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: sooniverse-postgres
+    profiles: ["local-db"]
+    environment:
+      POSTGRES_DB: ${DB_NAME:-sooniverse}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-sooniverse}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [gateway_net]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Redis: cache de routing/rate-limit de LiteLLM (obligatorio para que el
+  # balanceo latency-based sea consistente entre workers).
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: sooniverse-redis
+    command: ["redis-server", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [gateway_net]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # LiteLLM Proxy: gateway OpenAI-compatible + balanceador de carga sobre vLLM
+  # ---------------------------------------------------------------------------
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: sooniverse-litellm
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD}@${DB_HOST:-postgres}:${DB_PORT:-5432}/${DB_NAME:-sooniverse}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-sooniverse-salt-change-me}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      STORE_MODEL_IN_DB: "True"
+      # PRIVACIDAD: LiteLLM no debe persistir el contenido de las peticiones.
+      LITELLM_LOG: "ERROR"
+      DISABLE_SCHEMA_UPDATE: "False"
+    volumes:
+      # Generado dinámicamente por scripts/render_litellm_config.py con las IPs
+      # privadas de los workers que SkyPilot acaba de aprovisionar.
+      - ./litellm_config.yaml:/app/config.yaml:ro
+    ports:
+      - "4000:4000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:4000/health/liveliness')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [gateway_net]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Open WebUI: interfaz de chat enlazada exclusivamente a LiteLLM
+  # ---------------------------------------------------------------------------
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: sooniverse-webui
+    environment:
+      # Todo el tráfico de chat pasa por el balanceador, nunca directo al worker.
+      OPENAI_API_BASE_URL: http://litellm:4000/v1
+      OPENAI_API_KEY: ${LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}
+      WEBUI_NAME: "Sooniverse AI"
+      WEBUI_AUTH: "True"
+      ENABLE_SIGNUP: ${WEBUI_SIGNUP:-false}
+      ENABLE_OLLAMA_API: "False"
+      WEBUI_SECRET_KEY: ${SECRET_KEY:-sooniverse-webui-secret}
+      DEFAULT_USER_ROLE: "pending"
+    volumes:
+      - webui_data:/app/backend/data
+    ports:
+      - "8080:8080"
+    depends_on:
+      - litellm
+    networks: [gateway_net]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Django: panel de Métricas de tokens y gestor de API Keys
+  # ---------------------------------------------------------------------------
+  metrics:
+    build:
+      context: ../../django_metrics
+      dockerfile: Dockerfile
+    image: sooniverse/metrics-panel:1.0.0
+    container_name: sooniverse-metrics
+    environment:
+      SECRET_KEY: ${SECRET_KEY:-insecure-dev-key-change-me}
+      DEBUG: ${DEBUG:-False}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
+      DB_NAME: ${DB_NAME:-sooniverse}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}
+      CLIENTE_ID: ${CLIENTE_ID:-default}
+      ENTORNO: ${ENTORNO:-prod}
+      METRICS_REFRESH_INTERVAL: ${METRICS_REFRESH_INTERVAL:-300}
+      DJANGO_SUPERUSER_USERNAME: ${DJANGO_SUPERUSER_USERNAME:-admin}
+      DJANGO_SUPERUSER_PASSWORD: ${DJANGO_SUPERUSER_PASSWORD:-}
+      DJANGO_SUPERUSER_EMAIL: ${DJANGO_SUPERUSER_EMAIL:-admin@sooniverse.co}
+    ports:
+      - "8000:8000"
+    depends_on:
+      - litellm
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [gateway_net]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Nginx: puerto 80 -> Open WebUI, /metrics -> Django, /v1 -> LiteLLM
+  # ---------------------------------------------------------------------------
+  proxy:
+    image: nginx:1.27-alpine
+    container_name: sooniverse-proxy
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - open-webui
+      - litellm
+      - metrics
+    networks: [gateway_net]
+    restart: unless-stopped
+
+networks:
+  gateway_net:
+    driver: bridge
+
+volumes:
+  pgdata:
+  webui_data:

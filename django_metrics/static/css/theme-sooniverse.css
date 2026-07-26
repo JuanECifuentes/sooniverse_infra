@@ -1,0 +1,561 @@
+/* ============================================================================
+   THEME · SOONIVERSE
+   ============================================================================
+   Identidad visual derivada de `Manual_de_imagen_sooniverse.md` v1.0.0.
+
+   CONTRATO DE ESTE ARCHIVO (tema 100% intercambiable):
+     ✔ CONTIENE  : color, background, border, border-radius, box-shadow,
+                   filter/drop-shadow, gradientes, tipografía (familia, peso,
+                   tracking, transform), transiciones y estados :hover/:focus.
+     ✘ NO CONTIENE: display, grid, flex, width, height, margin, padding,
+                   position, gap ni ninguna regla de maquetación.
+                   Todo eso vive en `layout.css`.
+
+   Para re-tematizar el panel: reemplaza SOLO este archivo.
+   ============================================================================ */
+
+/* ----------------------------------------------------------------------------
+   1. TOKENS CROMÁTICOS (paleta restringida)
+   ---------------------------------------------------------------------------- */
+:root {
+    /* Fondos */
+    --sv-deep-space:      #070A12;   /* Background principal */
+    --sv-cyber-surface:   #0F172A;   /* Cards, modales, dropdowns */
+    --sv-surface-alpha:   rgba(15, 23, 42, 0.80);
+    --sv-surface-raised:  #131C31;
+
+    /* Texto */
+    --sv-pure-white:      #FFFFFF;
+    --sv-slate-gray:      #94A3B8;
+
+    /* Acentos */
+    --sv-neon-green:      #00FF87;   /* AI · CTAs · métricas */
+    --sv-electric-cyan:   #60EFFF;   /* Infra · bordes activos · enlaces */
+    --sv-cosmic-violet:   #8A2BE2;   /* Secure · degradados · estados especiales */
+
+    /* Estructura */
+    --sv-border:          #1E293B;
+    --sv-border-active:   var(--sv-electric-cyan);
+    --sv-radius:          12px;      /* Máximo permitido por el manual */
+    --sv-radius-sm:       8px;
+    --sv-radius-pill:     999px;
+
+    /* Semántica de estado */
+    --sv-success:         var(--sv-neon-green);
+    --sv-warning:         #FFB84D;
+    --sv-danger:          #FF4D6D;
+
+    /* Degradado oficial: 135deg, verde -> cian -> violeta */
+    --sv-cosmic-gradient: linear-gradient(135deg, #00FF87 0%, #60EFFF 50%, #8A2BE2 100%);
+
+    /* Resplandores neón */
+    --sv-glow-green:      drop-shadow(0px 0px 12px rgba(0, 255, 135, 0.6));
+    --sv-glow-cyan:       drop-shadow(0px 0px 12px rgba(96, 239, 255, 0.6));
+    --sv-shadow-card:     0 4px 24px rgba(0, 0, 0, 0.45);
+    --sv-shadow-glow:     0 0 20px rgba(96, 239, 255, 0.25);
+    --sv-shadow-cta:      0 6px 22px rgba(0, 255, 135, 0.30);
+    --sv-shadow-cta-hi:   0 10px 32px rgba(0, 255, 135, 0.45);
+
+    /* Tipografía de marca */
+    --sv-font-sans:       'Inter', 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --sv-font-mono:       'JetBrains Mono', 'Fira Code', 'SFMono-Regular', Consolas, monospace;
+
+    /* Micro-interacción estándar del manual */
+    --sv-transition:      all 0.3s ease;
+}
+
+/* ----------------------------------------------------------------------------
+   2. LIENZO GLOBAL
+   ---------------------------------------------------------------------------- */
+body {
+    background-color: var(--sv-deep-space);
+    color: var(--sv-slate-gray);
+    font-family: var(--sv-font-sans);
+    font-size: 16px;
+    font-weight: 400;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* Materialidad: grano digital estático al 2% sobre todo el fondo.
+   Se apoya en el hook `.sv-noise` de layout.css, que solo lo posiciona. */
+.sv-noise {
+    opacity: 0.02;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Halo decorativo del encabezado (nodos de iluminación) */
+.sv-aura {
+    background:
+        radial-gradient(ellipse at 15% 0%, rgba(0, 255, 135, 0.10), transparent 55%),
+        radial-gradient(ellipse at 85% 0%, rgba(138, 43, 226, 0.12), transparent 55%);
+}
+
+/* ----------------------------------------------------------------------------
+   3. JERARQUÍA TIPOGRÁFICA
+   ---------------------------------------------------------------------------- */
+h1, .sv-h1 {
+    font-family: var(--sv-font-sans);
+    font-size: 56px;
+    font-weight: 800;
+    letter-spacing: -1.5px;
+    color: var(--sv-pure-white);
+}
+
+h2, .sv-h2 {
+    font-family: var(--sv-font-sans);
+    font-size: 36px;
+    font-weight: 700;
+    letter-spacing: -1px;
+    color: var(--sv-pure-white);
+}
+
+h3, .sv-h3 {
+    font-family: var(--sv-font-sans);
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--sv-pure-white);
+}
+
+h4, .sv-h4 {
+    font-family: var(--sv-font-sans);
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--sv-pure-white);
+}
+
+.sv-body   { color: var(--sv-slate-gray); }
+.sv-strong { color: var(--sv-pure-white); font-weight: 600; }
+.sv-muted  { color: var(--sv-slate-gray); opacity: 0.72; }
+
+/* Taglines / badges / métricas: monoespaciada técnica */
+.sv-tagline {
+    font-family: var(--sv-font-mono);
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 6.5px;
+    color: var(--sv-neon-green);
+}
+
+.sv-eyebrow {
+    font-family: var(--sv-font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 6px;
+    color: var(--sv-neon-green);
+}
+
+.sv-mono   { font-family: var(--sv-font-mono); font-size: 13px; }
+.sv-metric {
+    font-family: var(--sv-font-mono);
+    font-size: 34px;
+    font-weight: 600;
+    color: var(--sv-pure-white);
+    letter-spacing: -0.5px;
+}
+.sv-metric-sm {
+    font-family: var(--sv-font-mono);
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--sv-pure-white);
+}
+
+/* ----------------------------------------------------------------------------
+   4. LOGOTIPO
+   ---------------------------------------------------------------------------- */
+/* `Sooni` en blanco puro, `verse` con el cosmic-gradient. Tipografía unificada. */
+.sv-logo {
+    font-family: var(--sv-font-sans);
+    font-size: 26px;
+    font-weight: 800;
+    letter-spacing: -0.8px;
+}
+.sv-logo__solid    { color: var(--sv-pure-white); }
+.sv-logo__gradient {
+    background: var(--sv-cosmic-gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+}
+.sv-logo__node {
+    background: var(--sv-cosmic-gradient);
+    border-radius: var(--sv-radius-pill);
+    filter: var(--sv-glow-cyan);
+}
+
+/* ----------------------------------------------------------------------------
+   5. ENLACES
+   ---------------------------------------------------------------------------- */
+a {
+    color: var(--sv-electric-cyan);
+    text-decoration: none;
+    transition: var(--sv-transition);
+}
+a:hover {
+    color: var(--sv-neon-green);
+    text-shadow: 0 0 12px rgba(0, 255, 135, 0.45);
+}
+
+/* ----------------------------------------------------------------------------
+   6. TARJETAS Y CONTENEDORES
+   ---------------------------------------------------------------------------- */
+.sv-card {
+    background-color: var(--sv-surface-alpha);
+    border: 1px solid var(--sv-border);
+    border-radius: var(--sv-radius);
+    box-shadow: var(--sv-shadow-card);
+    backdrop-filter: blur(12px);
+    transition: var(--sv-transition);
+}
+.sv-card:hover {
+    border-color: var(--sv-border-active);
+    box-shadow: var(--sv-shadow-card), var(--sv-shadow-glow);
+}
+
+/* Tarjeta de métrica destacada: sella el acento en el borde superior */
+.sv-card--metric { border-top: 2px solid var(--sv-neon-green); }
+.sv-card--infra  { border-top: 2px solid var(--sv-electric-cyan); }
+.sv-card--secure { border-top: 2px solid var(--sv-cosmic-violet); }
+
+.sv-panel {
+    background-color: var(--sv-cyber-surface);
+    border: 1px solid var(--sv-border);
+    border-radius: var(--sv-radius);
+}
+
+.sv-divider { border-top: 1px solid var(--sv-border); }
+
+/* ----------------------------------------------------------------------------
+   7. BOTONES Y CTAs
+   ---------------------------------------------------------------------------- */
+.sv-btn {
+    font-family: var(--sv-font-sans);
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-radius: var(--sv-radius-sm);
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: var(--sv-transition);
+}
+
+/* Primario: fondo cosmic-gradient, texto Deep Space */
+.sv-btn--primary {
+    background: var(--sv-cosmic-gradient);
+    color: var(--sv-deep-space);
+    box-shadow: var(--sv-shadow-cta);
+}
+.sv-btn--primary:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--sv-shadow-cta-hi);
+}
+
+/* Secundario: transparente con borde cian de 1.5px */
+.sv-btn--secondary {
+    background: transparent;
+    border: 1.5px solid var(--sv-electric-cyan);
+    color: var(--sv-pure-white);
+}
+.sv-btn--secondary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(96, 239, 255, 0.30);
+    border-color: var(--sv-neon-green);
+}
+
+/* Peligro: desactivar credenciales */
+.sv-btn--danger {
+    background: transparent;
+    border: 1.5px solid var(--sv-danger);
+    color: var(--sv-danger);
+}
+.sv-btn--danger:hover {
+    transform: translateY(-2px);
+    background-color: rgba(255, 77, 109, 0.10);
+    box-shadow: 0 6px 20px rgba(255, 77, 109, 0.25);
+}
+
+.sv-btn--ghost {
+    background: transparent;
+    border: 1px solid var(--sv-border);
+    color: var(--sv-slate-gray);
+}
+.sv-btn--ghost:hover {
+    border-color: var(--sv-electric-cyan);
+    color: var(--sv-pure-white);
+}
+
+.sv-btn:disabled,
+.sv-btn[aria-disabled="true"] {
+    color: var(--sv-slate-gray);
+    background: var(--sv-surface-raised);
+    box-shadow: none;
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+/* ----------------------------------------------------------------------------
+   8. SEGMENTOS / TABS (granularidad Diaria · Semanal · Mensual)
+   ---------------------------------------------------------------------------- */
+.sv-segment {
+    background-color: var(--sv-cyber-surface);
+    border: 1px solid var(--sv-border);
+    border-radius: var(--sv-radius-pill);
+}
+.sv-segment__item {
+    font-family: var(--sv-font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--sv-slate-gray);
+    background: transparent;
+    border: none;
+    border-radius: var(--sv-radius-pill);
+    cursor: pointer;
+    transition: var(--sv-transition);
+}
+.sv-segment__item:hover { color: var(--sv-pure-white); }
+.sv-segment__item--active {
+    background: var(--sv-cosmic-gradient);
+    color: var(--sv-deep-space);
+    box-shadow: 0 0 16px rgba(0, 255, 135, 0.35);
+}
+
+/* ----------------------------------------------------------------------------
+   9. BADGES
+   ---------------------------------------------------------------------------- */
+.sv-badge {
+    font-family: var(--sv-font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    border-radius: var(--sv-radius-pill);
+    border: 1px solid transparent;
+}
+.sv-badge--success {
+    color: var(--sv-neon-green);
+    background-color: rgba(0, 255, 135, 0.10);
+    border-color: rgba(0, 255, 135, 0.35);
+}
+.sv-badge--info {
+    color: var(--sv-electric-cyan);
+    background-color: rgba(96, 239, 255, 0.10);
+    border-color: rgba(96, 239, 255, 0.35);
+}
+.sv-badge--secure {
+    color: #C4A2F5;
+    background-color: rgba(138, 43, 226, 0.14);
+    border-color: rgba(138, 43, 226, 0.40);
+}
+.sv-badge--muted {
+    color: var(--sv-slate-gray);
+    background-color: rgba(148, 163, 184, 0.10);
+    border-color: var(--sv-border);
+}
+.sv-badge--danger {
+    color: var(--sv-danger);
+    background-color: rgba(255, 77, 109, 0.10);
+    border-color: rgba(255, 77, 109, 0.35);
+}
+
+/* Punto de estado con luz activa */
+.sv-dot { border-radius: var(--sv-radius-pill); }
+.sv-dot--on  { background-color: var(--sv-neon-green); box-shadow: 0 0 10px rgba(0, 255, 135, 0.8); }
+.sv-dot--off { background-color: var(--sv-danger);     box-shadow: 0 0 10px rgba(255, 77, 109, 0.7); }
+
+/* ----------------------------------------------------------------------------
+   10. FORMULARIOS
+   ---------------------------------------------------------------------------- */
+.sv-label {
+    font-family: var(--sv-font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.6px;
+    color: var(--sv-slate-gray);
+}
+
+.sv-input,
+.sv-select,
+.sv-textarea {
+    background-color: var(--sv-deep-space);
+    color: var(--sv-pure-white);
+    font-family: var(--sv-font-sans);
+    font-size: 14px;
+    border: 1px solid var(--sv-border);
+    border-radius: var(--sv-radius-sm);
+    transition: var(--sv-transition);
+}
+.sv-input::placeholder,
+.sv-textarea::placeholder { color: var(--sv-slate-gray); opacity: 0.55; }
+
+.sv-input:hover,
+.sv-select:hover,
+.sv-textarea:hover { border-color: rgba(96, 239, 255, 0.45); }
+
+.sv-input:focus,
+.sv-select:focus,
+.sv-textarea:focus {
+    outline: none;
+    border-color: var(--sv-border-active);
+    box-shadow: 0 0 0 3px rgba(96, 239, 255, 0.14), var(--sv-shadow-glow);
+}
+
+.sv-help  { color: var(--sv-slate-gray); font-size: 12px; opacity: 0.8; }
+.sv-error { color: var(--sv-danger); font-family: var(--sv-font-mono); font-size: 12px; }
+
+/* ----------------------------------------------------------------------------
+   11. TABLAS
+   ---------------------------------------------------------------------------- */
+.sv-table { color: var(--sv-slate-gray); font-size: 14px; }
+
+.sv-table thead th {
+    font-family: var(--sv-font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    color: var(--sv-slate-gray);
+    background-color: rgba(15, 23, 42, 0.9);
+    border-bottom: 1px solid var(--sv-border);
+}
+
+.sv-table tbody tr {
+    border-bottom: 1px solid rgba(30, 41, 59, 0.65);
+    transition: var(--sv-transition);
+}
+.sv-table tbody tr:hover { background-color: rgba(96, 239, 255, 0.05); }
+.sv-table tbody tr:last-child { border-bottom: none; }
+
+.sv-table td.sv-num {
+    font-family: var(--sv-font-mono);
+    color: var(--sv-pure-white);
+}
+.sv-table td.sv-num--accent { color: var(--sv-neon-green); }
+
+/* ----------------------------------------------------------------------------
+   12. GRÁFICA DE BARRAS (SVG/CSS puro, sin dependencias externas)
+   ---------------------------------------------------------------------------- */
+.sv-chart { background-color: transparent; }
+
+.sv-bar {
+    background: var(--sv-cosmic-gradient);
+    border-radius: var(--sv-radius-sm) var(--sv-radius-sm) 0 0;
+    transition: var(--sv-transition);
+}
+.sv-bar:hover { filter: var(--sv-glow-cyan); }
+
+/* Sub-barra de tokens de prompt: acento cian sólido dentro de la barra total */
+.sv-bar__prompt {
+    background-color: rgba(96, 239, 255, 0.55);
+    border-radius: 0 0 var(--sv-radius-sm) var(--sv-radius-sm);
+}
+
+.sv-bar--empty { background: rgba(148, 163, 184, 0.12); }
+
+.sv-axis {
+    font-family: var(--sv-font-mono);
+    font-size: 10px;
+    color: var(--sv-slate-gray);
+    letter-spacing: 0.5px;
+}
+.sv-gridline { border-top: 1px dashed rgba(30, 41, 59, 0.9); }
+
+/* Leyenda */
+.sv-legend__swatch { border-radius: 3px; }
+.sv-legend__swatch--total  { background: var(--sv-cosmic-gradient); }
+.sv-legend__swatch--prompt { background-color: rgba(96, 239, 255, 0.55); }
+
+/* ----------------------------------------------------------------------------
+   13. MENSAJES DEL SISTEMA
+   ---------------------------------------------------------------------------- */
+.sv-alert {
+    border-radius: var(--sv-radius);
+    border: 1px solid var(--sv-border);
+    background-color: var(--sv-surface-alpha);
+    color: var(--sv-slate-gray);
+    font-size: 14px;
+    backdrop-filter: blur(12px);
+}
+.sv-alert--success { border-color: rgba(0, 255, 135, 0.40);  color: var(--sv-neon-green); }
+.sv-alert--warning { border-color: rgba(255, 184, 77, 0.40); color: var(--sv-warning); }
+.sv-alert--error   { border-color: rgba(255, 77, 109, 0.40); color: var(--sv-danger); }
+.sv-alert--info    { border-color: rgba(96, 239, 255, 0.40); color: var(--sv-electric-cyan); }
+
+/* Revelado único de la API Key en claro */
+.sv-secret {
+    font-family: var(--sv-font-mono);
+    font-size: 14px;
+    color: var(--sv-neon-green);
+    background-color: var(--sv-deep-space);
+    border: 1px dashed rgba(0, 255, 135, 0.55);
+    border-radius: var(--sv-radius-sm);
+    word-break: break-all;
+}
+
+/* ----------------------------------------------------------------------------
+   14. NAVEGACIÓN
+   ---------------------------------------------------------------------------- */
+.sv-nav__link {
+    font-family: var(--sv-font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--sv-slate-gray);
+    border-bottom: 2px solid transparent;
+    transition: var(--sv-transition);
+}
+.sv-nav__link:hover {
+    color: var(--sv-pure-white);
+    border-bottom-color: rgba(96, 239, 255, 0.5);
+    text-shadow: none;
+}
+.sv-nav__link--active {
+    color: var(--sv-neon-green);
+    border-bottom-color: var(--sv-neon-green);
+}
+
+.sv-header {
+    background-color: rgba(7, 10, 18, 0.85);
+    border-bottom: 1px solid var(--sv-border);
+    backdrop-filter: blur(12px);
+}
+
+.sv-footer {
+    border-top: 1px solid var(--sv-border);
+    color: var(--sv-slate-gray);
+    font-family: var(--sv-font-mono);
+    font-size: 11px;
+    letter-spacing: 1px;
+}
+
+/* ----------------------------------------------------------------------------
+   15. SCROLLBAR
+   ---------------------------------------------------------------------------- */
+::-webkit-scrollbar-track { background: var(--sv-deep-space); }
+::-webkit-scrollbar-thumb {
+    background: var(--sv-border);
+    border-radius: var(--sv-radius-pill);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--sv-electric-cyan); }
+
+/* ----------------------------------------------------------------------------
+   16. ACCESIBILIDAD
+   ---------------------------------------------------------------------------- */
+:focus-visible {
+    outline: 2px solid var(--sv-electric-cyan);
+    outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .sv-btn, .sv-card, .sv-bar, .sv-segment__item, a { transition: none; }
+    .sv-btn--primary:hover,
+    .sv-btn--secondary:hover,
+    .sv-btn--danger:hover { transform: none; }
+}

@@ -1,6 +1,8 @@
 # ==============================================================================
 # Sooniverse Infrastructure - Central Configuration (Source of Truth)
 # ==============================================================================
+# FASE 1: Gateway (LiteLLM + Open WebUI + Django Metrics) + Workers vLLM en VPC
+# ==============================================================================
 
 # 1. Datos del Cliente y Entorno
 cliente:
@@ -11,25 +13,81 @@ cliente:
 # 2. Variables de Red y Aislamiento
 red_y_aislamiento:
   region: "us-east-1"         # Región por defecto de la nube
-  image_id: "ami-0d001f8052688dc45"  # ID de la AMI personalizada (opcional/dinámica)
-  vpc_id: null                # ID de VPC dedicada (ej. vpc-0a1b2c3d4e5f67890). Usar null para VPC por defecto
+  image_id: "ami-0d001f8052688dc45"  # AMI personalizada para los workers GPU (opcional)
+  vpc_name: null              # Nombre (tag Name) de la VPC dedicada. null = VPC por defecto de la cuenta
+  vpc_id: null                # ID de VPC dedicada (informativo / auditoría)
   subnet_id: null             # Subred específica (opcional)
+  # Cuando es true, los workers se aprovisionan SIN IP pública y su acceso SSH
+  # se tuneliza a través del Nodo Gateway (bastion). Requiere NAT Gateway o
+  # VPC Endpoints en la subred privada para que los workers alcancen internet.
+  workers_en_subred_privada: true
+  # CIDR autorizado a alcanzar los puertos públicos del Gateway.
+  # "0.0.0.0/0" expone a internet; restringir en producción real.
+  cidr_permitido_gateway: "0.0.0.0/0"
+  # Security Group pre-creado (opcional). Si se define, SkyPilot lo reutiliza para
+  # los workers en vez de crear uno nuevo, permitiendo acotar el ingreso al puerto
+  # vLLM únicamente al SG/CIDR del Nodo Gateway. Recomendado en producción.
+  security_group_workers: null
   tags_obligatorios:
     cliente_id: "acme"
     modo: "byoc"
     entorno: "prod"
     gestionado_por: "sooniverse"
 
-# 3. Perfil de Cargas de Trabajo (Multi-modelo)
+# 3. Nodo Gateway (única puerta de entrada pública del clúster)
+gateway:
+  habilitado: true
+  tipo_instancia: "t3.large"  # Instancia CPU-only: no requiere GPU
+  disk_size: 100              # GB de disco para imágenes Docker y volúmenes
+  puertos_publicos:
+    - 80                      # Open WebUI (reverse proxy)
+    - 4000                    # LiteLLM Proxy (API OpenAI-compatible)
+    - 8080                    # Open WebUI directo
+    - 8000                    # Django Metrics & API Keys panel
+  # Estrategia de balanceo de LiteLLM sobre los workers vLLM.
+  # latency-based-routing | simple-shuffle (round-robin ponderado) | least-busy | usage-based-routing
+  load_balancing_strategy: "latency-based-routing"
+  litellm:
+    master_key_env: "LITELLM_MASTER_KEY"   # Nombre de la var de entorno con la master key
+    num_retries: 2
+    request_timeout: 600
+    cooldown_time: 30                      # Segundos que un worker caído sale del pool
+    allowed_fails: 2
+  open_webui:
+    habilitado: true
+    signup_habilitado: false               # Bloquea auto-registro público
+  django_metrics:
+    habilitado: true
+    puerto: 8000
+    # Cada cuántos segundos el job de ingesta refresca métricas desde LiteLLM
+    metrics_refresh_interval: 300
+
+# 4. Automatización de Base de Datos
+base_de_datos:
+  # Interruptor pedido en el contrato: determina si `scripts/db_setup.py` corre
+  # automáticamente durante el despliegue de la infraestructura.
+  #   true  -> el Gateway ingesta database/init_schema.sql al arrancar
+  #   false -> se omite; el operador debe ejecutar `python scripts/db_setup.py` a mano
+  AUTO_INIT_DB: true
+  # Ejecuta también el ETL de LiteLLM + recálculo de rollups tras aplicar el esquema
+  auto_refresh_metrics: true
+  # Ruta (relativa al repo) del script SQL a ingestar
+  schema_file: "database/init_schema.sql"
+
+# 5. Perfil de Cargas de Trabajo (Multi-modelo, Multi-nodo)
 workloads:
   - id: "qwen3-5-llm"
     modelo: "qwen3.5"
     hf_repo: "cyankiwi/Qwen3.5-2B-AWQ-4bit"
-    tipo_tarea: "llm-texto"    # Tipo de tarea: llm-texto | embeddings
-    accelerator: "L4"          # Especificación de GPU (ej. T4, A10g, A100)
-    cantidad_gpus: 1           # Número de GPUs requeridas
+    tipo_tarea: "llm-texto"     # Tipo de tarea: llm-texto | embeddings
+    accelerator: "L4"           # Especificación de GPU (ej. T4, A10g, L4, A100)
+    cantidad_gpus: 1            # Número de GPUs por nodo
+    replicas: 2                 # Nodos worker a desplegar para este modelo (balanceados por LiteLLM)
     tipo_instancia: "g6.xlarge" # Tipo de instancia en AWS (opcional u override)
-    puerto: 8007               # Puerto de la API expuesto por la carga
+    puerto: 8007                # Puerto de la API expuesto por el worker (solo red interna)
+    # Nombre público del modelo expuesto por LiteLLM al cliente final
+    nombre_publico: "sooniverse-qwen3.5"
+    peso_balanceo: 1            # Peso relativo en el pool de LiteLLM
     asignacion_fraccional:
       habilitado: true
       gpu_memory_utilization: 0.95 # Asignación de VRAM fraccional (0.0 - 1.0)
