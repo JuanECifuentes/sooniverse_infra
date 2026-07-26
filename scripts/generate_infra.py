@@ -492,9 +492,10 @@ class TopologyBuilder:
         if self.red.get("workers_en_subred_privada", True):
             aws_cfg["use_internal_ips"] = True
             if gateway_ip:
+                gateway_ssh_key = Path.home() / ".sky" / "generated" / "ssh" / self.gateway_cluster
                 aws_cfg["ssh_proxy_command"] = (
                     f"ssh -W %h:%p -o StrictHostKeyChecking=no "
-                    f"-o UserKnownHostsFile=/dev/null -i ~/.ssh/sky-key ubuntu@{gateway_ip}"
+                    f"-o UserKnownHostsFile=/dev/null -i {gateway_ssh_key} ubuntu@{gateway_ip}"
                 )
 
         return {"aws": aws_cfg} if aws_cfg else {}

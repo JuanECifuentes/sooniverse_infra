@@ -78,6 +78,7 @@ nul
 # Artefactos generados (FASE 1) - NO versionar
 # ──────────────────────────────────────────────
 # Manifiestos SkyPilot: los produce scripts/generate_infra.py
+sky_*.yaml
 .sky_generated.yaml
 .sky_generated.*.yaml
 # Config de cliente SkyPilot con VPC / bastion / IPs internas
