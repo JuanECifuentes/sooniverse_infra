@@ -14,7 +14,7 @@ cliente:
 red_y_aislamiento:
   region: "us-east-1"         # Región por defecto de la nube
   image_id: "ami-0d001f8052688dc45"  # AMI personalizada para los workers GPU (opcional)
-  vpc_name: null              # Nombre (tag Name) de la VPC dedicada. null = VPC por defecto de la cuenta
+  vpc_name: "sooniverse-vpc"              # Nombre (tag Name) de la VPC dedicada. null = VPC por defecto de la cuenta
   vpc_id: null                # ID de VPC dedicada (informativo / auditoría)
   subnet_id: null             # Subred específica (opcional)
   # Cuando es true, los workers se aprovisionan SIN IP pública y su acceso SSH
@@ -27,7 +27,11 @@ red_y_aislamiento:
   # Security Group pre-creado (opcional). Si se define, SkyPilot lo reutiliza para
   # los workers en vez de crear uno nuevo, permitiendo acotar el ingreso al puerto
   # vLLM únicamente al SG/CIDR del Nodo Gateway. Recomendado en producción.
-  security_group_workers: null
+  security_group_workers: "sooniverse-workers"
+  # Security Group pre-creado para el Nodo Gateway. Debe ser el mismo SG que las
+  # reglas de entrada de `security_group_workers` referencian como origen (SG->SG),
+  # y el Gateway debe nacer en `vpc_name` para poder alcanzar la subred privada.
+  security_group_gateway: "sooniverse-gateway"
   tags_obligatorios:
     cliente_id: "acme"
     modo: "byoc"
@@ -82,7 +86,7 @@ workloads:
     tipo_tarea: "llm-texto"     # Tipo de tarea: llm-texto | embeddings
     accelerator: "L4"           # Especificación de GPU (ej. T4, A10g, L4, A100)
     cantidad_gpus: 1            # Número de GPUs por nodo
-    replicas: 2                 # Nodos worker a desplegar para este modelo (balanceados por LiteLLM)
+    replicas: 1                 # Nodos worker a desplegar para este modelo (balanceados por LiteLLM)
     tipo_instancia: "g6.xlarge" # Tipo de instancia en AWS (opcional u override)
     puerto: 8007                # Puerto de la API expuesto por el worker (solo red interna)
     # Nombre público del modelo expuesto por LiteLLM al cliente final

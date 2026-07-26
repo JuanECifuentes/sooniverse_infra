@@ -41,6 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 GATEWAY_MANIFEST = ".sky_generated.gateway.yaml"
 WORKER_MANIFEST_FMT = ".sky_generated.worker-{wl_id}.yaml"
+SKY_GATEWAY_CONFIG = ".sky_config_gateway.yaml"
 SKY_WORKERS_CONFIG = ".sky_config_workers.yaml"
 ENDPOINTS_CACHE = ".sooniverse_endpoints.json"
 
@@ -473,6 +474,25 @@ class TopologyBuilder:
             ).strip(),
         }
 
+    # -- config de cliente SkyPilot para el Nodo Gateway ------------------------
+    def build_sky_gateway_config(self) -> Dict[str, Any]:
+        """
+        Fuerza al Nodo Gateway a nacer en la misma VPC que los workers (con su
+        propio Security Group reservado), para que el túnel SSH bastion y las
+        rutas internas a la subred privada funcionen. Sin esto, SkyPilot puede
+        elegir la VPC por defecto de la cuenta, aislando al Gateway de los
+        workers aunque ambos estén "arriba".
+        """
+        aws_cfg: Dict[str, Any] = {}
+
+        if self.red.get("vpc_name"):
+            aws_cfg["vpc_name"] = self.red["vpc_name"]
+
+        if self.red.get("security_group_gateway"):
+            aws_cfg["security_group_name"] = self.red["security_group_gateway"]
+
+        return {"aws": aws_cfg} if aws_cfg else {}
+
     # -- config de cliente SkyPilot para los workers privados ------------------
     def build_sky_workers_config(self, gateway_ip: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -492,7 +512,11 @@ class TopologyBuilder:
         if self.red.get("workers_en_subred_privada", True):
             aws_cfg["use_internal_ips"] = True
             if gateway_ip:
-                gateway_ssh_key = Path.home() / ".sky" / "generated" / "ssh" / self.gateway_cluster
+                gateway_ssh_key = (
+                    Path.home() / ".sky" / "generated" / "ssh-keys" / f"{self.gateway_cluster}.key"
+                )
+                if gateway_ssh_key.exists():
+                    os.chmod(gateway_ssh_key, 0o600)
                 aws_cfg["ssh_proxy_command"] = (
                     f"ssh -W %h:%p -o StrictHostKeyChecking=no "
                     f"-o UserKnownHostsFile=/dev/null -i {gateway_ssh_key} ubuntu@{gateway_ip}"
@@ -612,7 +636,19 @@ def deploy(config: Dict[str, Any], artefactos: Dict[str, Any], only: str = "all"
     # --- 1. GATEWAY ---------------------------------------------------------
     if only in ("all", "gateway") and artefactos.get("gateway"):
         print("\n--- [1/3] Nodo Gateway (público) ---")
-        _run_sky(["launch", "-y", "-c", builder.gateway_cluster, str(artefactos["gateway"])])
+
+        gw_cfg = builder.build_sky_gateway_config()
+        gateway_env: Dict[str, str] = {}
+        if gw_cfg:
+            gw_cfg_path = REPO_ROOT / SKY_GATEWAY_CONFIG
+            dump_yaml(gw_cfg, gw_cfg_path)
+            gateway_env["SKYPILOT_CONFIG"] = str(gw_cfg_path)
+            print(f"[INFO] SkyPilot usará {gw_cfg_path.name} (misma VPC que los workers)")
+
+        _run_sky(
+            ["launch", "-y", "-c", builder.gateway_cluster, str(artefactos["gateway"])],
+            env=gateway_env,
+        )
 
     if artefactos.get("gateway"):
         gateway_ip = _gateway_public_ip(builder.gateway_cluster)
