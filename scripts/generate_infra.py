@@ -23,14 +23,18 @@ Artefactos generados:
 """
 
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
     import yaml
@@ -436,6 +440,14 @@ class TopologyBuilder:
         self.gateway = config.get("gateway", {})
         self.db = config.get("base_de_datos", {})
         self.workloads = config["workloads"]
+        self._network_outputs = None  # poblado por apply_network_outputs() en modo 'auto'
+
+    def apply_network_outputs(self, outputs: Any) -> None:
+        """Inyecta los IDs/nombres reales creados por AwsNetworkManager (modo
+        'gestion_red: auto'), para que build_sky_gateway_config/
+        build_sky_workers_config referencien la VPC/SGs recién creados en vez
+        de los nombres estáticos del contrato."""
+        self._network_outputs = outputs
 
     # -- naming ---------------------------------------------------------------
     @property
@@ -566,12 +578,15 @@ class TopologyBuilder:
         workers aunque ambos estén "arriba".
         """
         aws_cfg: Dict[str, Any] = {}
+        net = self._network_outputs
 
-        if self.red.get("vpc_name"):
-            aws_cfg["vpc_name"] = self.red["vpc_name"]
+        vpc_name = net.vpc_name if net else self.red.get("vpc_name")
+        sg_gateway = net.sg_gateway_name if net else self.red.get("security_group_gateway")
 
-        if self.red.get("security_group_gateway"):
-            aws_cfg["security_group_name"] = self.red["security_group_gateway"]
+        if vpc_name:
+            aws_cfg["vpc_name"] = vpc_name
+        if sg_gateway:
+            aws_cfg["security_group_name"] = sg_gateway
 
         return {"aws": aws_cfg} if aws_cfg else {}
 
@@ -582,14 +597,17 @@ class TopologyBuilder:
         vivir dentro de la VPC sin IP pública, tunelizando SSH por el Gateway.
         """
         aws_cfg: Dict[str, Any] = {}
+        net = self._network_outputs
 
-        if self.red.get("vpc_name"):
-            aws_cfg["vpc_name"] = self.red["vpc_name"]
+        vpc_name = net.vpc_name if net else self.red.get("vpc_name")
+        if vpc_name:
+            aws_cfg["vpc_name"] = vpc_name
 
-        # Security Group pre-creado por el operador: permite acotar el ingreso al
-        # puerto vLLM al CIDR/SG del Gateway en lugar de 0.0.0.0/0 intra-VPC.
-        if self.red.get("security_group_workers"):
-            aws_cfg["security_group_name"] = self.red["security_group_workers"]
+        # Security Group: en modo 'auto' es el que crea AwsNetworkManager (SG->SG
+        # con el gateway); en modo 'existente' es el pre-creado por el operador.
+        sg_workers = net.sg_workers_name if net else self.red.get("security_group_workers")
+        if sg_workers:
+            aws_cfg["security_group_name"] = sg_workers
 
         if self.red.get("workers_en_subred_privada", True):
             aws_cfg["use_internal_ips"] = True
@@ -638,9 +656,51 @@ def dump_yaml(data: Dict[str, Any], out_path: Path, header: bool = True) -> None
         yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
-def generate_manifests(config: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
+def build_network_spec_from_config(config: Dict[str, Any]) -> "Any":
+    """Traduce `red_y_aislamiento` + `gateway` + `workloads[].puerto` del contrato
+    a un `aws_network.NetworkSpec`. Solo tiene sentido en modo 'gestion_red: auto'."""
+    from aws_network import NetworkSpec  # import perezoso: boto3 solo hace falta aquí
+
+    cliente = config["cliente"]
+    red = config["red_y_aislamiento"]
+    gw = config.get("gateway", {})
+    nat = red.get("nat_gateway") or {}
+    endpoints = red.get("vpc_endpoints") or {}
+    subredes = red.get("subredes") or {}
+    tls = gw.get("tls") or {}
+
+    worker_ports = sorted({wl["puerto"] for wl in config["workloads"]})
+
+    return NetworkSpec(
+        client_id=cliente["id"],
+        environment=cliente["entorno"],
+        region=red["region"],
+        vpc_cidr=red.get("vpc_cidr", "10.0.0.0/16"),
+        az_count=red.get("azs", 1),
+        public_subnet_cidrs=subredes.get("publicas"),
+        private_subnet_cidrs=subredes.get("privadas"),
+        nat_mode=nat.get("modo", "single"),
+        enable_s3_endpoint=bool(endpoints.get("s3", True)),
+        admin_cidrs=[red.get("cidr_admin_ssh", "0.0.0.0/0")],
+        public_cidrs=[red.get("cidr_permitido_gateway", "0.0.0.0/0")],
+        gateway_public_ports=gw.get("puertos_publicos", [80, 4000, 8000, 8080]),
+        worker_ports=worker_ports,
+        expose_direct_ports=bool(gw.get("exponer_puertos_directos", False)),
+        tls_enabled=bool(tls.get("habilitado", False)),
+        nat_timeout_seconds=nat.get("timeout_segundos", 300),
+        extra_tags=red.get("tags_obligatorios") or {},
+    )
+
+
+def config_hash_of(config: Dict[str, Any]) -> str:
+    """sha256 determinista del contrato completo (para detectar cambios entre corridas)."""
+    canonical = json.dumps(config, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def generate_manifests(config: Dict[str, Any], out_dir: Path, builder: Optional["TopologyBuilder"] = None) -> Dict[str, Any]:
     """Escribe todos los manifiestos de la topología y devuelve sus rutas."""
-    builder = TopologyBuilder(config)
+    builder = builder or TopologyBuilder(config)
     artefactos: Dict[str, Any] = {"gateway": None, "workers": {}, "sky_config": None}
 
     if builder.gateway.get("habilitado", True):
@@ -701,23 +761,131 @@ def _gateway_public_ip(cluster: str) -> Optional[str]:
         return None
 
 
-def deploy(config: Dict[str, Any], artefactos: Dict[str, Any], only: str = "all") -> None:
+PHASE_ORDER = ["network", "gateway", "workers", "endpoints", "verify"]
+
+# Compatibilidad con los valores antiguos de --only (antes de la Fase 3).
+_ONLY_LEGACY_ALIASES = {"all": set(PHASE_ORDER), "gateway": {"gateway"}, "workers": {"workers"}}
+
+
+def _phases_for(only: str) -> set:
+    if only in _ONLY_LEGACY_ALIASES:
+        return _ONLY_LEGACY_ALIASES[only]
+    if only in PHASE_ORDER:
+        return {only}
+    raise ValueError(f"--only inválido: {only}")
+
+
+def _open_state_store(config: Dict[str, Any]):
+    """Abre (o recupera) el despliegue activo en PostgreSQL. Si la BD no es
+    alcanzable, lanza ANTES de que se cree nada en AWS (guardia de la Fase 2)."""
+    from infra_state import PostgresInfraStateStore
+
+    cliente = config["cliente"]
+    red = config["red_y_aislamiento"]
+    store = PostgresInfraStateStore()
+    store.ping()  # aborta aquí si PostgreSQL no responde
+    deployment_id = store.open_deployment(
+        client_id=cliente["id"],
+        environment=cliente["entorno"],
+        region=red["region"],
+        config_hash=config_hash_of(config),
+        config_snapshot=config,
+    )
+    return store, deployment_id
+
+
+def deploy(
+    config: Dict[str, Any],
+    artefactos: Dict[str, Any],
+    only: str = "all",
+    out_dir: Optional[Path] = None,
+    config_path: Optional[Path] = None,
+    dry_run: bool = False,
+) -> None:
     """
-    Orden de despliegue (obligatorio por el aislamiento de red):
-      1. Gateway  -> obtiene IP pública, actúa de bastion SSH.
-      2. Workers  -> se lanzan dentro de la VPC sin IP pública, vía el bastion.
-      3. Sync     -> inyecta las IPs privadas en el config.yaml de LiteLLM y recarga.
+    Máquina de fases (ver docs/01_FLUJO_DESPLIEGUE.md):
+      network  -> AwsNetworkManager.provision() (VPC/subredes/NAT/SGs). Se omite
+                  si 'gestion_red: existente'.
+      gateway  -> sky launch del Gateway en la subred pública; captura su IP.
+      workers  -> regenera el bastion con esa IP y lanza los workers en la
+                  subred privada.
+      endpoints-> sync_endpoints.py --apply (descubre IPs, recarga LiteLLM).
+      verify   -> scripts/verify_deployment.py (best-effort, no aborta 'all').
+    Cada fase es reanudable: los `ensure_*` de AwsNetworkManager y el propio
+    `sky launch` son idempotentes, así que repetir una fase ya aplicada es
+    seguro y rápido.
     """
-    builder = TopologyBuilder(config)
+    out_dir = out_dir or REPO_ROOT
+    config_path = config_path or (REPO_ROOT / "config_global.yaml")
+    red = config["red_y_aislamiento"]
+    phases = _phases_for(only)
+
     print("\n" + "=" * 74)
-    print(" DESPLIEGUE MULTI-NODO SOONIVERSE (FASE 1)")
+    print(" DESPLIEGUE SOONIVERSE - MÁQUINA DE FASES (FASE 3)")
     print("=" * 74)
 
+    builder = TopologyBuilder(config)
     gateway_ip: Optional[str] = None
+    state = None
+    deployment_id = None
 
-    # --- 1. GATEWAY ---------------------------------------------------------
-    if only in ("all", "gateway") and artefactos.get("gateway"):
-        print("\n--- [1/3] Nodo Gateway (público) ---")
+    # --- FASE: state (siempre, si gestion_red == auto) ----------------------
+    if red.get("gestion_red", "auto") == "auto":
+        if dry_run:
+            # --dry-run no debe escribir en PostgreSQL: solo lee un despliegue
+            # activo si ya existe, nunca abre uno nuevo.
+            from infra_state import PostgresInfraStateStore
+
+            state = PostgresInfraStateStore()
+            state.ping()
+            existing = state.get_active_deployment(
+                config["cliente"]["id"], config["cliente"]["entorno"], red["region"]
+            )
+            deployment_id = existing["deployment_id"] if existing else None
+            print(f"[ESTADO] (dry-run, solo lectura) deployment_id={deployment_id or '(ninguno todavía)'}")
+        else:
+            t0 = time.monotonic()
+            state, deployment_id = _open_state_store(config)
+            print(f"[ESTADO] deployment_id={deployment_id} ({time.monotonic() - t0:.1f}s)")
+
+    # --- FASE: network --------------------------------------------------------
+    if "network" in phases:
+        print("\n--- [RED] Red AWS (VPC/subredes/NAT/Security Groups) ---")
+        if red.get("gestion_red", "auto") == "auto" and dry_run and not deployment_id:
+            # Sin despliegue previo: no hay nada que leer y, para no escribir en
+            # PostgreSQL durante un dry-run, no se instancia AwsNetworkManager
+            # (su constructor abriría un deployment_id nuevo si no se le pasa uno).
+            print("[RED] --dry-run: no existe un despliegue previo para "
+                  f"{config['cliente']['id']}/{config['cliente']['entorno']}/{red['region']}. "
+                  "Se crearía una VPC, subredes, NAT, route tables y Security Groups nuevos.")
+        elif red.get("gestion_red", "auto") == "auto":
+            from aws_network import AwsNetworkManager
+
+            spec = build_network_spec_from_config(config)
+            mgr = AwsNetworkManager(spec, state=state, deployment_id=deployment_id)
+            if dry_run:
+                print("[RED] --dry-run: no se ejecuta ninguna llamada mutante a AWS.")
+                for item in mgr.plan_destroy():
+                    print(f"       (existente) {item.component} {item.aws_id}")
+            else:
+                t0 = time.monotonic()
+                network_outputs = mgr.provision()
+                print(f"[RED] VPC={network_outputs.vpc_id} ({network_outputs.vpc_name}) "
+                      f"SG-gateway={network_outputs.sg_gateway_id} SG-workers={network_outputs.sg_workers_id} "
+                      f"({time.monotonic() - t0:.1f}s)")
+                builder.apply_network_outputs(network_outputs)
+
+                # El render de manifiestos depende de los IDs reales de red: regenerarlos ahora.
+                artefactos = generate_manifests(config, out_dir, builder=builder)
+        else:
+            print("[SKIP] 'gestion_red: existente' -> se omite AwsNetworkManager (VPC/SGs manuales).")
+
+    # --- FASE: gateway ----------------------------------------------------------
+    if "gateway" in phases and artefactos.get("gateway") and dry_run:
+        print("\n--- [GATEWAY] --dry-run: se lanzaría "
+              f"'sky launch -y -c {builder.gateway_cluster} {artefactos['gateway']}' ---")
+    elif "gateway" in phases and artefactos.get("gateway"):
+        print("\n--- [GATEWAY] Nodo Gateway (público) ---")
 
         gw_cfg = builder.build_sky_gateway_config()
         gateway_env: Dict[str, str] = {}
@@ -727,25 +895,31 @@ def deploy(config: Dict[str, Any], artefactos: Dict[str, Any], only: str = "all"
             gateway_env["SKYPILOT_CONFIG"] = str(gw_cfg_path)
             print(f"[INFO] SkyPilot usará {gw_cfg_path.name} (misma VPC que los workers)")
 
+        t0 = time.monotonic()
         _run_sky(
             ["launch", "-y", "-c", builder.gateway_cluster, str(artefactos["gateway"])],
             env=gateway_env,
         )
+        if state and deployment_id:
+            state.log_event(deployment_id, "gateway", "sky_launch", "ok",
+                             message=builder.gateway_cluster, duration_ms=int((time.monotonic() - t0) * 1000))
 
-    if artefactos.get("gateway"):
+    if artefactos.get("gateway") and not dry_run:
         gateway_ip = _gateway_public_ip(builder.gateway_cluster)
         print(f"[INFO] IP pública del Gateway: {gateway_ip or 'no disponible'}")
 
-    # --- 2. WORKERS ---------------------------------------------------------
-    if only in ("all", "workers"):
-        print("\n--- [2/3] Workers vLLM (subred privada) ---")
+    # --- FASE: workers (regenera el bastion con la IP real del gateway) --------
+    if "workers" in phases and dry_run:
+        clusters = ", ".join(builder.worker_cluster(wl["id"]) for wl in config["workloads"])
+        print(f"\n--- [WORKERS] --dry-run: se lanzarían: {clusters} ---")
+    elif "workers" in phases:
+        print("\n--- [WORKERS] Workers vLLM (subred privada) ---")
 
         sky_cfg = builder.build_sky_workers_config(gateway_ip=gateway_ip)
         worker_env: Dict[str, str] = {}
         if sky_cfg:
             cfg_path = REPO_ROOT / SKY_WORKERS_CONFIG
             dump_yaml(sky_cfg, cfg_path)
-            # SkyPilot lee la config de cliente desde esta variable.
             worker_env["SKYPILOT_CONFIG"] = str(cfg_path)
             print(f"[INFO] SkyPilot usará {cfg_path.name} (use_internal_ips + bastion)")
 
@@ -753,24 +927,56 @@ def deploy(config: Dict[str, Any], artefactos: Dict[str, Any], only: str = "all"
             cluster = builder.worker_cluster(wl["id"])
             manifest = artefactos["workers"][wl["id"]]
             print(f"\n> Workload '{wl['id']}' ({wl.get('replicas', 1)} nodo/s)")
+            t0 = time.monotonic()
             _run_sky(["launch", "-y", "-c", cluster, str(manifest)], env=worker_env)
+            if state and deployment_id:
+                state.log_event(deployment_id, "workers", "sky_launch", "ok",
+                                 message=cluster, duration_ms=int((time.monotonic() - t0) * 1000))
 
-    # --- 3. SINCRONIZACIÓN DE ENDPOINTS ------------------------------------
-    print("\n--- [3/3] Sincronización de endpoints en LiteLLM ---")
-    sync_script = REPO_ROOT / "scripts" / "sync_endpoints.py"
-    cmd = [sys.executable, str(sync_script), "--config", str(REPO_ROOT / "config_global.yaml"), "--apply"]
-    print(f"[EXEC] {' '.join(cmd)}")
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as exc:
-        print(f"[WARNING] La sincronización automática falló (código {exc.returncode}).")
-        print("          Reintenta manualmente: python scripts/sync_endpoints.py --apply")
+    # --- FASE: endpoints --------------------------------------------------------
+    if "endpoints" in phases and dry_run:
+        print("\n--- [ENDPOINTS] --dry-run: se ejecutaría sync_endpoints.py --apply ---")
+    elif "endpoints" in phases:
+        print("\n--- [ENDPOINTS] Sincronización de endpoints en LiteLLM ---")
+        sync_script = REPO_ROOT / "scripts" / "sync_endpoints.py"
+        cmd = [sys.executable, str(sync_script), "--config", str(config_path), "--apply"]
+        print(f"[EXEC] {' '.join(cmd)}")
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as exc:
+            print(f"[WARNING] La sincronización automática falló (código {exc.returncode}).")
+            print("          Reintenta manualmente: python scripts/sync_endpoints.py --apply")
+
+    # --- FASE: verify (best-effort; no aborta el resto del pipeline) -----------
+    if "verify" in phases and dry_run:
+        print("\n--- [VERIFY] --dry-run: se ejecutaría verify_deployment.py ---")
+    elif "verify" in phases:
+        print("\n--- [VERIFY] Verificación de despliegue ---")
+        verify_script = REPO_ROOT / "scripts" / "verify_deployment.py"
+        if verify_script.exists():
+            result = subprocess.run(
+                [sys.executable, str(verify_script), "--config", str(config_path)]
+            )
+            if result.returncode != 0:
+                print(f"[WARNING] verify_deployment.py reportó fallos (código {result.returncode}).")
+        else:
+            print("[SKIP] scripts/verify_deployment.py no existe todavía.")
+
+    if state and deployment_id and not dry_run:
+        try:
+            resources = state.list_resources(deployment_id)
+            healthy = all(r.get("state") in ("active", "creating") for r in resources)
+            state.set_deployment_status(deployment_id, "active" if healthy else "degraded")
+        except Exception as exc:  # noqa: BLE001 - no debe tumbar el reporte final por un fallo de estado
+            print(f"[WARNING] No se pudo actualizar el estado final del despliegue: {exc}")
 
     if gateway_ip:
         print("\n" + "=" * 74)
         print(f" LiteLLM      : http://{gateway_ip}:4000")
         print(f" Open WebUI   : http://{gateway_ip}:8080")
         print(f" Panel Django : http://{gateway_ip}:8000/metrics/")
+        if deployment_id:
+            print(f" deployment_id: {deployment_id}")
         print("=" * 74)
 
 
@@ -787,8 +993,14 @@ def main() -> int:
                         help="Directorio donde se escriben los manifiestos generados")
     parser.add_argument("--run", action="store_true",
                         help="Aprovisiona la topología completa en AWS tras generar los manifiestos")
-    parser.add_argument("--only", choices=["all", "gateway", "workers"], default="all",
-                        help="Limita el aprovisionamiento a una parte de la topología")
+    parser.add_argument(
+        "--only", choices=["all", "network", "gateway", "workers", "endpoints", "verify"], default="all",
+        help="Limita el aprovisionamiento a una fase de la topología",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Con --run: solo genera manifiestos e imprime lo que se haría, sin llamadas mutantes a AWS/SkyPilot",
+    )
     parser.add_argument("--init-db", action="store_true",
                         help="Ejecuta scripts/db_setup.py localmente (ignora el flag AUTO_INIT_DB)")
     parser.add_argument("--no-auto-init-db", action="store_true",
@@ -815,11 +1027,17 @@ def main() -> int:
             subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "db_setup.py"), "--refresh"], check=True)
 
         if args.run:
-            deploy(config, artefactos, only=args.only)
+            deploy(
+                config, artefactos, only=args.only,
+                out_dir=Path(args.out_dir), config_path=Path(args.config),
+                dry_run=args.dry_run,
+            )
         else:
             print("\n[INFO] Para aprovisionar la topología en AWS:")
             print("       python scripts/generate_infra.py --run")
-            print("       python scripts/generate_infra.py --run --only gateway   # solo el gateway")
+            print("       python scripts/generate_infra.py --run --dry-run          # plan, sin tocar AWS")
+            print("       python scripts/generate_infra.py --run --only network     # solo la capa de red")
+            print("       python scripts/generate_infra.py --run --only gateway     # solo el gateway")
 
     except ConfigValidationError as e:
         print(f"\n[ERROR DE CONFIGURACIÓN] {e}", file=sys.stderr)

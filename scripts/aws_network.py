@@ -297,7 +297,7 @@ class AwsNetworkManager:
         existing = self._find_by_component(self.ec2.describe_vpcs, "VpcId", "vpc")
         if existing:
             vpc_id = existing["VpcId"]
-            logger.info("[RED:VPC] Reutilizando VPC existente %s", vpc_id)
+            logger.info("[SKIP][RED:VPC] Reutilizando VPC existente %s", vpc_id)
             self._record("vpc", "vpc", vpc_id)
             return vpc_id
 
@@ -378,6 +378,7 @@ class AwsNetworkManager:
         if existing:
             igw_id = existing["InternetGatewayId"]
             self._record("igw", "igw", igw_id, parent_aws_id=vpc_id)
+            logger.info("[SKIP][RED] IGW ya existe: %s", igw_id)
             return igw_id
 
         name = self._name("igw")
@@ -403,6 +404,7 @@ class AwsNetworkManager:
             eip_ids = [a["AllocationId"] for n in existing for a in n.get("NatGatewayAddresses", []) if a.get("AllocationId")]
             for nat_id in nat_ids:
                 self._record("nat", "nat", nat_id)
+            logger.info("[SKIP][RED:NAT] NAT Gateway(s) ya existen: %s", nat_ids)
             return nat_ids, eip_ids
 
         subnets_for_nat = public_subnet_ids if self.spec.nat_mode == "per-az" else public_subnet_ids[:1]
@@ -567,6 +569,7 @@ class AwsNetworkManager:
         if existing:
             sg_id = existing["GroupId"]
             self._record(component, component, sg_id, parent_aws_id=vpc_id, attributes={"name": name})
+            logger.info("[SKIP][RED] Security Group %s ya existe: %s", component, sg_id)
             return sg_id
 
         resp = self.ec2.create_security_group(
