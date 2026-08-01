@@ -86,13 +86,14 @@ gateway:
 base_de_datos:
   # Interruptor pedido en el contrato: determina si `scripts/db_setup.py` corre
   # automáticamente durante el despliegue de la infraestructura.
-  #   true  -> el Gateway ingesta database/init_schema.sql al arrancar
+  #   true  -> el Gateway ingesta database/*.sql (orden lexicográfico) al arrancar
   #   false -> se omite; el operador debe ejecutar `python scripts/db_setup.py` a mano
   AUTO_INIT_DB: true
   # Ejecuta también el ETL de LiteLLM + recálculo de rollups tras aplicar el esquema
   auto_refresh_metrics: true
-  # Ruta (relativa al repo) del script SQL a ingestar
-  schema_file: "database/init_schema.sql"
+  # Directorio (relativo al repo) con los .sql a ingestar en orden lexicográfico.
+  # Para forzar un único archivo (comportamiento legado), usa `db_setup.py --sql <archivo>`.
+  schema_dir: "database"
 
 # 5. Perfil de Cargas de Trabajo (Multi-modelo, Multi-nodo)
 workloads:

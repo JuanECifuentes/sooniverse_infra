@@ -236,9 +236,12 @@ class ConfigValidator:
         if not isinstance(db["AUTO_INIT_DB"], bool):
             raise ConfigValidationError("'base_de_datos.AUTO_INIT_DB' debe ser booleano (true | false).")
 
-        schema_file = db.get("schema_file", "database/init_schema.sql")
-        if not (REPO_ROOT / schema_file).exists():
-            raise ConfigValidationError(f"'base_de_datos.schema_file' no existe en el repo: {schema_file}")
+        schema_dir = db.get("schema_dir", "database")
+        schema_path = REPO_ROOT / schema_dir
+        if not schema_path.is_dir() or not any(schema_path.glob("*.sql")):
+            raise ConfigValidationError(
+                f"'base_de_datos.schema_dir' no existe o no contiene .sql: {schema_dir}"
+            )
 
     @classmethod
     def _validate_workloads(cls, config: Dict[str, Any]) -> None:
@@ -387,10 +390,10 @@ echo "===> [GATEWAY] Cliente ${{CLIENTE_ID}} (${{ENTORNO}})"
 # 1. Inicialización opcional de la base de datos (flag AUTO_INIT_DB del contrato)
 # ---------------------------------------------------------------------------
 if [ "${{AUTO_INIT_DB}}" = "true" ]; then
-    echo "===> AUTO_INIT_DB=true -> ingestando {schema_file}"
+    echo "===> AUTO_INIT_DB=true -> ingestando {schema_dir}/*.sql (orden lexicográfico)"
     REFRESH_FLAG=""
     if [ "${{AUTO_REFRESH_METRICS}}" = "true" ]; then REFRESH_FLAG="--refresh"; fi
-    python3 scripts/db_setup.py --env-file .env --sql {schema_file} ${{REFRESH_FLAG}}
+    python3 scripts/db_setup.py --env-file .env --sql-dir {schema_dir} ${{REFRESH_FLAG}}
 else
     echo "===> AUTO_INIT_DB=false -> se omite la inicialización automática de la BD."
     echo "     Ejecuta manualmente: python scripts/db_setup.py"
@@ -491,7 +494,7 @@ class TopologyBuilder:
             f"{REMOTE_ROOT}/.env": "./.env",
         }
 
-        schema_file = self.db.get("schema_file", "database/init_schema.sql")
+        schema_dir = self.db.get("schema_dir", "database")
 
         return {
             "name": self.gateway_cluster,
@@ -500,7 +503,7 @@ class TopologyBuilder:
             "file_mounts": file_mounts,
             "envs": envs,
             "setup": GATEWAY_SETUP_SCRIPT.format(remote_root=REMOTE_ROOT).strip(),
-            "run": GATEWAY_RUN_SCRIPT.format(remote_root=REMOTE_ROOT, schema_file=schema_file).strip(),
+            "run": GATEWAY_RUN_SCRIPT.format(remote_root=REMOTE_ROOT, schema_dir=schema_dir).strip(),
         }
 
     # -- workers --------------------------------------------------------------

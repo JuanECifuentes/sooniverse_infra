@@ -3,27 +3,29 @@
 ==============================================================================
 Sooniverse Infra - PostgreSQL Schema Bootstrapper
 ==============================================================================
-Lee las credenciales de PostgreSQL desde `.env` e ingesta `database/init_schema.sql`
-en la base de datos existente.
-
-El script es idempotente: puede ejecutarse en cada despliegue sin destruir datos.
+Lee las credenciales de PostgreSQL desde `.env` e ingesta, en orden lexicográfico,
+todos los archivos `.sql` de `database/` (001_init_schema.sql, 002_infra_state.sql,
+...) en la base de datos existente. Cada archivo es idempotente por diseño
+(`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, etc.), así que aplicar
+el directorio completo en cada despliegue es seguro y no destruye datos.
 
 Uso:
-    python scripts/db_setup.py                 # aplica el esquema
-    python scripts/db_setup.py --check         # solo verifica conexión y estado
-    python scripts/db_setup.py --refresh       # aplica + corre ETL y rollups
-    python scripts/db_setup.py --env-file .env.prod --sql database/init_schema.sql
+    python scripts/db_setup.py                       # aplica database/*.sql en orden
+    python scripts/db_setup.py --check               # solo verifica conexión y estado
+    python scripts/db_setup.py --refresh             # aplica + corre ETL y rollups
+    python scripts/db_setup.py --sql-dir database    # equivalente al default, explícito
+    python scripts/db_setup.py --sql database/001_init_schema.sql   # un solo archivo (legado)
 """
 
 import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV = REPO_ROOT / ".env"
-DEFAULT_SQL = REPO_ROOT / "database" / "init_schema.sql"
+DEFAULT_SQL_DIR = REPO_ROOT / "database"
 
 REQUIRED_KEYS = ("DB_NAME", "DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT")
 
@@ -34,6 +36,9 @@ EXPECTED_TABLES = (
     "token_usage_rollup",
     "api_key_audit",
     "worker_node",
+    "infra_deployment",
+    "infra_resource",
+    "infra_event",
 )
 
 
@@ -127,6 +132,28 @@ def apply_schema(conn, sql_path: Path) -> None:
     print(f"[OK] Esquema aplicado desde {sql_path.name}")
 
 
+def apply_schema_dir(conn, sql_dir: Path) -> List[str]:
+    """Aplica, en orden lexicográfico, todos los `.sql` de `sql_dir` (cada uno en
+    su propia transacción). Devuelve la lista de archivos aplicados con éxito.
+
+    Los archivos son idempotentes (ver docstring del módulo), así que reaplicar
+    el directorio completo en cada despliegue -incluyendo archivos ya aplicados
+    en corridas previas- es intencional y seguro.
+    """
+    if not sql_dir.is_dir():
+        raise DbSetupError(f"No se encontró el directorio de esquema: {sql_dir}")
+
+    sql_files = sorted(sql_dir.glob("*.sql"))
+    if not sql_files:
+        raise DbSetupError(f"El directorio {sql_dir} no contiene archivos .sql")
+
+    applied = []
+    for sql_path in sql_files:
+        apply_schema(conn, sql_path)
+        applied.append(sql_path.name)
+    return applied
+
+
 def verify_schema(conn) -> bool:
     """Confirma que el esquema `sooniverse` y sus tablas base existen."""
     with conn.cursor() as cur:
@@ -173,14 +200,20 @@ def refresh_metrics(conn, since_hours: int = 48, since_days: int = 90) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Inicializador del esquema PostgreSQL de Sooniverse.")
     parser.add_argument("--env-file", default=str(DEFAULT_ENV), help="Ruta al archivo .env")
-    parser.add_argument("--sql", default=str(DEFAULT_SQL), help="Ruta al archivo SQL a ingestar")
+    parser.add_argument(
+        "--sql", default=None,
+        help="Ruta a UN solo archivo SQL a ingestar (comportamiento legado; ignora --sql-dir).",
+    )
+    parser.add_argument(
+        "--sql-dir", default=str(DEFAULT_SQL_DIR),
+        help="Directorio con .sql a aplicar en orden lexicográfico (por defecto: database/).",
+    )
     parser.add_argument("--check", action="store_true", help="Solo verificar conexión y estado del esquema")
     parser.add_argument("--refresh", action="store_true", help="Tras aplicar, corre ETL de LiteLLM y rollups")
     parser.add_argument("--quiet", action="store_true", help="Reduce la salida a errores")
     args = parser.parse_args()
 
     env_path = Path(args.env_file)
-    sql_path = Path(args.sql)
 
     try:
         config = resolve_db_config(env_path)
@@ -194,7 +227,13 @@ def main() -> int:
                 healthy = verify_schema(conn)
                 return 0 if healthy else 2
 
-            apply_schema(conn, sql_path)
+            if args.sql:
+                apply_schema(conn, Path(args.sql))
+            else:
+                applied = apply_schema_dir(conn, Path(args.sql_dir))
+                if not args.quiet:
+                    print(f"[OK] {len(applied)} archivo(s) aplicado(s): {', '.join(applied)}")
+
             verify_schema(conn)
 
             if args.refresh:
