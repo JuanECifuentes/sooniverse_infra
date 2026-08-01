@@ -14,9 +14,24 @@ cliente:
 red_y_aislamiento:
   region: "us-east-1"         # Región por defecto de la nube
   image_id: "ami-0d001f8052688dc45"  # AMI personalizada para los workers GPU (opcional)
-  vpc_name: "sooniverse-vpc"              # Nombre (tag Name) de la VPC dedicada. null = VPC por defecto de la cuenta
-  vpc_id: null                # ID de VPC dedicada (informativo / auditoría)
-  subnet_id: null             # Subred específica (opcional)
+  # gestion_red: auto -> AwsNetworkManager crea y destruye la VPC/subredes/NAT/SGs.
+  #              existente -> comportamiento legado: la VPC/SGs ya existen y se
+  #              referencian por nombre (compatibilidad hacia atrás).
+  gestion_red: "auto"
+  vpc_name: null               # auto: se autogenera como sooniverse-<cliente>-<entorno>-vpc
+  vpc_id: null                 # informativo/auditoría; lo rellena AwsNetworkManager tras provision()
+  subnet_id: null              # Subred específica (opcional, solo modo 'existente')
+  vpc_cidr: "10.0.0.0/16"
+  azs: 1                        # nº de Availability Zones; >1 solo si necesitas HA real
+  subredes:
+    publicas: null              # null = cálculo automático determinista a partir de vpc_cidr
+    privadas: null
+  nat_gateway:
+    modo: "single"               # single | per-az | none
+    timeout_segundos: 300
+  vpc_endpoints:
+    s3: true                    # gateway endpoint, gratis
+    ecr: false                  # interface endpoints, tienen coste
   # Cuando es true, los workers se aprovisionan SIN IP pública y su acceso SSH
   # se tuneliza a través del Nodo Gateway (bastion). Requiere NAT Gateway o
   # VPC Endpoints en la subred privada para que los workers alcancen internet.
@@ -24,14 +39,11 @@ red_y_aislamiento:
   # CIDR autorizado a alcanzar los puertos públicos del Gateway.
   # "0.0.0.0/0" expone a internet; restringir en producción real.
   cidr_permitido_gateway: "0.0.0.0/0"
-  # Security Group pre-creado (opcional). Si se define, SkyPilot lo reutiliza para
-  # los workers en vez de crear uno nuevo, permitiendo acotar el ingreso al puerto
-  # vLLM únicamente al SG/CIDR del Nodo Gateway. Recomendado en producción.
-  security_group_workers: "sooniverse-workers"
-  # Security Group pre-creado para el Nodo Gateway. Debe ser el mismo SG que las
-  # reglas de entrada de `security_group_workers` referencian como origen (SG->SG),
-  # y el Gateway debe nacer en `vpc_name` para poder alcanzar la subred privada.
-  security_group_gateway: "sooniverse-gateway"
+  cidr_admin_ssh: "0.0.0.0/0"   # CIDR autorizado a SSH (puerto 22) al Gateway. Restringir en producción.
+  # En modo 'auto' estos dos quedan en null: los crea y nombra AwsNetworkManager.
+  # En modo 'existente' deben apuntar a Security Groups ya creados a mano.
+  security_group_workers: null
+  security_group_gateway: null
   tags_obligatorios:
     cliente_id: "acme"
     modo: "byoc"
@@ -43,6 +55,10 @@ gateway:
   habilitado: true
   tipo_instancia: "t3.large"  # Instancia CPU-only: no requiere GPU
   disk_size: 100              # GB de disco para imágenes Docker y volúmenes
+  # false (recomendado) -> el SG del gateway solo abre 80/443; litellm/open-webui/
+  # metrics quedan detrás de nginx. true -> además abre 4000/8000/8080 al CIDR
+  # público (usar solo en dev/depuración).
+  exponer_puertos_directos: false
   puertos_publicos:
     - 80                      # Open WebUI (reverse proxy)
     - 4000                    # LiteLLM Proxy (API OpenAI-compatible)

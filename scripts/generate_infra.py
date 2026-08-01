@@ -23,6 +23,7 @@ Artefactos generados:
 """
 
 import argparse
+import ipaddress
 import json
 import os
 import shutil
@@ -68,6 +69,8 @@ class ConfigValidator:
         "usage-based-routing",
         "usage-based-routing-v2",
     }
+    ALLOWED_GESTION_RED = {"auto", "existente"}
+    ALLOWED_NAT_MODOS = {"single", "per-az", "none"}
 
     @classmethod
     def validate(cls, config: Dict[str, Any]) -> None:
@@ -117,13 +120,89 @@ class ConfigValidator:
         if not isinstance(privada, bool):
             raise ConfigValidationError("'red_y_aislamiento.workers_en_subred_privada' debe ser booleano.")
 
-        # Aislamiento real exige VPC dedicada: la VPC por defecto no tiene subred privada.
-        if privada and not red.get("vpc_name"):
-            print(
-                "[WARNING] 'workers_en_subred_privada: true' sin 'vpc_name'. SkyPilot usará la VPC por "
-                "defecto y sus subredes; verifica que exista una subred sin ruta directa a Internet "
-                "Gateway y con NAT, o los workers no podrán descargar el modelo."
+        gestion_red = red.get("gestion_red", "auto")
+        if gestion_red not in cls.ALLOWED_GESTION_RED:
+            raise ConfigValidationError(
+                f"'red_y_aislamiento.gestion_red' inválido: '{gestion_red}'. Permitidos: {cls.ALLOWED_GESTION_RED}"
             )
+
+        if gestion_red == "existente":
+            # Modo legado: la VPC/SGs ya existen y se referencian por nombre.
+            if privada and not red.get("vpc_name"):
+                print(
+                    "[WARNING] 'workers_en_subred_privada: true' sin 'vpc_name'. SkyPilot usará la VPC por "
+                    "defecto y sus subredes; verifica que exista una subred sin ruta directa a Internet "
+                    "Gateway y con NAT, o los workers no podrán descargar el modelo."
+                )
+            return
+
+        # gestion_red == "auto": AwsNetworkManager crea la VPC; validar el resto del contrato.
+        cls._validate_red_auto(red)
+
+    @classmethod
+    def _validate_red_auto(cls, red: Dict[str, Any]) -> None:
+        vpc_cidr_raw = red.get("vpc_cidr")
+        if not vpc_cidr_raw:
+            raise ConfigValidationError("Falta 'red_y_aislamiento.vpc_cidr' (requerido en modo 'auto').")
+        try:
+            vpc_net = ipaddress.ip_network(vpc_cidr_raw, strict=True)
+        except ValueError as exc:
+            raise ConfigValidationError(f"'red_y_aislamiento.vpc_cidr' inválido: {exc}") from exc
+
+        azs = red.get("azs", 1)
+        if not isinstance(azs, int) or azs < 1:
+            raise ConfigValidationError("'red_y_aislamiento.azs' debe ser un entero >= 1.")
+
+        nat = red.get("nat_gateway") or {}
+        if not isinstance(nat, dict):
+            raise ConfigValidationError("'red_y_aislamiento.nat_gateway' debe ser un mapa.")
+        nat_modo = nat.get("modo", "single")
+        if nat_modo not in cls.ALLOWED_NAT_MODOS:
+            raise ConfigValidationError(
+                f"'red_y_aislamiento.nat_gateway.modo' inválido: '{nat_modo}'. Permitidos: {cls.ALLOWED_NAT_MODOS}"
+            )
+
+        privada = red.get("workers_en_subred_privada", True)
+        endpoints = red.get("vpc_endpoints") or {}
+        if privada and nat_modo == "none" and not endpoints.get("s3"):
+            raise ConfigValidationError(
+                "'workers_en_subred_privada: true' con 'nat_gateway.modo: none' requiere al menos "
+                "'vpc_endpoints.s3: true'; de lo contrario los workers no tendrán salida a internet "
+                "para descargar el modelo ni acceder a otros servicios AWS."
+            )
+
+        # Validar CIDRs explícitos de subredes (si el operador los fija a mano en vez de dejar
+        # el cálculo automático determinista).
+        subredes = red.get("subredes") or {}
+        for clave in ("publicas", "privadas"):
+            cidrs = subredes.get(clave)
+            if cidrs is None:
+                continue
+            if not isinstance(cidrs, list) or not cidrs:
+                raise ConfigValidationError(f"'red_y_aislamiento.subredes.{clave}' debe ser una lista de CIDR.")
+            for cidr in cidrs:
+                try:
+                    subnet = ipaddress.ip_network(cidr, strict=True)
+                except ValueError as exc:
+                    raise ConfigValidationError(
+                        f"'red_y_aislamiento.subredes.{clave}' contiene un CIDR inválido '{cidr}': {exc}"
+                    ) from exc
+                if not subnet.subnet_of(vpc_net):
+                    raise ConfigValidationError(
+                        f"'red_y_aislamiento.subredes.{clave}': el CIDR '{cidr}' no está contenido en "
+                        f"'vpc_cidr' ({vpc_cidr_raw})."
+                    )
+
+        all_subnet_cidrs = list(subredes.get("publicas") or []) + list(subredes.get("privadas") or [])
+        seen_networks = []
+        for cidr in all_subnet_cidrs:
+            net = ipaddress.ip_network(cidr, strict=True)
+            for other in seen_networks:
+                if net.overlaps(other):
+                    raise ConfigValidationError(
+                        f"'red_y_aislamiento.subredes': los CIDR '{cidr}' y '{other}' se solapan."
+                    )
+            seen_networks.append(net)
 
     @classmethod
     def _validate_gateway(cls, config: Dict[str, Any]) -> None:
