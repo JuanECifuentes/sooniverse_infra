@@ -618,8 +618,8 @@ class TopologyBuilder:
                 if gateway_ssh_key.exists():
                     os.chmod(gateway_ssh_key, 0o600)
                 aws_cfg["ssh_proxy_command"] = (
-                    f"ssh -W %h:%p -o StrictHostKeyChecking=no "
-                    f"-o UserKnownHostsFile=/dev/null -i {gateway_ssh_key} ubuntu@{gateway_ip}"
+                    f"ssh -W %h:%p -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                    f"-o ConnectTimeout=10 -i {gateway_ssh_key} ubuntu@{gateway_ip}"
                 )
 
         return {"aws": aws_cfg} if aws_cfg else {}

@@ -85,6 +85,7 @@ sky_*.yaml
 .sky_config_workers.yaml
 # Pool de endpoints privados descubierto por scripts/sync_endpoints.py
 .sooniverse_endpoints.json
+.sooniverse_endpoints.healthy.json
 # config.yaml de LiteLLM: contiene IPs privadas de la VPC del cliente
 docker_images/gateway/litellm_config.yaml
 # Espejo local de estado (PostgresInfraStateStore) y mirrors de prueba
