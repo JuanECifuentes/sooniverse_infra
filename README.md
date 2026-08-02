@@ -7,52 +7,66 @@ balanceo de carga, aislamiento de red y contabilidad de tokens por API Key.
 Todo se deriva de un **contrato centralizado** (`config_global.yaml`) que un generador
 en Python traduce a manifiestos de **SkyPilot** y stacks de **Docker Compose**.
 
-> **Estado actual: Fase 1 completa** — Gateway (LiteLLM + PostgreSQL + Open WebUI +
-> panel Django de métricas) y workers vLLM multi-nodo dentro de una VPC.
+> **Estado actual: Fases 1-8 completas** — Gateway (LiteLLM + PostgreSQL + Open WebUI +
+> panel Django de métricas), workers vLLM multi-nodo, y la **capa de red completa
+> (VPC/subredes/NAT/Security Groups) creada y destruida por este mismo generador vía
+> boto3** (`gestion_red: auto`), con estado persistente en PostgreSQL, destrucción
+> segura, multi-cliente y nginx como única puerta de entrada. Documentación completa
+> en [`docs/`](docs/00_ARQUITECTURA.md).
 
 ---
 
-## 1. Arquitectura de la Fase 1
+## 1. Arquitectura
+
+`gestion_red: auto` (recomendado, default) crea toda la red desde cero con
+`scripts/aws_network.py::AwsNetworkManager`; `gestion_red: existente` conserva el
+modo legado (VPC/SGs creados a mano, ver `Manual_VPC_SecurityGroup.md` como anexo
+histórico). Ver `docs/00_ARQUITECTURA.md` para el detalle completo y las decisiones
+de diseño.
 
 ### 1.1 Topología de red
 
 ```
-                         Internet
-                            │
-              80 · 4000 · 8000 · 8080
-                            │
-┌───────────────────────────┼─────────────────────── VPC ──────────────────────────┐
-│                           ▼                                                       │
-│  SUBRED PÚBLICA                          SUBRED PRIVADA                           │
-│  ┌──────────────────────────────┐        ┌──────────────────────────────────────┐ │
-│  │  NODO GATEWAY  (1 · t3.large)│        │  WORKERS vLLM  (N · GPU)             │ │
-│  │  ── única IP pública ──      │        │  ── sin IP pública ──                │ │
-│  │                              │        │                                      │ │
-│  │  nginx        :80            │        │  worker-0   10.0.x.a:8007            │ │
-│  │  LiteLLM      :4000  ────────┼───────▶│  worker-1   10.0.x.b:8007            │ │
-│  │  Open WebUI   :8080          │  HTTP  │  worker-N   10.0.x.n:8007            │ │
-│  │  Django       :8000          │ interno│                                      │ │
-│  │  Redis        (interno)      │        │  vLLM + Qwen3.5 AWQ 4bit             │ │
-│  │                              │◀───────┼── SSH tunelizado (bastion)           │ │
-│  └──────────┬───────────────────┘        └──────────────────────────────────────┘ │
-└─────────────┼─────────────────────────────────────────────────────────────────────┘
-              │
-              ▼
-      PostgreSQL (RDS o externa)
+                                   Internet
+                                       │
+                              ┌────────┴────────┐
+                              │ Internet Gateway │
+                              └────────┬────────┘
+┌──────────────────────────────────────┼──────────────────────── VPC ───────────────┐
+│                                       ▼                                            │
+│  SUBRED PÚBLICA                                    SUBRED PRIVADA                  │
+│  ┌───────────────────────────────┐        ┌──────────────────────────────────────┐ │
+│  │  NODO GATEWAY (1 · t3.large)  │        │  WORKERS vLLM (N · GPU)              │ │
+│  │  ── única IP pública ──       │        │  ── SIN IP pública ──                │ │
+│  │                                │        │                                      │ │
+│  │  nginx   :80 (+443 si TLS)    │        │  worker-0   10.0.x.a:8007            │ │
+│  │   ├─ /        → Open WebUI    │        │  worker-1   10.0.x.b:8007            │ │
+│  │   ├─ /v1/     → LiteLLM ──────┼───────▶│  worker-N   10.0.x.n:8007            │ │
+│  │   ├─ /panel/  → Django        │  SG->SG│                                      │ │
+│  │   └─ /healthz → 200 fijo      │        │  vLLM + modelo(s) del contrato       │ │
+│  │  (4000/8080/8000 NO publicados│◀───────┼── SSH tunelizado (bastion)           │ │
+│  │   al host por defecto)        │        └──────────────┬───────────────────────┘ │
+│  └──────────┬─────────────────────┘                       │ salida a Internet      │
+└─────────────┼──────────────────────────────────────────────┼────────────────────────┘
+              │                                        ┌──────┴──────┐
+              ▼                                        │ NAT Gateway  │
+      PostgreSQL (RDS o externa)                        └─────────────┘
       ├── public.LiteLLM_*        → Spend/Usage nativo de LiteLLM
-      └── sooniverse.*            → API Keys, métricas agregadas, auditoría
+      └── sooniverse.*            → API Keys, métricas, ESTADO DE INFRAESTRUCTURA
+                                     (infra_deployment / infra_resource / infra_event)
 ```
 
 **Reglas de aislamiento:**
 
 | Componente | IP pública | Puertos expuestos | Acceso SSH |
 |---|---|---|---|
-| Nodo Gateway | ✅ Sí | 80, 4000, 8000, 8080 | Directo |
-| Workers vLLM | ❌ No (`use_internal_ips: true`) | 8007 solo intra-VPC | A través del Gateway (bastion) |
+| Nodo Gateway | ✅ Sí | 80 (+443 si TLS); 4000/8080/8000 solo si `exponer_puertos_directos: true` | Directo |
+| Workers vLLM | ❌ No (`use_internal_ips: true`) | 8007 solo intra-VPC, solo desde el SG del gateway (SG→SG) | A través del Gateway (bastion) |
 
 Los workers solo alcanzan Internet vía **NAT Gateway** (necesario para descargar
-pesos desde Hugging Face). Sin NAT, usa una AMI que ya contenga el modelo o
-precalienta el volumen `hf_cache`.
+pesos desde Hugging Face; `nat_gateway.modo: none` solo es válido con
+`vpc_endpoints.s3: true`, y aun así limita la salida a S3). Ver `docs/02_RED_AWS.md`
+para el detalle de cada recurso y su coste.
 
 ### 1.2 Flujo de una petición
 
@@ -129,22 +143,30 @@ de respaldo si la API de Python de SkyPilot no está disponible.
 ```
 sooniverse_infra/
 ├── config_global.yaml              ← CONTRATO ÚNICO (source of truth)
+├── clients/_ejemplo/                Plantilla para dar de alta un cliente nuevo
 ├── .env                            ← credenciales (gitignored)
 ├── .env.example                    ← plantilla documentada
 │
 ├── scripts/
-│   ├── generate_infra.py           Genera manifiestos + orquesta el despliegue
-│   ├── db_setup.py                 Ingesta database/init_schema.sql en PostgreSQL
+│   ├── generate_infra.py           Valida el contrato, genera manifiestos, orquesta --run
+│   ├── aws_network.py              VPC/subredes/NAT/IGW/route tables/SGs vía boto3
+│   ├── infra_state.py              Estado persistente (PostgresInfraStateStore)
+│   ├── destroy_infra.py            Destrucción en orden inverso + --scan-orphans
+│   ├── verify_deployment.py        11 comprobaciones post-despliegue
+│   ├── list_deployments.py         Inventario de todos los clientes/entornos
+│   ├── render_gateway_stack.py     nginx/default.conf + docker-compose.yml generados
+│   ├── db_setup.py                 Ingesta database/*.sql (orden lexicográfico) en PostgreSQL
 │   ├── render_litellm_config.py    IPs de workers → config.yaml de LiteLLM
 │   └── sync_endpoints.py           Descubre IPs privadas y recarga el balanceador
 │
 ├── database/
-│   └── init_schema.sql             Esquema `sooniverse` (idempotente)
+│   ├── 001_init_schema.sql         Esquema `sooniverse`: API Keys, métricas, auditoría
+│   └── 002_infra_state.sql         infra_deployment / infra_resource / infra_event
 │
 ├── docker_images/
-│   ├── gateway/                    Stack del Nodo Gateway
+│   ├── gateway/                    Stack del Nodo Gateway (GENERADO por render_gateway_stack.py)
 │   │   ├── docker-compose.yml      litellm · open-webui · metrics · redis · nginx · [postgres]
-│   │   ├── nginx/default.conf      Reverse proxy del puerto 80
+│   │   ├── nginx/default.conf      nginx: única puerta de entrada pública
 │   │   └── litellm_config.yaml     GENERADO (gitignored)
 │   └── qwen3.5/                    Stack del Worker vLLM (GPU)
 │
@@ -156,6 +178,10 @@ sooniverse_infra/
 │       ├── theme-sooniverse.css    ← SOLO identidad de marca (intercambiable)
 │       └── layout.css              ← SOLO maquetación
 │
+├── docs/                           Documentación completa (arquitectura, flujo,
+│                                    red AWS, estado/BD, destrucción, multi-cliente,
+│                                    runbook, referencia CLI, notas para agentes IA)
+├── tests/                          pytest: moto (sin AWS real) + PostgreSQL real (skip si no hay)
 ├── README.md                       Este archivo
 └── MANUAL_DESPLIEGUE.md            Guía operativa paso a paso
 ```
@@ -172,18 +198,27 @@ cliente:
 
 red_y_aislamiento:
   region: "us-east-1"
+  aws_profile: null                 # perfil de ~/.aws/credentials por cliente (opcional)
   image_id: "ami-0d001f8052688dc45" # AMI de los workers GPU
-  vpc_name: null                    # tag Name de la VPC dedicada (null = VPC por defecto)
+  gestion_red: "auto"                # auto (crea/destruye la VPC) | existente (legado, manual)
+  vpc_cidr: "10.0.0.0/16"
+  azs: 1
+  nat_gateway: {modo: "single", timeout_segundos: 300}   # single | per-az | none
+  vpc_endpoints: {s3: true, ecr: false}
   workers_en_subred_privada: true   # true = sin IP pública + SSH vía bastion
   cidr_permitido_gateway: "0.0.0.0/0"
-  security_group_workers: null      # SG pre-creado para acotar el ingreso al 8007
+  cidr_admin_ssh: "0.0.0.0/0"        # restringir en producción real
+  security_group_workers: null      # null en modo 'auto': lo crea AwsNetworkManager
+  security_group_gateway: null
   tags_obligatorios: {...}          # AWS Resource Tags
 
 gateway:
   habilitado: true
   tipo_instancia: "t3.large"        # CPU-only
-  puertos_publicos: [80, 4000, 8080, 8000]
+  exponer_puertos_directos: false   # false (recomendado): nginx es la única puerta pública
+  puertos_publicos: [4000, 8080, 8000]   # solo aplican si exponer_puertos_directos: true
   load_balancing_strategy: "latency-based-routing"
+  tls: {habilitado: false, modo: "self-signed", dominio: null}
   litellm: {num_retries, request_timeout, cooldown_time, allowed_fails}
   open_webui: {habilitado, signup_habilitado}
   django_metrics: {habilitado, puerto, metrics_refresh_interval}
@@ -191,7 +226,7 @@ gateway:
 base_de_datos:
   AUTO_INIT_DB: true                # ← interruptor de inicialización automática
   auto_refresh_metrics: true
-  schema_file: "database/init_schema.sql"
+  schema_dir: "database"            # aplica TODOS los .sql en orden lexicográfico
 
 workloads:
   - id: "qwen3-5-llm"
@@ -218,17 +253,27 @@ Cada entrada de `workloads` produce **su propio clúster SkyPilot** con
 # 1. Generar los manifiestos (sin tocar AWS)
 python scripts/generate_infra.py
 
-# 2. Inicializar el esquema PostgreSQL a mano
-python scripts/db_setup.py --refresh
+# 2. Ver el plan de red sin crear nada (requiere PostgreSQL alcanzable, no muta nada)
+python scripts/generate_infra.py --run --dry-run
 
-# 3. Desplegar la topología completa
+# 3. Desplegar la topología completa (VPC + gateway + workers + endpoints + verify)
 python scripts/generate_infra.py --run
 
 # 4. Re-sincronizar el balanceador tras escalar workers
 python scripts/sync_endpoints.py --apply
+
+# 5. Verificar el despliegue
+python scripts/verify_deployment.py
+
+# 6. Inventario de todos los clientes
+python scripts/list_deployments.py
+
+# 7. Destruir todo (VPC incluida) cuando ya no se necesite
+python scripts/destroy_infra.py --dry-run
+python scripts/destroy_infra.py --yes
 ```
 
-Guía operativa detallada: **[MANUAL_DESPLIEGUE.md](MANUAL_DESPLIEGUE.md)**
+Guía operativa detallada: **[MANUAL_DESPLIEGUE.md](MANUAL_DESPLIEGUE.md)** · Documentación completa: **[docs/](docs/00_ARQUITECTURA.md)**
 
 ---
 
@@ -309,6 +354,7 @@ sin salida a Internet.
 python -m venv venv && source venv/bin/activate     # Windows: venv\Scripts\activate
 pip install pyyaml psycopg2-binary "skypilot[aws]"
 pip install -r django_metrics/requirements.txt      # solo para correr el panel en local
+pip install -r requirements-dev.txt                 # pytest + moto, solo para correr tests/
 
 aws configure                                        # credenciales de aprovisionamiento
 sky check                                            # valida el acceso de SkyPilot a AWS
@@ -319,21 +365,26 @@ cp .env.example .env                                 # y completar credenciales
 
 ## 8. Notas para agentes de IA
 
+Ver **[`docs/08_AGENTES_IA.md`](docs/08_AGENTES_IA.md)** para la lista completa
+(qué archivos nunca editar a mano porque se regeneran, invariantes de diseño,
+cómo validar un cambio sin aprovisionar nada real, y un glosario del dominio).
+Resumen mínimo:
+
 1. **No edites artefactos generados**: `.sky_generated.*.yaml`,
-   `.sky_config_workers.yaml`, `.sooniverse_endpoints.json` ni
-   `docker_images/gateway/litellm_config.yaml`. Modifica `config_global.yaml` y
+   `.sky_config_*.yaml`, `.sooniverse_endpoints.json`,
+   `docker_images/gateway/litellm_config.yaml`, `docker_images/gateway/nginx/default.conf`
+   ni `docker_images/gateway/docker-compose.yml`. Modifica `config_global.yaml` y
    regenera con `python scripts/generate_infra.py`.
-2. **Reglas de validación** (`ConfigValidator`): `cliente.entorno` ∈ {prod, dev};
-   `cliente.modo` ∈ {byoc, hosted}; `workloads[].tipo_tarea` ∈ {llm-texto, embeddings};
-   `cantidad_gpus` y `replicas` enteros > 0; `gateway.load_balancing_strategy` de la
-   lista permitida; `base_de_datos.AUTO_INIT_DB` booleano obligatorio.
-3. **Nunca añadas columnas de prompts o respuestas** a las tablas de `sooniverse`.
+2. **Nunca añadas columnas de prompts o respuestas** a las tablas de `sooniverse`.
    La política de privacidad es un requisito del producto, no una preferencia.
-4. **El DDL vive solo en `database/init_schema.sql`.** Los modelos de Django son
+3. **El DDL vive solo en `database/*.sql`.** Los modelos de Django son
    `managed = False`; añadir una migración que cree estas tablas rompe el diseño.
+4. **Nada de Terraform/CloudFormation/CDK/Pulumi.** Todo el ciclo de vida de AWS
+   es `boto3` puro en `scripts/aws_network.py`.
 5. **Validación rápida sin aprovisionar nada:**
    ```bash
    python -c "import sys;sys.path.insert(0,'scripts');from generate_infra import load_config;load_config('config_global.yaml')"
+   python -m pytest tests/test_aws_network.py tests/test_plan_changes.py tests/test_config_validator.py -q
    python scripts/db_setup.py --check
    cd django_metrics && python manage.py check
    ```
@@ -356,11 +407,18 @@ Para no re-descargar pesos de varios GB en cada reinicio:
 
 | Fase | Alcance | Estado |
 |---|---|---|
-| **1** | Gateway LiteLLM + PostgreSQL + Open WebUI + panel de métricas y API Keys | ✅ Completa |
-| 2 | Aprovisionamiento declarativo, modo Sooniverse-hosted primero | Pendiente |
-| 3 | Modo BYOC (IAM AssumeRole + External ID) | Pendiente |
-| 4 | Multi-modelo y asignación fraccional de GPU (TEI para embeddings, MIG) | Pendiente |
-| 5 | Segundo proveedor de nube (GCP) | Pendiente |
-| 6 | Kubernetes (EKS/GKE + GPU Operator + Karpenter + KubeAI) | Pendiente |
+| 1 | Gateway LiteLLM + PostgreSQL + Open WebUI + panel de métricas y API Keys | ✅ Completa |
+| 2 | Red AWS autogestionada por boto3 (`AwsNetworkManager`): VPC/subredes/NAT/IGW/SGs | ✅ Completa |
+| 3 | Estado persistente en PostgreSQL (mecanismo de propiedad, `plan_changes`) | ✅ Completa |
+| 4 | Orquestación del ciclo de vida completo (`--run`, `destroy_infra.py`, `verify_deployment.py`) | ✅ Completa |
+| 5 | Comunicación Gateway↔Workers robusta (bastion, 4º método de descubrimiento, health checks) | ✅ Completa |
+| 6 | nginx como única puerta de entrada + TLS self-signed | ✅ Completa |
+| 7 | Multi-cliente (`clients/<id>/`, aislamiento de CIDR/artefactos/credenciales) | ✅ Completa |
+| 8 | Pruebas (moto + PostgreSQL real + smoke de nginx) y documentación completa (`docs/`) | ✅ Completa |
+| 9 | Modo BYOC real (IAM AssumeRole + External ID) — hook documentado, no implementado | Pendiente |
+| 10 | Segundo proveedor de nube (GCP) | Pendiente |
+| 11 | Kubernetes (EKS/GKE + GPU Operator + Karpenter + KubeAI) | Pendiente |
+| 12 | TLS `letsencrypt`/`acm` (hoy solo `self-signed`) | Pendiente |
 
-Detalle y criterios de decisión: `sooniverse-optimizacion-infraestructura-i_v2.md`.
+Detalle y criterios de decisión: `sooniverse-optimizacion-infraestructura-i_v2.md`
+y `docs/00_ARQUITECTURA.md`.

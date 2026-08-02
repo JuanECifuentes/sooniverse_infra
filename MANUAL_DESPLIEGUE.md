@@ -86,49 +86,33 @@ Variables **obligatorias**:
 
 ---
 
-## 2. Preparar la VPC
+## 2. La VPC (automática desde la Fase 2)
 
-`workers_en_subred_privada: true` exige una topología con **subred pública + subred
-privada + NAT Gateway**. La VPC por defecto de AWS **no la tiene**: todas sus
-subredes rutan directo al Internet Gateway.
+**Ya no hace falta crear nada a mano.** Con `red_y_aislamiento.gestion_red: "auto"`
+(el default), `python scripts/generate_infra.py --run` crea la VPC, subredes
+públicas/privadas, Internet Gateway, NAT Gateway, route tables y Security Groups
+por sí solo, vía `scripts/aws_network.py::AwsNetworkManager` (boto3 puro, sin
+Terraform ni CloudFormation). El detalle completo de cada recurso, su cálculo de
+CIDR y su coste está en **[`docs/02_RED_AWS.md`](docs/02_RED_AWS.md)**.
 
-### 2.1 Requisitos de la VPC
-
-| Elemento | Requisito |
-|---|---|
-| Subred pública | Ruta `0.0.0.0/0` → Internet Gateway. Aloja el Nodo Gateway |
-| Subred privada | Ruta `0.0.0.0/0` → **NAT Gateway**. Aloja los workers |
-| NAT Gateway | Obligatorio: los workers descargan pesos de Hugging Face y paquetes apt |
-| DNS | `enableDnsSupport` y `enableDnsHostnames` activados |
-
-Alternativas al NAT (más baratas, más trabajo):
-- AMI que ya contenga el modelo y los drivers → el worker no necesita salida.
-- VPC Endpoints de S3 + ECR y un mirror interno de pesos.
-
-### 2.2 Registrar la VPC en el contrato
+Lo único que normalmente hay que ajustar en el contrato para este paso:
 
 ```yaml
 red_y_aislamiento:
-  vpc_name: "sooniverse-vpc"        # tag Name de la VPC (no el vpc-id)
-  workers_en_subred_privada: true
+  region: "us-east-1"
+  vpc_cidr: "10.0.0.0/16"      # distinto al de otros clientes activos en la misma región/cuenta
+  azs: 1
+  nat_gateway: {modo: "single"}   # single | per-az | none (none exige vpc_endpoints.s3: true)
+  cidr_admin_ssh: "0.0.0.0/0"     # restringir a tu IP/VPN en producción real
 ```
 
-SkyPilot elige automáticamente la subred sin ruta a IGW cuando
-`use_internal_ips: true` (lo inyecta el generador).
+Para verificar el plan sin crear nada: `python scripts/generate_infra.py --run --only network --dry-run`.
 
-### 2.3 Endurecer el Security Group (recomendado en producción)
-
-Por defecto SkyPilot abre el puerto declarado a `0.0.0.0/0`. Como los workers
-**no tienen IP pública**, la regla solo es alcanzable dentro de la VPC. Para
-acotarla explícitamente al Gateway, crea un SG propio y decláralo:
-
-```yaml
-red_y_aislamiento:
-  security_group_workers: "sg-sooniverse-workers"
-```
-
-Reglas de entrada del SG: `22/tcp` y `8007/tcp` **solo** desde el SG o el CIDR
-del Nodo Gateway.
+**Modo legado (`gestion_red: "existente"`):** si ya tenés una VPC creada a mano y
+querés seguir operando exactamente como antes, fijá `vpc_name`/`security_group_workers`/
+`security_group_gateway` en el contrato como se hacía anteriormente — ver
+`Manual_VPC_SecurityGroup.md` (ahora anexo histórico) para el procedimiento manual
+completo, que sigue siendo válido para este modo.
 
 ---
 
@@ -736,18 +720,38 @@ python scripts/db_setup.py                     # recrear vacío
 
 ## Referencia rápida de comandos
 
+Ver también **[`docs/07_REFERENCIA_CLI.md`](docs/07_REFERENCIA_CLI.md)** (todas las
+flags, con ejemplos reales de entrada y salida).
+
 | Objetivo | Comando |
 |---|---|
 | Validar contrato y generar manifiestos | `python scripts/generate_infra.py` |
-| Desplegar todo | `python scripts/generate_infra.py --run` |
-| Solo Gateway / solo workers | `... --run --only gateway` / `--only workers` |
+| Ver el plan completo sin tocar AWS/BD | `python scripts/generate_infra.py --run --dry-run` |
+| Desplegar todo (VPC + gateway + workers + endpoints + verify) | `python scripts/generate_infra.py --run` |
+| Solo la capa de red / Gateway / workers | `--only network` / `--only gateway` / `--only workers` |
 | Forzar `AUTO_INIT_DB=false` | `... --run --no-auto-init-db` |
-| Aplicar esquema de BD | `python scripts/db_setup.py` |
+| Aplicar esquema de BD (todos los `.sql`) | `python scripts/db_setup.py` |
 | Aplicar + ETL + rollups | `python scripts/db_setup.py --refresh` |
 | Verificar BD sin escribir | `python scripts/db_setup.py --check` |
 | Ver pool descubierto (dry-run) | `python scripts/sync_endpoints.py` |
 | Sincronizar balanceador | `python scripts/sync_endpoints.py --apply` |
-| Estado de los clústeres | `sky status` |
+| Reconciliación periódica | `python scripts/sync_endpoints.py --watch --interval 60` |
+| Verificar el despliegue (11 comprobaciones) | `python scripts/verify_deployment.py` |
+| Inventario de todos los clientes | `python scripts/list_deployments.py` |
+| Plan de destrucción sin tocar nada | `python scripts/destroy_infra.py --dry-run` |
+| Destruir todo (VPC incluida) | `python scripts/destroy_infra.py --yes` |
+| Buscar recursos huérfanos | `python scripts/destroy_infra.py --scan-orphans` |
+| Estado de los clústeres SkyPilot | `sky status` |
 | IP del Gateway | `sky status --ip sooniverse-<id>-<entorno>-gw` |
-| Apagar GPUs | `sky stop sooniverse-<id>-<entorno>-<workload>` |
-| Destruir todo | `sky down <worker>` y luego `sky down <gateway>` |
+| Apagar GPUs (sin destruir la infra) | `sky stop sooniverse-<id>-<entorno>-<workload>` |
+
+---
+
+## Anexo A: fallback manual (`gestion_red: "existente"`)
+
+Si por algún motivo no querés que este sistema gestione la VPC (cuenta compartida
+con otras cargas, políticas internas, etc.), el procedimiento 100% manual sigue
+disponible y documentado en **[`Manual_VPC_SecurityGroup.md`](Manual_VPC_SecurityGroup.md)**
+(marcado ahora como anexo histórico). Fijá `red_y_aislamiento.gestion_red: "existente"`
+y completá `vpc_name`/`security_group_workers`/`security_group_gateway` con los
+valores que resulten de seguir ese anexo.

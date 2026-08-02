@@ -90,6 +90,10 @@ class DefaultVpcGuardError(NetworkError):
 
 @dataclass(frozen=True)
 class NetworkSpec:
+    """Entrada declarativa de `AwsNetworkManager`: todo lo que necesita saber para
+    aprovisionar (o planear la destrucción de) la capa de red de un despliegue.
+    Se construye típicamente con `generate_infra.build_network_spec_from_config()`."""
+
     client_id: str
     environment: str
     region: str
@@ -124,6 +128,10 @@ class NetworkSpec:
 
 @dataclass(frozen=True)
 class NetworkOutputs:
+    """Resultado de `AwsNetworkManager.provision()`/`adopt_existing()`: los IDs y
+    nombres reales que `TopologyBuilder` necesita para construir las configs de
+    cliente de SkyPilot (`aws.vpc_name`, `aws.security_group_name`)."""
+
     deployment_id: str
     vpc_id: str
     vpc_name: str
@@ -144,6 +152,9 @@ class NetworkOutputs:
 
 @dataclass
 class PlannedDeletion:
+    """Un recurso que `destroy()`/`plan_destroy()` va a intentar borrar (o ya intentó),
+    en el orden dado por `delete_order`."""
+
     resource_type: str
     component: str
     aws_id: Optional[str]
@@ -154,6 +165,10 @@ class PlannedDeletion:
 
 @dataclass
 class DestroyReport:
+    """Resultado de `destroy()`: qué se borró, qué falló (con el código de error de
+    AWS), qué se omitió por el mecanismo de propiedad, y comandos de diagnóstico
+    para lo que requiere intervención manual."""
+
     deployment_id: str
     succeeded: List[PlannedDeletion] = field(default_factory=list)
     failed: List[Dict[str, Any]] = field(default_factory=list)
@@ -162,6 +177,7 @@ class DestroyReport:
 
     @property
     def ok(self) -> bool:
+        """True si no hubo ningún fallo (puede haber omitidos por managed_by_us=False)."""
         return not self.failed
 
 
@@ -310,6 +326,8 @@ class AwsNetworkManager:
     # -------------------------------------------------------------------
 
     def ensure_vpc(self) -> str:
+        """Reutiliza la VPC de este deployment_id si ya existe; si no, la crea con
+        DNS support/hostnames habilitados y espera a que quede 'available'."""
         existing = self._find_by_component(self.ec2.describe_vpcs, "VpcId", "vpc")
         if existing:
             vpc_id = existing["VpcId"]
@@ -348,6 +366,9 @@ class AwsNetworkManager:
         return names[: self.spec.az_count]
 
     def ensure_subnets(self, vpc_id: str) -> Tuple[List[str], List[str]]:
+        """Crea (o reutiliza) una subred pública y una privada por AZ, usando los
+        CIDR explícitos del spec o los calculados por `compute_subnet_cidrs()`.
+        Devuelve (ids_publicas, ids_privadas)."""
         azs = self._available_azs()
         public_cidrs = self.spec.public_subnet_cidrs
         private_cidrs = self.spec.private_subnet_cidrs
@@ -390,6 +411,7 @@ class AwsNetworkManager:
         return subnet_id
 
     def ensure_internet_gateway(self, vpc_id: str) -> str:
+        """Crea (o reutiliza) el Internet Gateway y lo adjunta a `vpc_id`."""
         existing = self._find_by_component(self.ec2.describe_internet_gateways, "InternetGatewayId", "igw")
         if existing:
             igw_id = existing["InternetGatewayId"]
@@ -406,6 +428,10 @@ class AwsNetworkManager:
         return igw_id
 
     def ensure_nat_gateways(self, public_subnet_ids: List[str]) -> Tuple[List[str], List[str]]:
+        """Asigna una EIP y crea un NAT Gateway por `nat_mode` ('single': uno solo en
+        la primera subred pública; 'per-az': uno por AZ; 'none': ninguno). Espera a
+        que cada uno quede 'available' (puede tardar minutos). Devuelve
+        (ids_nat, ids_eip_allocation)."""
         if self.spec.nat_mode == "none":
             return [], []
 
@@ -462,6 +488,9 @@ class AwsNetworkManager:
         private_subnet_ids: List[str],
         nat_gateway_ids: List[str],
     ) -> Tuple[Optional[str], List[str]]:
+        """Crea la route table pública (0.0.0.0/0 -> IGW) y una privada por subred
+        privada (0.0.0.0/0 -> NAT correspondiente), asociándolas a sus subredes.
+        Devuelve (id_rt_publica, ids_rt_privadas)."""
         public_rt_id = None
         if igw_id and public_subnet_ids:
             public_rt_id = self._ensure_route_table(vpc_id, "rtb-public")
@@ -520,6 +549,9 @@ class AwsNetworkManager:
             self.ec2.associate_route_table(RouteTableId=rt_id, SubnetId=subnet_id)
 
     def ensure_vpc_endpoints(self, vpc_id: str, private_route_table_ids: List[str]) -> List[str]:
+        """Crea el VPC Endpoint de tipo Gateway hacia S3 (gratis) si
+        `enable_s3_endpoint`, asociado a las route tables privadas. No crea
+        interface endpoints (ECR/logs) -esos tienen coste y no están implementados."""
         if not self.spec.enable_s3_endpoint:
             return []
 
@@ -544,6 +576,10 @@ class AwsNetworkManager:
         return [vpce_id]
 
     def ensure_security_groups(self, vpc_id: str) -> Tuple[str, str]:
+        """Crea (o reutiliza) los SG de gateway y workers, y sincroniza sus reglas
+        de ingreso por diff (añade las que faltan, revoca las que sobran) según el
+        spec actual. El de workers solo acepta tráfico por referencia al SG del
+        gateway (SG->SG), nunca por CIDR. Devuelve (sg_gateway_id, sg_workers_id)."""
         gw_name = self._name("gateway")
         workers_name = self._name("workers")
 
@@ -680,6 +716,10 @@ class AwsNetworkManager:
     # -------------------------------------------------------------------
 
     def provision(self, dry_run: bool = False) -> NetworkOutputs:
+        """Orquesta el aprovisionamiento completo: VPC -> subredes -> IGW -> NAT ->
+        route tables -> VPC endpoints -> Security Groups, en ese orden. Idempotente:
+        cada paso reutiliza lo que ya exista para este deployment_id. Actualiza
+        `deployment.status` a 'active' al terminar, o 'error' si algo falla."""
         if dry_run:
             logger.info("[RED] --dry-run: no se ejecuta ninguna llamada mutante a AWS.")
             return self.status()  # type: ignore[return-value]
@@ -759,6 +799,7 @@ class AwsNetworkManager:
         )
 
     def status(self) -> Dict[str, Any]:
+        """Snapshot de solo lectura: deployment_id + recursos registrados en el estado."""
         return {
             "deployment_id": self.deployment_id,
             "resources": self.state.list_resources(self.deployment_id),
@@ -769,6 +810,8 @@ class AwsNetworkManager:
     # -------------------------------------------------------------------
 
     def plan_destroy(self) -> List[PlannedDeletion]:
+        """Lee el estado y devuelve la lista de recursos a borrar en orden (no
+        muta nada; es lo que imprime `destroy(dry_run=True)`)."""
         resources = self.state.resources_in_delete_order(self.deployment_id)
         plan = []
         for res in resources:
@@ -818,6 +861,10 @@ class AwsNetworkManager:
         return tags.get(TAG_DEPLOYMENT) == self.deployment_id and tags.get(TAG_MANAGED) == "true"
 
     def destroy(self, dry_run: bool = False, force: bool = False) -> DestroyReport:
+        """Borra cada recurso de `plan_destroy()` en orden, verificando ANTES de cada
+        borrado que los tags AWS reales siguen coincidiendo con `deployment_id`
+        (mecanismo de propiedad). Continúa aunque un recurso falle; nunca borra si
+        `managed_by_us=False` salvo `force=True`. `dry_run=True` no muta nada."""
         plan = self.plan_destroy()
         report = DestroyReport(deployment_id=self.deployment_id)
 

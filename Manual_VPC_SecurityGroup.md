@@ -1,5 +1,22 @@
 # Guía: VPC y Security Groups para `sooniverse` (SkyPilot)
 
+> **📜 Documento histórico / anexo.** Desde la Fase 2 de la automatización de red,
+> este procedimiento manual **ya no es necesario** en el modo por defecto
+> (`red_y_aislamiento.gestion_red: "auto"`): `python scripts/generate_infra.py --run`
+> crea y destruye toda esta infraestructura por sí solo, vía
+> `scripts/aws_network.py::AwsNetworkManager` (boto3 puro). Ver
+> **[`docs/02_RED_AWS.md`](docs/02_RED_AWS.md)** para el equivalente automatizado de
+> cada paso de esta guía, y **[`docs/04_DESTRUCCION.md`](docs/04_DESTRUCCION.md)**
+> para la destrucción segura (en vez del paso 3 de más abajo).
+>
+> Esta guía sigue siendo válida y se conserva **solo** para el modo
+> `gestion_red: "existente"` (VPC creada a mano, por política interna o cuenta
+> compartida) — ver `MANUAL_DESPLIEGUE.md`, Anexo A. La pregunta abierta de la
+> línea 124 original de este documento ("¿el contrato espera el ID o el nombre del
+> SG?") ya está resuelta: SkyPilot 0.13.0 empareja/crea Security Groups **por
+> nombre** (`group_name`), no por `sg-id` — confirmado leyendo
+> `sky/provision/aws/config.py` del paquete instalado.
+
 Esta guía cubre tres tareas desde la consola de AWS:
 1. Crear la VPC con subred pública + privada + NAT Gateway
 2. Crear los Security Groups (gateway y workers)
