@@ -59,14 +59,20 @@ gateway:
   # metrics quedan detrás de nginx. true -> además abre 4000/8000/8080 al CIDR
   # público (usar solo en dev/depuración).
   exponer_puertos_directos: false
+  # Puertos directos adicionales SOLO si exponer_puertos_directos: true (dev/
+  # depuración). Con el default (false), nginx es la única puerta pública:
+  # 80 siempre, 443 si tls.habilitado.
   puertos_publicos:
-    - 80                      # Open WebUI (reverse proxy)
     - 4000                    # LiteLLM Proxy (API OpenAI-compatible)
     - 8080                    # Open WebUI directo
     - 8000                    # Django Metrics & API Keys panel
   # Estrategia de balanceo de LiteLLM sobre los workers vLLM.
   # latency-based-routing | simple-shuffle (round-robin ponderado) | least-busy | usage-based-routing
   load_balancing_strategy: "latency-based-routing"
+  tls:
+    habilitado: false
+    modo: "self-signed"        # self-signed (implementado) | letsencrypt | acm (hooks documentados, no implementados)
+    dominio: null              # requerido si habilitado: true (usado como CN del cert y server_name de nginx)
   litellm:
     master_key_env: "LITELLM_MASTER_KEY"   # Nombre de la var de entorno con la master key
     num_retries: 2

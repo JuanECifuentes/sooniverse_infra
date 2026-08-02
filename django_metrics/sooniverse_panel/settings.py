@@ -46,6 +46,11 @@ CSRF_TRUSTED_ORIGINS = [
     o.strip() for o in _env("CSRF_TRUSTED_ORIGINS", "").split(",") if o.strip()
 ]
 
+# nginx antepone /panel (ver docker_images/gateway/nginx/default.conf,
+# location /panel/ -> X-Script-Name /panel) para que Django genere URLs y
+# enlaces estáticos con ese prefijo. Vacío en desarrollo local sin proxy.
+FORCE_SCRIPT_NAME = _env("FORCE_SCRIPT_NAME", "") or None
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -123,7 +128,13 @@ TIME_ZONE = _env("TIME_ZONE", "America/Bogota")
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = "static/"
+# Detrás de nginx, /panel/static/ lo sirve nginx directamente (alias al volumen
+# panel_static, ver docker-compose.yml) desde los archivos que collectstatic
+# escribe aquí con nombres con hash (CompressedManifestStaticFilesStorage);
+# Django no interviene en esa ruta. STATIC_URL debe incluir el mismo prefijo
+# que FORCE_SCRIPT_NAME para que {% static %} genere el enlace correcto.
+_script_name = _env("FORCE_SCRIPT_NAME", "")
+STATIC_URL = f"{_script_name}/static/" if _script_name else "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"]
 STORAGES = {

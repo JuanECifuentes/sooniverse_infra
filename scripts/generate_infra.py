@@ -75,6 +75,7 @@ class ConfigValidator:
     }
     ALLOWED_GESTION_RED = {"auto", "existente"}
     ALLOWED_NAT_MODOS = {"single", "per-az", "none"}
+    ALLOWED_TLS_MODOS = {"self-signed", "letsencrypt", "acm"}
 
     @classmethod
     def validate(cls, config: Dict[str, Any]) -> None:
@@ -227,6 +228,25 @@ class ConfigValidator:
                 f"'gateway.load_balancing_strategy' inválida: '{strategy}'. "
                 f"Permitidas: {cls.ALLOWED_LB_STRATEGIES}"
             )
+
+        tls = gw.get("tls") or {}
+        if not isinstance(tls, dict):
+            raise ConfigValidationError("'gateway.tls' debe ser un mapa.")
+        if tls.get("habilitado", False):
+            if tls.get("modo", "self-signed") not in cls.ALLOWED_TLS_MODOS:
+                raise ConfigValidationError(
+                    f"'gateway.tls.modo' inválido: '{tls.get('modo')}'. Permitidos: {cls.ALLOWED_TLS_MODOS}"
+                )
+            if tls.get("modo", "self-signed") != "self-signed":
+                raise ConfigValidationError(
+                    f"'gateway.tls.modo: {tls.get('modo')}' no está implementado todavía "
+                    "(solo 'self-signed'); usa ese modo o pon 'tls.habilitado: false'."
+                )
+            if not tls.get("dominio"):
+                raise ConfigValidationError(
+                    "'gateway.tls.dominio' es obligatorio cuando 'gateway.tls.habilitado: true' "
+                    "(se usa como CN del certificado y server_name de nginx)."
+                )
 
     @classmethod
     def _validate_base_de_datos(cls, config: Dict[str, Any]) -> None:
@@ -381,7 +401,29 @@ sudo sed -i 's/^#*AllowTcpForwarding.*/AllowTcpForwarding yes/' /etc/ssh/sshd_co
 sudo systemctl reload ssh || sudo systemctl reload sshd || true
 
 mkdir -p {remote_root}/docker_images/gateway/data
+{tls_setup}
 echo "===> Gateway aprovisionado."
+"""
+
+# Certificado autofirmado (modo 'self-signed', el único implementado hoy).
+# Idempotente: no regenera si ya existe. 'letsencrypt' (certbot en sidecar) y
+# 'acm' (requiere ALB) quedan como hook documentado, no implementados.
+TLS_SELF_SIGNED_SETUP = """
+if [ ! -f {remote_root}/docker_images/gateway/nginx/certs/fullchain.pem ]; then
+    echo "===> TLS self-signed: generando certificado ({tls_domain})"
+    mkdir -p {remote_root}/docker_images/gateway/nginx/certs
+    openssl req -x509 -nodes -days 825 -newkey rsa:2048 \\
+        -keyout {remote_root}/docker_images/gateway/nginx/certs/privkey.pem \\
+        -out {remote_root}/docker_images/gateway/nginx/certs/fullchain.pem \\
+        -subj "/CN={tls_domain}" \\
+        -addext "subjectAltName=DNS:{tls_domain}" 2>/dev/null || \\
+    openssl req -x509 -nodes -days 825 -newkey rsa:2048 \\
+        -keyout {remote_root}/docker_images/gateway/nginx/certs/privkey.pem \\
+        -out {remote_root}/docker_images/gateway/nginx/certs/fullchain.pem \\
+        -subj "/CN={tls_domain}"
+else
+    echo "===> TLS self-signed: certificado ya existe, se reutiliza."
+fi
 """
 
 GATEWAY_RUN_SCRIPT = """
@@ -415,15 +457,21 @@ python3 scripts/render_litellm_config.py \
 
 # ---------------------------------------------------------------------------
 # 3. Levantar el stack del Gateway
+#    GATEWAY_PUBLIC_URL se calcula aquí (la instancia se conoce su propia IP
+#    pública vía metadata/ifconfig.me) y se exporta para que Open WebUI genere
+#    enlaces absolutos correctos sin que el generador tenga que reinyectarla
+#    después de 'sky launch'.
 # ---------------------------------------------------------------------------
+PUBLIC_IP="$(curl -s --max-time 5 ifconfig.me || true)"
+export GATEWAY_PUBLIC_URL="http://${{PUBLIC_IP}}"
+
 cd {remote_root}/docker_images/gateway
 sudo -E docker compose --env-file {remote_root}/.env up -d --build
 sudo docker compose ps
 
-echo "===> Gateway operativo:"
-echo "     LiteLLM      -> http://$(curl -s ifconfig.me):4000"
-echo "     Open WebUI   -> http://$(curl -s ifconfig.me):8080"
-echo "     Panel Django -> http://$(curl -s ifconfig.me):8000/metrics/"
+echo "===> Gateway operativo (nginx como única puerta de entrada):"
+echo "     Chat / API / Panel -> http://${{PUBLIC_IP}}/  |  /v1/  |  /panel/"
+echo "     Salud de nginx      -> http://${{PUBLIC_IP}}/healthz"
 """
 
 
@@ -473,13 +521,27 @@ class TopologyBuilder:
     # -- gateway --------------------------------------------------------------
     def build_gateway(self, worker_endpoints: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         gw = self.gateway
+        tls_cfg = gw.get("tls", {}) or {}
+        tls_enabled = bool(tls_cfg.get("habilitado", False))
+        expose_direct = bool(gw.get("exponer_puertos_directos", False))
+
+        # nginx es la única puerta de entrada por defecto: 80 (+443 con TLS).
+        # 4000/8000/8080 solo se abren si el operador activa exponer_puertos_directos
+        # (depuración/dev); en ese modo también se respeta 'puertos_publicos' del contrato.
+        public_ports = [80]
+        if tls_enabled:
+            public_ports.append(443)
+        if expose_direct:
+            for port in gw.get("puertos_publicos", [4000, 8000, 8080]):
+                if port not in public_ports:
+                    public_ports.append(port)
+
         resources: Dict[str, Any] = {
             "cloud": "aws",
             "region": self.red["region"],
             "instance_type": gw.get("tipo_instancia", "t3.large"),
             "disk_size": gw.get("disk_size", 100),
-            # Única superficie pública del clúster.
-            "ports": gw.get("puertos_publicos", [80, 4000, 8000, 8080]),
+            "ports": public_ports,
             "labels": {**self.red.get("tags_obligatorios", {}), "rol": "gateway"},
         }
 
@@ -508,13 +570,24 @@ class TopologyBuilder:
 
         schema_dir = self.db.get("schema_dir", "database")
 
+        tls_setup = ""
+        if tls_enabled and tls_cfg.get("modo", "self-signed") == "self-signed":
+            tls_setup = TLS_SELF_SIGNED_SETUP.format(
+                remote_root=REMOTE_ROOT, tls_domain=tls_cfg.get("dominio") or "sooniverse.local",
+            )
+        elif tls_enabled:
+            tls_setup = (
+                f'echo "===> TLS modo \'{tls_cfg.get("modo")}\' no implementado todavía; '
+                'usa self-signed o deja tls.habilitado: false."'
+            )
+
         return {
             "name": self.gateway_cluster,
             "resources": resources,
             "num_nodes": 1,
             "file_mounts": file_mounts,
             "envs": envs,
-            "setup": GATEWAY_SETUP_SCRIPT.format(remote_root=REMOTE_ROOT).strip(),
+            "setup": GATEWAY_SETUP_SCRIPT.format(remote_root=REMOTE_ROOT, tls_setup=tls_setup).strip(),
             "run": GATEWAY_RUN_SCRIPT.format(remote_root=REMOTE_ROOT, schema_dir=schema_dir).strip(),
         }
 
@@ -704,6 +777,10 @@ def generate_manifests(config: Dict[str, Any], out_dir: Path, builder: Optional[
     artefactos: Dict[str, Any] = {"gateway": None, "workers": {}, "sky_config": None}
 
     if builder.gateway.get("habilitado", True):
+        from render_gateway_stack import render as render_gateway_stack
+
+        render_gateway_stack(config)
+
         gw_path = out_dir / GATEWAY_MANIFEST
         dump_yaml(builder.build_gateway(), gw_path)
         artefactos["gateway"] = gw_path
@@ -971,10 +1048,16 @@ def deploy(
             print(f"[WARNING] No se pudo actualizar el estado final del despliegue: {exc}")
 
     if gateway_ip:
+        gw_cfg_final = config.get("gateway", {})
+        scheme = "https" if (gw_cfg_final.get("tls", {}) or {}).get("habilitado") else "http"
         print("\n" + "=" * 74)
-        print(f" LiteLLM      : http://{gateway_ip}:4000")
-        print(f" Open WebUI   : http://{gateway_ip}:8080")
-        print(f" Panel Django : http://{gateway_ip}:8000/metrics/")
+        print(f" Chat (Open WebUI) : {scheme}://{gateway_ip}/")
+        print(f" API (LiteLLM)     : {scheme}://{gateway_ip}/v1")
+        print(f" Panel (Django)    : {scheme}://{gateway_ip}/panel/")
+        print(f" Salud (nginx)     : {scheme}://{gateway_ip}/healthz")
+        if gw_cfg_final.get("exponer_puertos_directos"):
+            print(" [exponer_puertos_directos=true] También alcanzables: "
+                  f":4000 (LiteLLM), :8080 (Open WebUI), :8000 (Django)")
         if deployment_id:
             print(f" deployment_id: {deployment_id}")
         print("=" * 74)
