@@ -1,0 +1,178 @@
+/* ============================================================================
+   LAYOUT · Panel de Métricas y API Keys
+   ============================================================================
+   Maquetación pura: display, grid, flex, dimensiones, espaciado y posición.
+   NINGÚN color, sombra, borde decorativo ni tipografía de marca vive aquí:
+   todo eso está en `theme-sooniverse.css`, que es intercambiable.
+   ============================================================================ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; min-height: 100%; }
+
+/* Grano digital: capa fija sobre todo el viewport */
+.sv-noise {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 9999;
+}
+
+/* Halo del encabezado */
+.sv-aura {
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 420px;
+    pointer-events: none;
+    z-index: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   Estructura de página
+   --------------------------------------------------------------------------- */
+.l-shell    { position: relative; z-index: 1; display: flex; flex-direction: column; min-height: 100vh; }
+.l-container{ width: 100%; max-width: 1360px; margin: 0 auto; padding: 0 24px; }
+.l-main     { flex: 1 1 auto; padding: 32px 0 56px; }
+
+/* Header */
+.sv-header  { position: sticky; top: 0; z-index: 50; }
+.l-header   { display: flex; align-items: center; justify-content: space-between; gap: 24px; height: 68px; }
+.l-brand    { display: flex; align-items: center; gap: 10px; }
+.sv-logo__node { width: 9px; height: 9px; flex: 0 0 9px; }
+.l-brand__stack { display: flex; flex-direction: column; gap: 2px; }
+.l-nav      { display: flex; align-items: center; gap: 28px; }
+.sv-nav__link { display: inline-block; padding: 6px 2px; }
+.l-header__meta { display: flex; align-items: center; gap: 10px; }
+
+/* Footer */
+.l-footer   { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 0; flex-wrap: wrap; }
+
+/* ---------------------------------------------------------------------------
+   Encabezado de sección
+   --------------------------------------------------------------------------- */
+.l-page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 28px; flex-wrap: wrap; }
+.l-page-head__text { display: flex; flex-direction: column; gap: 8px; }
+.l-page-head h2 { margin: 0; }
+.l-page-head__actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+/* ---------------------------------------------------------------------------
+   Rejillas
+   --------------------------------------------------------------------------- */
+.l-grid            { display: grid; gap: 18px; }
+.l-grid--kpi       { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.l-grid--split     { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); align-items: start; }
+.l-grid--halves    { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+.l-grid--form      { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.l-grid--filters   { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); align-items: end; }
+
+.l-stack           { display: flex; flex-direction: column; gap: 18px; }
+.l-stack--tight    { gap: 8px; }
+.l-row             { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.l-row--between    { justify-content: space-between; }
+.l-row--end        { justify-content: flex-end; }
+.l-spacer          { flex: 1 1 auto; }
+
+.l-mt-lg { margin-top: 32px; }
+.l-mb-md { margin-bottom: 18px; }
+.l-mb-lg { margin-bottom: 32px; }
+
+/* ---------------------------------------------------------------------------
+   Tarjetas
+   --------------------------------------------------------------------------- */
+.sv-card, .sv-panel { padding: 20px 22px; }
+.l-card--flush      { padding: 0; overflow: hidden; }
+.l-card__head       { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 22px; flex-wrap: wrap; }
+.l-card__body       { padding: 0 22px 22px; }
+.l-card__body--flush{ padding: 0; }
+
+.l-kpi        { display: flex; flex-direction: column; gap: 6px; }
+.l-kpi__value { display: flex; align-items: baseline; gap: 8px; }
+.l-kpi__foot  { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+
+.sv-divider   { margin: 20px 0; }
+
+/* ---------------------------------------------------------------------------
+   Segmentos (Diario / Semanal / Mensual)
+   --------------------------------------------------------------------------- */
+.sv-segment          { display: inline-flex; align-items: center; gap: 2px; padding: 4px; }
+.sv-segment__item    { display: inline-block; padding: 8px 18px; text-align: center; white-space: nowrap; }
+
+/* ---------------------------------------------------------------------------
+   Badges y puntos de estado
+   --------------------------------------------------------------------------- */
+.sv-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; white-space: nowrap; }
+.sv-dot   { display: inline-block; width: 8px; height: 8px; flex: 0 0 8px; }
+
+/* ---------------------------------------------------------------------------
+   Formularios
+   --------------------------------------------------------------------------- */
+.l-field       { display: flex; flex-direction: column; gap: 7px; }
+.l-field--wide { grid-column: 1 / -1; }
+.sv-label      { display: block; }
+.sv-input, .sv-select, .sv-textarea { width: 100%; padding: 10px 13px; }
+.sv-textarea   { resize: vertical; min-height: 62px; }
+.sv-help       { display: block; }
+.l-form-actions{ display: flex; align-items: center; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
+
+.sv-btn        { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 11px 22px; }
+.sv-btn--sm    { padding: 7px 14px; font-size: 11px; }
+
+/* ---------------------------------------------------------------------------
+   Tablas
+   --------------------------------------------------------------------------- */
+.l-table-wrap  { width: 100%; overflow-x: auto; }
+.sv-table      { width: 100%; border-collapse: collapse; min-width: 720px; }
+.sv-table th,
+.sv-table td   { padding: 12px 16px; text-align: left; vertical-align: middle; }
+.sv-table th.sv-num,
+.sv-table td.sv-num { text-align: right; white-space: nowrap; }
+.sv-table thead th  { position: sticky; top: 0; z-index: 2; }
+.l-table-actions    { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.l-inline-form      { display: inline; }
+
+/* ---------------------------------------------------------------------------
+   Gráfica de barras
+   --------------------------------------------------------------------------- */
+.sv-chart        { position: relative; display: flex; align-items: flex-end; gap: 6px; height: 260px; padding: 8px 0 0; overflow-x: auto; }
+.l-chart-col     { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 8px; flex: 1 1 0; min-width: 26px; height: 100%; }
+.l-bar-track     { display: flex; align-items: flex-end; justify-content: center; width: 100%; height: 100%; }
+.sv-bar          { position: relative; display: block; width: 100%; max-width: 46px; min-height: 2px; }
+.sv-bar__prompt  { position: absolute; left: 0; right: 0; bottom: 0; }
+.sv-axis         { display: block; text-align: center; white-space: nowrap; }
+.l-chart-axis-x  { display: flex; gap: 6px; margin-top: 6px; }
+.sv-gridline     { position: absolute; left: 0; right: 0; }
+
+.l-legend        { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.l-legend__item  { display: inline-flex; align-items: center; gap: 7px; }
+.sv-legend__swatch { display: inline-block; width: 13px; height: 13px; flex: 0 0 13px; }
+
+.l-empty         { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 200px; text-align: center; }
+
+/* ---------------------------------------------------------------------------
+   Mensajes
+   --------------------------------------------------------------------------- */
+.l-messages { display: flex; flex-direction: column; gap: 10px; margin-bottom: 22px; }
+.sv-alert   { display: flex; align-items: flex-start; gap: 10px; padding: 13px 17px; }
+.sv-secret  { display: block; padding: 14px 16px; margin-top: 10px; }
+
+/* ---------------------------------------------------------------------------
+   Scrollbar
+   --------------------------------------------------------------------------- */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+
+/* ---------------------------------------------------------------------------
+   Responsive
+   --------------------------------------------------------------------------- */
+@media (max-width: 1024px) {
+    .l-grid--split { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 720px) {
+    .l-container   { padding: 0 16px; }
+    .l-header      { height: auto; padding: 14px 0; flex-wrap: wrap; row-gap: 12px; }
+    .l-nav         { gap: 18px; width: 100%; overflow-x: auto; }
+    h1, .sv-h1     { font-size: 34px; }
+    h2, .sv-h2     { font-size: 26px; }
+    .sv-metric     { font-size: 26px; }
+    .sv-chart      { height: 200px; }
+}

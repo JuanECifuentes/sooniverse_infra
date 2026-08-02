@@ -1,0 +1,46 @@
+{% comment %}
+Gráfica de barras de consumo de tokens. CSS puro, sin librerías externas:
+el Gateway puede vivir en una VPC sin salida a CDNs.
+Espera `metricas` (services.ResumenMetricas) en el contexto.
+{% endcomment %}
+{% load humanize %}
+
+{% if metricas.serie %}
+    <div class="sv-chart" role="img"
+         aria-label="Consumo de tokens {{ metricas.granularity_label|lower }} entre {{ metricas.desde }} y {{ metricas.hasta }}">
+        {% for punto in metricas.serie %}
+            <div class="l-chart-col">
+                <div class="l-bar-track">
+                    <span class="sv-bar {% if not punto.total_tokens %}sv-bar--empty{% endif %}"
+                          style="height: {{ punto.altura_pct }}%"
+                          title="{{ punto.etiqueta }} — {{ punto.total_tokens|intcomma }} tokens ({{ punto.request_count|intcomma }} peticiones)">
+                        {% if punto.total_tokens %}
+                            {% widthratio punto.prompt_tokens punto.total_tokens 100 as prompt_pct %}
+                            <span class="sv-bar__prompt" style="height: {{ prompt_pct }}%"></span>
+                        {% endif %}
+                    </span>
+                </div>
+                <span class="sv-axis">{{ punto.etiqueta }}</span>
+            </div>
+        {% endfor %}
+    </div>
+
+    <div class="l-legend l-mt-lg">
+        <span class="l-legend__item">
+            <span class="sv-legend__swatch sv-legend__swatch--total"></span>
+            <span class="sv-mono">Tokens totales</span>
+        </span>
+        <span class="l-legend__item">
+            <span class="sv-legend__swatch sv-legend__swatch--prompt"></span>
+            <span class="sv-mono">Prompt (entrada)</span>
+        </span>
+        <span class="l-spacer"></span>
+        <span class="sv-mono sv-muted">{{ metricas.serie|length }} periodo(s) · {{ metricas.desde }} → {{ metricas.hasta }}</span>
+    </div>
+{% else %}
+    <div class="l-empty">
+        <span class="sv-eyebrow">Sin datos</span>
+        <p class="sv-body">No hay consumo registrado en esta ventana.<br>
+           Ejecuta el refresco de métricas o genera tráfico a través del gateway.</p>
+    </div>
+{% endif %}

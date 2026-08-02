@@ -30,7 +30,6 @@ services:
       - "8007:8007"
     volumes:
       - ./hf_cache:/root/.cache/huggingface
-      - ./entrypoint.sh:/usr/local/bin/entrypoint.sh
     deploy:
       resources:
         reservations:

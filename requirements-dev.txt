@@ -1,0 +1,8 @@
+# ==============================================================================
+# Sooniverse Infra - Dependencias de desarrollo/pruebas
+# ==============================================================================
+# Instalar además de las dependencias de ejecución (README.md):
+#   pip install -r requirements-dev.txt
+# ==============================================================================
+pytest>=9.0
+moto[ec2]>=5.2
