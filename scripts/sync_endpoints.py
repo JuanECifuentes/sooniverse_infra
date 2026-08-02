@@ -76,6 +76,30 @@ READY_RE = re.compile(r"SOONIVERSE_WORKER_READY=([^|\s]+)\|([0-9.]+)\|(\d+)")
 NODE_IPS_RE = re.compile(r"SOONIVERSE_NODE_IPS=([0-9.,]+)")
 IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 HEALTH_CHECK_TIMEOUT_SECONDS = 5
+# LiteLLM tarda 1-4 min en aceptar conexiones tras 'docker compose up -d --no-deps
+# litellm' (Prisma + init del proxy); confirmado en corridas reales que el rango
+# varía bastante (una vez ~90s, otra vez ~4min). Antes, un sleep fijo de 6s + un
+# único curl (con el resultado descartado) hacía que esta función reportara
+# éxito siempre, aunque LiteLLM todavía devolviera connection refused durante
+# minutos -causando 502 en verify_deployment.py y en cualquier cliente que
+# pegara justo después de una resincronización de endpoints.
+LITELLM_READY_TIMEOUT_SECONDS = 300
+LITELLM_READY_POLL_INTERVAL_SECONDS = 5
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_REMOTE_LINE_RE = re.compile(r"^\([^)]*pid=\d+\)\s?(.*)$")
+
+
+def _strip_sky_exec_echo(raw_output: str) -> str:
+    """'sky exec' imprime 'Command to run: <comando>' como eco ANTES de ejecutar
+    y cada línea remota real llega con un prefijo '(nombre, pid=N)'. Sin filtrar
+    ambas capas, un marcador de texto (p.ej. SOONIVERSE_LITELLM_READY) que
+    aparece dentro del propio comando enviado (el bucle de espera lo contiene
+    literalmente) se detectaría como éxito incluso si el comando remoto nunca
+    llegó a imprimirlo de verdad."""
+    clean = _ANSI_RE.sub("", raw_output or "")
+    lines = [m.group(1) for line in clean.splitlines() if (m := _REMOTE_LINE_RE.match(line.strip()))]
+    return "\n".join(lines)
 
 
 # =============================================================================
@@ -419,19 +443,60 @@ def push_and_reload(gateway_cluster: str) -> bool:
             print(f"[ERROR] No se pudo escribir el config remoto (código {exc.returncode}).")
             return False
 
+    attempts = LITELLM_READY_TIMEOUT_SECONDS // LITELLM_READY_POLL_INTERVAL_SECONDS
+    # OJO #1: litellm_config.yaml se monta con un bind mount normal
+    # ('volumes:', no 'configs:' de Compose) -Compose NO seguimiento el
+    # contenido de ese archivo para decidir si recrear el contenedor, solo la
+    # definición del servicio (imagen, environment, command...). Por eso 'up -d
+    # --no-deps litellm' es un no-op cuando lo único que cambió es el YAML: el
+    # proceso de LiteLLM sigue vivo con la config vieja en memoria
+    # indefinidamente (confirmado en una corrida real: el contenedor llevaba 37
+    # minutos arriba tras un 'reload' que reportó éxito, y el modelo nuevo
+    # nunca apareció en /v1/models). Se usa 'restart' para forzar que el
+    # proceso relea el archivo sí o sí.
+    #
+    # OJO #2: el puerto 4000 de litellm NO se publica al host salvo
+    # 'exponer_puertos_directos: true' (nginx es la única puerta pública). Un
+    # curl a http://localhost:4000/... desde el HOST del Gateway siempre da
+    # "Connection refused" -no porque LiteLLM no esté listo, sino porque el
+    # puerto no existe ahí. Se usa el propio healthcheck de Docker (accesible
+    # vía `docker inspect` desde el host sin publicar el puerto) en vez de
+    # reinventar la comprobación HTTP.
     reload_cmd = (
         f"cd {REMOTE_ROOT}/docker_images/gateway && "
-        f"sudo docker compose --env-file {REMOTE_ROOT}/.env up -d --no-deps litellm && "
-        f"sleep 6 && curl -sf http://localhost:4000/health/readiness || true"
+        f"sudo docker compose --env-file {REMOTE_ROOT}/.env restart litellm && "
+        f"for i in $(seq 1 {attempts}); do "
+        f"status=$(sudo docker inspect --format '{{{{.State.Health.Status}}}}' sooniverse-litellm 2>/dev/null); "
+        f"if [ \"$status\" = healthy ]; then echo SOONIVERSE_LITELLM_READY; exit 0; fi; "
+        f"echo \"[ESPERA] litellm aun no responde ($i/{attempts}, estado=$status)\"; "
+        f"sleep {LITELLM_READY_POLL_INTERVAL_SECONDS}; "
+        f"done; echo SOONIVERSE_LITELLM_TIMEOUT; exit 1"
     )
-    print("[EXEC] Recargando el contenedor LiteLLM en el Gateway...")
+    print("[EXEC] Recargando el contenedor LiteLLM en el Gateway (esperando healthcheck)...")
     try:
-        subprocess.run([sky, "exec", gateway_cluster, reload_cmd], check=True)
-    except subprocess.CalledProcessError as exc:
-        print(f"[WARNING] La recarga de LiteLLM devolvió código {exc.returncode}. Revisa 'sky logs'.")
+        proc = subprocess.run(
+            [sky, "exec", gateway_cluster, reload_cmd],
+            capture_output=True, text=True,
+            timeout=LITELLM_READY_TIMEOUT_SECONDS + 60,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        print(f"[WARNING] La recarga de LiteLLM no respondió: {exc}")
         return False
 
-    return True
+    output = _strip_sky_exec_echo((proc.stdout or "") + (proc.stderr or ""))
+    for line in output.splitlines():
+        if line.startswith("[ESPERA]"):
+            print(f"  {line}")
+
+    if "SOONIVERSE_LITELLM_READY" in output:
+        return True
+
+    print(
+        f"[WARNING] LiteLLM no pasó su healthcheck tras {LITELLM_READY_TIMEOUT_SECONDS}s de "
+        f"recargarse. Revisa 'sky logs {gateway_cluster}' y "
+        "'docker logs sooniverse-litellm' en el Gateway."
+    )
+    return False
 
 
 def _current_network_context(config: Dict[str, Any]) -> Dict[str, Optional[str]]:
@@ -562,7 +627,9 @@ def run_once(config: Dict[str, Any], args: argparse.Namespace) -> int:
         register_in_db(endpoints, names, config)
 
     if not args.skip_push:
-        push_and_reload(names["__gateway__"])
+        if not push_and_reload(names["__gateway__"]):
+            print("\n[ERROR] LiteLLM no quedó sano tras la recarga; el pool NO quedó sincronizado.")
+            return 1
 
     print("\n[SUCCESS] Balanceador LiteLLM sincronizado con el pool de workers.")
     return 0
