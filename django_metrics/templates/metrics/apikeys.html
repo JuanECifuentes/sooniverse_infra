@@ -1,0 +1,143 @@
+{% extends "metrics/base.html" %}
+{% load humanize %}
+
+{% block titulo %}Gestor de API Keys{% endblock %}
+
+{% block contenido %}
+<div class="l-page-head">
+    <div class="l-page-head__text">
+        <span class="sv-eyebrow">Credenciales</span>
+        <h2>Gestor de API Keys</h2>
+        <p class="sv-body">
+            Las keys se emiten en LiteLLM y se registran aquí con sus metadatos y consumo.
+            La clave en claro se muestra <span class="sv-strong">una única vez</span>: no se persiste.
+        </p>
+    </div>
+    <div class="l-page-head__actions">
+        <span class="sv-badge sv-badge--success">{{ total_activas }} activa(s)</span>
+        <span class="sv-badge sv-badge--muted">{{ total_keys }} en total</span>
+        <a class="sv-btn sv-btn--ghost sv-btn--sm" href="{% url 'metrics:dashboard' %}">Ver métricas</a>
+    </div>
+</div>
+
+{# ------------------------------------------------------- KEY RECIÉN EMITIDA #}
+{% if key_emitida %}
+<section class="sv-alert sv-alert--success l-mb-lg">
+    <div class="l-stack l-stack--tight">
+        <span class="sv-eyebrow">Copia esta clave ahora</span>
+        <p class="sv-body">No volverá a mostrarse. Guárdala en tu gestor de secretos.</p>
+        <code class="sv-secret">{{ key_emitida }}</code>
+    </div>
+</section>
+{% endif %}
+
+{# ------------------------------------------------------------ ALTA DE KEY #}
+<section class="sv-card l-mb-lg">
+    <div class="l-stack l-stack--tight l-mb-md">
+        <span class="sv-eyebrow">Nueva credencial</span>
+        <h3>Crear API Key</h3>
+    </div>
+
+    <form method="post" novalidate>
+        {% csrf_token %}
+
+        {% if form.non_field_errors %}
+            <div class="sv-alert sv-alert--error l-mb-md">{{ form.non_field_errors }}</div>
+        {% endif %}
+
+        <div class="l-grid l-grid--form">
+            {% for campo in form %}
+                <div class="l-field {% if campo.name == 'descripcion' %}l-field--wide{% endif %}">
+                    <label class="sv-label" for="{{ campo.id_for_label }}">{{ campo.label }}</label>
+                    {{ campo }}
+                    {% if campo.help_text %}<span class="sv-help">{{ campo.help_text }}</span>{% endif %}
+                    {% for error in campo.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+                </div>
+            {% endfor %}
+        </div>
+
+        <div class="l-form-actions">
+            <button type="submit" class="sv-btn sv-btn--primary">Emitir API Key</button>
+            <span class="sv-help">Se registra en <span class="sv-mono">{{ litellm_url }}</span></span>
+        </div>
+    </form>
+</section>
+
+{# ---------------------------------------------------------------- LISTADO #}
+<section class="sv-card l-card--flush">
+    <div class="l-card__head">
+        <div class="l-stack l-stack--tight">
+            <span class="sv-eyebrow">Inventario</span>
+            <h3>API Keys registradas</h3>
+        </div>
+        <div class="l-row">
+            <span class="sv-badge sv-badge--info">{{ consumo_global|intcomma }} tokens acumulados</span>
+            <span class="sv-badge sv-badge--secure">${{ gasto_global|floatformat:4 }} USD</span>
+        </div>
+    </div>
+
+    <div class="l-table-wrap">
+        <table class="sv-table">
+            <thead>
+                <tr>
+                    <th>Alias</th>
+                    <th>Estado</th>
+                    <th>Prefijo</th>
+                    <th>Responsable</th>
+                    <th class="sv-num">Peticiones</th>
+                    <th class="sv-num">Tokens</th>
+                    <th class="sv-num">USD</th>
+                    <th class="sv-num">Presupuesto</th>
+                    <th>Último uso</th>
+                    <th class="sv-num">Acciones</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for fila in filas %}
+                    <tr>
+                        <td>
+                            <a href="{% url 'metrics:api_key_detalle' fila.id %}" class="sv-strong">{{ fila.key_alias }}</a>
+                            {% if fila.descripcion %}<br><span class="sv-help">{{ fila.descripcion|truncatechars:60 }}</span>{% endif %}
+                        </td>
+                        <td>
+                            {% if fila.is_active %}
+                                <span class="sv-badge sv-badge--success"><span class="sv-dot sv-dot--on"></span>Activa</span>
+                            {% else %}
+                                <span class="sv-badge sv-badge--danger"><span class="sv-dot sv-dot--off"></span>Inactiva</span>
+                            {% endif %}
+                        </td>
+                        <td class="sv-mono">{{ fila.key_prefix|default:"—" }}</td>
+                        <td class="sv-mono">{{ fila.owner_email|default:"—" }}</td>
+                        <td class="sv-num">{{ fila.peticiones|intcomma }}</td>
+                        <td class="sv-num sv-num--accent">{{ fila.consumo_total|default:0|intcomma }}</td>
+                        <td class="sv-num">${{ fila.gasto|default:0|floatformat:4 }}</td>
+                        <td class="sv-num">
+                            {% if fila.max_budget_usd %}${{ fila.max_budget_usd|floatformat:2 }}{% else %}—{% endif %}
+                        </td>
+                        <td class="sv-mono">
+                            {% if fila.ultimo_uso %}{{ fila.ultimo_uso|date:"d/m/Y H:i" }}{% else %}nunca{% endif %}
+                        </td>
+                        <td class="sv-num">
+                            <div class="l-table-actions">
+                                <form method="post" action="{% url 'metrics:api_key_toggle' fila.id %}" class="l-inline-form">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    {% if fila.is_active %}
+                                        <input type="hidden" name="accion" value="desactivar">
+                                        <button type="submit" class="sv-btn sv-btn--danger sv-btn--sm">Desactivar</button>
+                                    {% else %}
+                                        <input type="hidden" name="accion" value="reactivar">
+                                        <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm">Reactivar</button>
+                                    {% endif %}
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="10" class="sv-help">Aún no hay API Keys registradas. Crea la primera arriba.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

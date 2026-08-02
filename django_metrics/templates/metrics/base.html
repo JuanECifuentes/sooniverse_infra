@@ -1,0 +1,69 @@
+{% load static %}<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block titulo %}Panel{% endblock %} · {{ MARCA_NOMBRE_1 }}{{ MARCA_NOMBRE_2 }}</title>
+
+    {# Maquetación (intercambiable por proyecto) #}
+    <link rel="stylesheet" href="{% static 'css/layout.css' %}">
+    {# Identidad de marca encapsulada: reemplazar SOLO este archivo para re-tematizar #}
+    <link rel="stylesheet" href="{% static 'css/theme-sooniverse.css' %}">
+</head>
+<body>
+    <div class="sv-noise" aria-hidden="true"></div>
+
+    <div class="l-shell">
+        <div class="sv-aura" aria-hidden="true"></div>
+
+        <header class="sv-header">
+            <div class="l-container l-header">
+                <a class="l-brand" href="{% url 'metrics:dashboard' %}">
+                    <span class="sv-logo__node" aria-hidden="true"></span>
+                    <span class="l-brand__stack">
+                        <span class="sv-logo">
+                            <span class="sv-logo__solid">{{ MARCA_NOMBRE_1 }}</span><span class="sv-logo__gradient">{{ MARCA_NOMBRE_2 }}</span>
+                        </span>
+                    </span>
+                </a>
+
+                <nav class="l-nav">
+                    <a class="sv-nav__link {% if seccion == 'metricas' %}sv-nav__link--active{% endif %}"
+                       href="{% url 'metrics:dashboard' %}">Métricas</a>
+                    <a class="sv-nav__link {% if seccion == 'apikeys' %}sv-nav__link--active{% endif %}"
+                       href="{% url 'metrics:api_keys' %}">API Keys</a>
+                    <a class="sv-nav__link" href="/admin/">Admin</a>
+                </nav>
+
+                <div class="l-header__meta">
+                    <span class="sv-badge sv-badge--info">{{ CLIENTE_ID }}</span>
+                    <span class="sv-badge {% if ENTORNO == 'prod' %}sv-badge--success{% else %}sv-badge--muted{% endif %}">{{ ENTORNO }}</span>
+                </div>
+            </div>
+        </header>
+
+        <main class="l-main">
+            <div class="l-container">
+                {% if messages %}
+                    <div class="l-messages">
+                        {% for message in messages %}
+                            <div class="sv-alert sv-alert--{% if message.tags == 'error' %}error{% elif message.tags == 'warning' %}warning{% elif message.tags == 'success' %}success{% else %}info{% endif %}">
+                                <span>{{ message }}</span>
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+
+                {% block contenido %}{% endblock %}
+            </div>
+        </main>
+
+        <footer class="sv-footer">
+            <div class="l-container l-footer">
+                <span class="sv-tagline">{{ MARCA_TAGLINE }}</span>
+                <span>Gateway LiteLLM · {{ LITELLM_BASE_URL }}</span>
+            </div>
+        </footer>
+    </div>
+</body>
+</html>
