@@ -107,6 +107,7 @@ class NetworkSpec:
     tls_enabled: bool = False
     nat_timeout_seconds: int = 300
     extra_tags: Optional[Dict[str, str]] = None
+    aws_profile: Optional[str] = None  # perfil de credenciales (~/.aws/credentials) por cliente
 
     def __post_init__(self) -> None:
         if self.nat_mode not in ("single", "per-az", "none"):
@@ -204,7 +205,22 @@ class AwsNetworkManager:
         self.spec = spec
         self.state = state if state is not None else InMemoryInfraStateStore()
         boto_config = BotoConfig(retries={"max_attempts": 10, "mode": "adaptive"})
-        self._session = session or boto3.Session(region_name=spec.region)
+        # Aislamiento de credenciales por cliente (Fase 6): red_y_aislamiento.aws_profile
+        # selecciona un perfil de ~/.aws/credentials o ~/.aws/config. Si se pasa una
+        # `session` explícita (tests con moto, o el futuro modo BYOC con AssumeRole de
+        # abajo), esta gana sobre `aws_profile`.
+        #
+        # Hook futuro (NO implementado): modo BYOC vía AssumeRole + External ID, para que
+        # el cliente final apruebe el acceso desde SU cuenta AWS sin compartir credenciales
+        # permanentes con nosotros:
+        #   sts = boto3.client("sts")
+        #   creds = sts.assume_role(
+        #       RoleArn=f"arn:aws:iam::{cliente_account_id}:role/SooniverseDeployRole",
+        #       RoleSessionName=f"sooniverse-{spec.client_id}-{spec.environment}",
+        #       ExternalId=cliente_external_id,  # mitiga el "confused deputy problem"
+        #   )["Credentials"]
+        #   session = boto3.Session(aws_access_key_id=creds["AccessKeyId"], ...)
+        self._session = session or boto3.Session(profile_name=spec.aws_profile, region_name=spec.region)
         self.ec2 = self._session.client("ec2", region_name=spec.region, config=boto_config)
 
         if deployment_id:

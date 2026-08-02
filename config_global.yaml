@@ -13,6 +13,10 @@ cliente:
 # 2. Variables de Red y Aislamiento
 red_y_aislamiento:
   region: "us-east-1"         # Región por defecto de la nube
+  # Perfil de ~/.aws/credentials o ~/.aws/config a usar para ESTE cliente
+  # (aislamiento de credenciales multi-cliente, Fase 6). null = perfil por
+  # defecto de la cuenta/entorno (AWS_PROFILE, o credenciales del proceso).
+  aws_profile: null
   image_id: "ami-0d001f8052688dc45"  # AMI personalizada para los workers GPU (opcional)
   # gestion_red: auto -> AwsNetworkManager crea y destruye la VPC/subredes/NAT/SGs.
   #              existente -> comportamiento legado: la VPC/SGs ya existen y se

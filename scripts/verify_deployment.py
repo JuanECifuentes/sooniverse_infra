@@ -36,6 +36,21 @@ except ImportError:
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+DEFAULT_CONFIG_PATH = REPO_ROOT / "config_global.yaml"
+
+
+def artifacts_dir_for(config_path: Path, config: Dict[str, Any]) -> Path:
+    """Misma regla que generate_infra.artifacts_dir_for (duplicada a propósito,
+    ver ese docstring): raíz del repo si --config es el config_global.yaml
+    raíz, `.artifacts/<cliente>-<entorno>/` para cualquier otro (Fase 6)."""
+    try:
+        is_default_root_config = config_path.resolve() == DEFAULT_CONFIG_PATH.resolve()
+    except OSError:
+        is_default_root_config = False
+    if is_default_root_config:
+        return REPO_ROOT
+    cliente = config["cliente"]
+    return REPO_ROOT / ".artifacts" / f"{cliente['id']}-{cliente['entorno']}"
 
 
 @dataclass
@@ -49,6 +64,7 @@ class CheckResult:
 @dataclass
 class VerificationContext:
     config: Dict[str, Any]
+    artifacts_dir: Path = REPO_ROOT
     deployment: Optional[Dict[str, Any]] = None
     resources: List[Dict[str, Any]] = field(default_factory=list)
     gateway_ip: Optional[str] = None
@@ -175,7 +191,7 @@ def check_gateway_reaches_workers(ctx: VerificationContext) -> CheckResult:
     if not ctx.sky_available or not ctx.gateway_ip:
         return CheckResult(name, "N/A", "Requiere 'sky' y una IP de gateway activa", critical=False)
 
-    endpoints_file = REPO_ROOT / ".sooniverse_endpoints.json"
+    endpoints_file = ctx.artifacts_dir / ".sooniverse_endpoints.json"
     if not endpoints_file.exists():
         return CheckResult(name, "N/A", "No existe .sooniverse_endpoints.json (correr sync_endpoints.py --apply)", critical=False)
 
@@ -341,8 +357,8 @@ CHECKS: List[Callable[[VerificationContext], CheckResult]] = [
 ]
 
 
-def build_context(config: Dict[str, Any]) -> VerificationContext:
-    ctx = VerificationContext(config=config)
+def build_context(config: Dict[str, Any], config_path: Path) -> VerificationContext:
+    ctx = VerificationContext(config=config, artifacts_dir=artifacts_dir_for(config_path, config))
     ctx.sky_available = _sky_binary() is not None
 
     red = config["red_y_aislamiento"]
@@ -375,13 +391,14 @@ def build_context(config: Dict[str, Any]) -> VerificationContext:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verificación automática del despliegue Sooniverse.")
-    parser.add_argument("--config", default=str(REPO_ROOT / "config_global.yaml"))
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     args = parser.parse_args()
 
-    with Path(args.config).open("r", encoding="utf-8") as f:
+    config_path = Path(args.config)
+    with config_path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    ctx = build_context(config)
+    ctx = build_context(config, config_path)
 
     results: List[CheckResult] = []
     for check_fn in CHECKS:

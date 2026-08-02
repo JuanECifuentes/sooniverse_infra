@@ -39,10 +39,40 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-ENDPOINTS_CACHE = REPO_ROOT / ".sooniverse_endpoints.json"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "config_global.yaml"
 LITELLM_CONFIG = REPO_ROOT / "docker_images" / "gateway" / "litellm_config.yaml"
-SKY_WORKERS_CONFIG = REPO_ROOT / ".sky_config_workers.yaml"
 REMOTE_ROOT = "/home/ubuntu/sooniverse_infra"
+
+# Reasignados por configure_paths_for() según --config (multi-cliente, Fase 6):
+# aíslan el caché de endpoints y el bastion entre clientes que comparten cuenta
+# AWS. Los valores de abajo son solo el fallback de compatibilidad (config
+# raíz, comportamiento anterior a la Fase 6).
+ENDPOINTS_CACHE = REPO_ROOT / ".sooniverse_endpoints.json"
+SKY_WORKERS_CONFIG = REPO_ROOT / ".sky_config_workers.yaml"
+
+
+def configure_paths_for(config_path: Path, config: Dict[str, Any]) -> None:
+    """Ver `generate_infra.artifacts_dir_for` (misma regla, duplicada a propósito
+    para no acoplar este script a generate_infra.py): si --config es el
+    config_global.yaml de la raíz, se mantienen las rutas legadas en la raíz;
+    cualquier otro --config obtiene su propio `.artifacts/<cliente>-<entorno>/`.
+    """
+    global ENDPOINTS_CACHE, SKY_WORKERS_CONFIG
+
+    try:
+        is_default_root_config = config_path.resolve() == DEFAULT_CONFIG_PATH.resolve()
+    except OSError:
+        is_default_root_config = False
+
+    if is_default_root_config:
+        base_dir = REPO_ROOT
+    else:
+        cliente = config["cliente"]
+        base_dir = REPO_ROOT / ".artifacts" / f"{cliente['id']}-{cliente['entorno']}"
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+    ENDPOINTS_CACHE = base_dir / ".sooniverse_endpoints.json"
+    SKY_WORKERS_CONFIG = base_dir / ".sky_config_workers.yaml"
 
 READY_RE = re.compile(r"SOONIVERSE_WORKER_READY=([^|\s]+)\|([0-9.]+)\|(\d+)")
 NODE_IPS_RE = re.compile(r"SOONIVERSE_NODE_IPS=([0-9.,]+)")
@@ -321,7 +351,7 @@ def render_config(endpoints: List[Dict[str, Any]], config: Dict[str, Any]) -> No
         print(f"[INFO] {len(endpoints) - len(healthy_endpoints)} endpoint(s) no sano(s) excluido(s) "
               f"del litellm_config.yaml (siguen en {ENDPOINTS_CACHE.name} para diagnóstico).")
 
-    healthy_json = REPO_ROOT / ".sooniverse_endpoints.healthy.json"
+    healthy_json = ENDPOINTS_CACHE.parent / ".sooniverse_endpoints.healthy.json"
     healthy_json.write_text(json.dumps(healthy_endpoints, indent=2), encoding="utf-8")
 
     subprocess.run(
@@ -538,6 +568,8 @@ def main() -> int:
 
     with config_path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
+
+    configure_paths_for(config_path, config)
 
     if not args.watch:
         return run_once(config, args)

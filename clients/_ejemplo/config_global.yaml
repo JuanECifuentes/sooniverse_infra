@@ -1,0 +1,116 @@
+# ==============================================================================
+# PLANTILLA DE CLIENTE (Fase 6: multi-cliente)
+# ==============================================================================
+# Para dar de alta un cliente nuevo:
+#   1. cp -r clients/_ejemplo clients/<id-del-cliente>
+#   2. Edita cliente.id, red_y_aislamiento.region/vpc_cidr/aws_profile y
+#      workloads según el contrato comercial de ese cliente.
+#   3. Usa ese archivo con --config en todos los comandos:
+#        python scripts/generate_infra.py --config clients/<id>/config_global.yaml --run
+#        python scripts/destroy_infra.py  --config clients/<id>/config_global.yaml --dry-run
+#        python scripts/verify_deployment.py --config clients/<id>/config_global.yaml
+#      Los manifiestos SkyPilot y el config de bastion de este cliente se
+#      escriben en `.artifacts/<id>-<entorno>/`, aislados de cualquier otro
+#      cliente en la misma cuenta AWS (ver generate_infra.artifacts_dir_for).
+#   4. `python scripts/list_deployments.py` muestra el inventario de TODOS
+#      los clientes desplegados, no solo este.
+#
+# Ver el config_global.yaml de la raíz para la explicación completa de cada
+# campo; aquí solo se documentan los que casi siempre cambian entre clientes.
+# ==============================================================================
+
+# 1. Datos del Cliente y Entorno
+cliente:
+  id: "mi-cliente"            # ÚNICO por cliente: minúsculas, [a-z0-9-], máx 20 caracteres.
+  entorno: "dev"               # prod | dev
+  modo: "byoc"                 # byoc (Bring Your Own Cloud) | hosted
+
+# 2. Variables de Red y Aislamiento
+red_y_aislamiento:
+  region: "us-east-1"
+  # Perfil de ~/.aws/credentials si este cliente vive en una cuenta AWS
+  # distinta a la de otros clientes. null = perfil por defecto.
+  aws_profile: null
+  image_id: "ami-0d001f8052688dc45"
+  gestion_red: "auto"
+  vpc_name: null
+  vpc_id: null
+  subnet_id: null
+  # CIDR distinto al de otros clientes activos en la misma región y cuenta
+  # (si tienes dudas, corre `python scripts/list_deployments.py` primero;
+  # generate_infra.py también avisa si detecta un solape al desplegar).
+  vpc_cidr: "10.10.0.0/16"
+  azs: 1
+  subredes:
+    publicas: null
+    privadas: null
+  nat_gateway:
+    modo: "single"
+    timeout_segundos: 300
+  vpc_endpoints:
+    s3: true
+    ecr: false
+  workers_en_subred_privada: true
+  cidr_permitido_gateway: "0.0.0.0/0"
+  cidr_admin_ssh: "0.0.0.0/0"   # Restringe a la IP/VPN del operador en producción real.
+  security_group_workers: null
+  security_group_gateway: null
+  tags_obligatorios:
+    cliente_id: "mi-cliente"
+    modo: "byoc"
+    entorno: "dev"
+    gestionado_por: "sooniverse"
+
+# 3. Nodo Gateway
+gateway:
+  habilitado: true
+  tipo_instancia: "t3.large"
+  disk_size: 100
+  exponer_puertos_directos: false
+  puertos_publicos:
+    - 4000
+    - 8080
+    - 8000
+  load_balancing_strategy: "latency-based-routing"
+  tls:
+    habilitado: false
+    modo: "self-signed"
+    dominio: null
+  litellm:
+    master_key_env: "LITELLM_MASTER_KEY"
+    num_retries: 2
+    request_timeout: 600
+    cooldown_time: 30
+    allowed_fails: 2
+  open_webui:
+    habilitado: true
+    signup_habilitado: false
+  django_metrics:
+    habilitado: true
+    puerto: 8000
+    metrics_refresh_interval: 300
+
+# 4. Automatización de Base de Datos
+base_de_datos:
+  AUTO_INIT_DB: true
+  auto_refresh_metrics: true
+  schema_dir: "database"
+
+# 5. Perfil de Cargas de Trabajo -- ajusta modelo(s), aceleradores y réplicas
+#    según lo contratado por este cliente.
+workloads:
+  - id: "qwen3-5-llm"
+    modelo: "qwen3.5"
+    hf_repo: "cyankiwi/Qwen3.5-2B-AWQ-4bit"
+    tipo_tarea: "llm-texto"
+    accelerator: "L4"
+    cantidad_gpus: 1
+    replicas: 1
+    tipo_instancia: "g6.xlarge"
+    puerto: 8007
+    nombre_publico: "sooniverse-qwen3.5"
+    peso_balanceo: 1
+    asignacion_fraccional:
+      habilitado: true
+      gpu_memory_utilization: 0.95
+      max_model_len: 16384

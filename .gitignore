@@ -92,3 +92,7 @@ docker_images/gateway/litellm_config.yaml
 .sooniverse_state.*.json
 tests/_tmp_mirrors/
 
+# Artefactos por cliente (Fase 6, multi-cliente): manifiestos SkyPilot y
+# config de bastion de cada clients/<id>/config_global.yaml.
+.artifacts/
+

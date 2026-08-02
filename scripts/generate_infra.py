@@ -27,6 +27,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+CLIENT_ID_RE = re.compile(r"^[a-z0-9-]{1,20}$")
 
 try:
     import yaml
@@ -49,6 +52,33 @@ WORKER_MANIFEST_FMT = ".sky_generated.worker-{wl_id}.yaml"
 SKY_GATEWAY_CONFIG = ".sky_config_gateway.yaml"
 SKY_WORKERS_CONFIG = ".sky_config_workers.yaml"
 ENDPOINTS_CACHE = ".sooniverse_endpoints.json"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "config_global.yaml"
+
+
+def artifacts_dir_for(config_path: Path, config: Dict[str, Any]) -> Path:
+    """Directorio donde se escriben los manifiestos SkyPilot/config de bastion de
+    ESTE cliente (Fase 6, multi-cliente): `.artifacts/<cliente.id>-<entorno>/`.
+
+    Compatibilidad hacia atrás: si `config_path` es el `config_global.yaml` de
+    la raíz del repo (el único punto de entrada antes de la Fase 6), los
+    artefactos se siguen escribiendo en la raíz, sin subcarpeta -así una
+    instalación existente de un solo cliente no cambia de comportamiento.
+    Cualquier otro `--config` (p.ej. `clients/<id>/config_global.yaml`) recibe
+    su propio directorio, para que dos clientes en la misma cuenta AWS no se
+    pisen los manifiestos ni el bastion.
+    """
+    try:
+        is_default_root_config = config_path.resolve() == DEFAULT_CONFIG_PATH.resolve()
+    except OSError:
+        is_default_root_config = False
+
+    if is_default_root_config:
+        return REPO_ROOT
+
+    cliente = config["cliente"]
+    per_client_dir = REPO_ROOT / ".artifacts" / f"{cliente['id']}-{cliente['entorno']}"
+    per_client_dir.mkdir(parents=True, exist_ok=True)
+    return per_client_dir
 
 REMOTE_ROOT = "/home/ubuntu/sooniverse_infra"
 
@@ -97,6 +127,15 @@ class ConfigValidator:
 
         if not cliente.get("id") or not isinstance(cliente["id"], str):
             raise ConfigValidationError("Falta 'cliente.id' o no es una cadena válida.")
+
+        # Todo nombre de recurso AWS/clúster/clave de estado se deriva de este id
+        # (sooniverse-<cliente.id>-<entorno>-...): debe ser válido como componente
+        # de nombre de SG (<=255, sin espacios) y de tag Name sin sorpresas.
+        if not CLIENT_ID_RE.match(cliente["id"]):
+            raise ConfigValidationError(
+                f"'cliente.id' inválido: '{cliente['id']}'. Debe ser minúsculas, [a-z0-9-], "
+                "máx. 20 caracteres (ej. 'acme', 'globex-corp')."
+            )
 
         if cliente.get("entorno") not in cls.ALLOWED_ENTORNOS:
             raise ConfigValidationError(
@@ -762,7 +801,85 @@ def build_network_spec_from_config(config: Dict[str, Any]) -> "Any":
         tls_enabled=bool(tls.get("habilitado", False)),
         nat_timeout_seconds=nat.get("timeout_segundos", 300),
         extra_tags=red.get("tags_obligatorios") or {},
+        aws_profile=red.get("aws_profile"),
     )
+
+
+def _suggest_free_cidr(existing_cidrs: List[str], prefix_len: int = 16) -> Optional[str]:
+    """Primer /16 dentro de 10.0.0.0/8 que no se solapa con ninguno de `existing_cidrs`."""
+    existing_nets = [ipaddress.ip_network(c, strict=False) for c in existing_cidrs]
+    for candidate in ipaddress.ip_network("10.0.0.0/8").subnets(new_prefix=prefix_len):
+        if not any(candidate.overlaps(net) for net in existing_nets):
+            return str(candidate)
+    return None
+
+
+def check_cidr_isolation(config: Dict[str, Any]) -> None:
+    """Aislamiento de CIDR entre clientes (Fase 6): si dos despliegues activos en
+    la misma región comparten/solapan `vpc_cidr`, avisa (no aborta -no es un
+    error si esas VPC nunca se van a peerear- pero impedirá el peering futuro)
+    y sugiere un CIDR libre. Best-effort: si PostgreSQL no está disponible aquí,
+    no bloquea el resto del flujo (la guarda real de "no crear sin poder
+    registrar" ya la aplica `PostgresInfraStateStore.open_deployment`)."""
+    red = config["red_y_aislamiento"]
+    if red.get("gestion_red", "auto") != "auto":
+        return
+
+    cliente = config["cliente"]
+    vpc_cidr = red.get("vpc_cidr", "10.0.0.0/16")
+    region = red["region"]
+
+    try:
+        from db_setup import connect, resolve_db_config
+
+        conn = connect(resolve_db_config(REPO_ROOT / ".env"))
+    except Exception:
+        return
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT client_id, environment, config_snapshot -> 'red_y_aislamiento' ->> 'vpc_cidr'
+                FROM sooniverse.infra_deployment
+                WHERE region = %s AND status NOT IN ('destroyed', 'error')
+                  AND NOT (client_id = %s AND environment = %s)
+                """,
+                (region, cliente["id"], cliente["entorno"]),
+            )
+            rows = cur.fetchall()
+    except Exception:
+        return
+    finally:
+        conn.close()
+
+    try:
+        own_net = ipaddress.ip_network(vpc_cidr, strict=False)
+    except ValueError:
+        return
+
+    overlaps = []
+    for other_client, other_env, other_cidr in rows:
+        if not other_cidr:
+            continue
+        try:
+            other_net = ipaddress.ip_network(other_cidr, strict=False)
+        except ValueError:
+            continue
+        if own_net.overlaps(other_net):
+            overlaps.append((other_client, other_env, other_cidr))
+
+    if not overlaps:
+        return
+
+    suggestion = _suggest_free_cidr([vpc_cidr] + [c for _, _, c in overlaps])
+    for other_client, other_env, other_cidr in overlaps:
+        print(
+            f"[WARNING] 'vpc_cidr' {vpc_cidr} se solapa con el despliegue activo "
+            f"'{other_client}/{other_env}' ({other_cidr}) en la región {region}. No es un error "
+            "si esas VPC nunca se van a interconectar (peering), pero lo impedirá en el futuro."
+            + (f" CIDR libre sugerido: {suggestion}." if suggestion else "")
+        )
 
 
 def config_hash_of(config: Dict[str, Any]) -> str:
@@ -928,6 +1045,7 @@ def deploy(
     # --- FASE: network --------------------------------------------------------
     if "network" in phases:
         print("\n--- [RED] Red AWS (VPC/subredes/NAT/Security Groups) ---")
+        check_cidr_isolation(config)
         if red.get("gestion_red", "auto") == "auto" and dry_run and not deployment_id:
             # Sin despliegue previo: no hay nada que leer y, para no escribir en
             # PostgreSQL durante un dry-run, no se instancia AwsNetworkManager
@@ -967,7 +1085,7 @@ def deploy(
         gw_cfg = builder.build_sky_gateway_config()
         gateway_env: Dict[str, str] = {}
         if gw_cfg:
-            gw_cfg_path = REPO_ROOT / SKY_GATEWAY_CONFIG
+            gw_cfg_path = out_dir / SKY_GATEWAY_CONFIG
             dump_yaml(gw_cfg, gw_cfg_path)
             gateway_env["SKYPILOT_CONFIG"] = str(gw_cfg_path)
             print(f"[INFO] SkyPilot usará {gw_cfg_path.name} (misma VPC que los workers)")
@@ -995,7 +1113,7 @@ def deploy(
         sky_cfg = builder.build_sky_workers_config(gateway_ip=gateway_ip)
         worker_env: Dict[str, str] = {}
         if sky_cfg:
-            cfg_path = REPO_ROOT / SKY_WORKERS_CONFIG
+            cfg_path = out_dir / SKY_WORKERS_CONFIG
             dump_yaml(sky_cfg, cfg_path)
             worker_env["SKYPILOT_CONFIG"] = str(cfg_path)
             print(f"[INFO] SkyPilot usará {cfg_path.name} (use_internal_ips + bastion)")
@@ -1070,10 +1188,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generador y aprovisionador multi-nodo de infraestructura Sooniverse (SkyPilot)."
     )
-    parser.add_argument("--config", default=str(REPO_ROOT / "config_global.yaml"),
-                        help="Ruta al contrato central de configuración")
-    parser.add_argument("--out-dir", default=str(REPO_ROOT),
-                        help="Directorio donde se escriben los manifiestos generados")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH),
+                        help="Ruta al contrato central de configuración (p.ej. clients/acme/config_global.yaml)")
+    parser.add_argument(
+        "--out-dir", default=None,
+        help="Directorio donde se escriben los manifiestos generados. Por defecto: la raíz del repo "
+             "si --config es el config_global.yaml raíz (compatibilidad), o "
+             ".artifacts/<cliente.id>-<entorno>/ para cualquier otro --config (multi-cliente).",
+    )
     parser.add_argument("--run", action="store_true",
                         help="Aprovisiona la topología completa en AWS tras generar los manifiestos")
     parser.add_argument(
@@ -1099,7 +1221,10 @@ def main() -> int:
             config.setdefault("base_de_datos", {})["AUTO_INIT_DB"] = False
             print("[INFO] Override de CLI: AUTO_INIT_DB=false")
 
-        artefactos = generate_manifests(config, Path(args.out_dir))
+        out_dir = Path(args.out_dir) if args.out_dir else artifacts_dir_for(Path(args.config), config)
+        if out_dir != REPO_ROOT:
+            print(f"[INFO] Artefactos de este cliente en: {out_dir.relative_to(REPO_ROOT)}/")
+        artefactos = generate_manifests(config, out_dir)
 
         auto_init = config.get("base_de_datos", {}).get("AUTO_INIT_DB", True)
         print(f"[INFO] AUTO_INIT_DB = {str(auto_init).lower()} "
@@ -1112,7 +1237,7 @@ def main() -> int:
         if args.run:
             deploy(
                 config, artefactos, only=args.only,
-                out_dir=Path(args.out_dir), config_path=Path(args.config),
+                out_dir=out_dir, config_path=Path(args.config),
                 dry_run=args.dry_run,
             )
         else:
