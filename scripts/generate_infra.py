@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -888,6 +889,126 @@ def config_hash_of(config: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# =============================================================================
+# plan_changes() -- reconciliación de modificaciones en caliente (Fase 3/5.4)
+# =============================================================================
+NO_OP = "no-op"
+IN_PLACE = "in-place"
+RECREATE_CLUSTER = "recreate-cluster"
+REQUIRES_DESTROY = "requires-destroy"
+
+# Campos de workload cuyo cambio implica relanzar ese clúster worker (hardware,
+# imagen o puerto distintos no se pueden aplicar sobre una instancia viva).
+WORKLOAD_RECREATE_KEYS = {"accelerator", "cantidad_gpus", "tipo_instancia", "puerto", "hf_repo", "modelo", "replicas"}
+# Campos que solo requieren re-renderizar litellm_config.yaml + reload (sin tocar SkyPilot).
+WORKLOAD_IN_PLACE_KEYS = {"nombre_publico", "peso_balanceo", "asignacion_fraccional"}
+
+
+@dataclass
+class FieldChange:
+    field: str
+    old: Any
+    new: Any
+    classification: str  # no-op | in-place | recreate-cluster | requires-destroy
+    workload_id: Optional[str] = None
+
+    def __str__(self) -> str:
+        suffix = f" (workload={self.workload_id})" if self.workload_id else ""
+        return f"[{self.classification}] {self.field}: {self.old!r} -> {self.new!r}{suffix}"
+
+
+@dataclass
+class ChangePlan:
+    changes: List[FieldChange] = dataclass_field(default_factory=list)
+
+    @property
+    def requires_destroy(self) -> bool:
+        return any(c.classification == REQUIRES_DESTROY for c in self.changes)
+
+    @property
+    def clusters_to_recreate(self) -> List[str]:
+        return sorted({c.workload_id for c in self.changes if c.classification == RECREATE_CLUSTER and c.workload_id})
+
+    @property
+    def is_no_op(self) -> bool:
+        return not self.changes
+
+    def summary(self) -> str:
+        if self.is_no_op:
+            return "Sin cambios respecto al despliegue activo."
+        return "\n".join(str(c) for c in self.changes)
+
+
+def plan_changes(current_snapshot: Optional[Dict[str, Any]], new_config: Dict[str, Any]) -> ChangePlan:
+    """Clasifica cada diferencia entre `current_snapshot` (config_snapshot del
+    despliegue activo registrado en PostgreSQL) y `new_config` (el contrato que
+    se va a aplicar) en no-op | in-place | recreate-cluster | requires-destroy.
+
+    Es puramente informativo: no aplica nada. Quien llama (el orquestador de
+    `--run`) decide qué hacer con el plan -típicamente abortar con un mensaje
+    claro si `requires_destroy`, o relanzar solo `clusters_to_recreate`.
+    """
+    plan = ChangePlan()
+    current_snapshot = current_snapshot or {}
+
+    old_red = current_snapshot.get("red_y_aislamiento", {}) or {}
+    new_red = new_config.get("red_y_aislamiento", {}) or {}
+
+    for key in ("vpc_cidr", "azs"):
+        if old_red.get(key) != new_red.get(key):
+            plan.changes.append(
+                FieldChange(f"red_y_aislamiento.{key}", old_red.get(key), new_red.get(key), REQUIRES_DESTROY)
+            )
+
+    old_nat_modo = (old_red.get("nat_gateway") or {}).get("modo")
+    new_nat_modo = (new_red.get("nat_gateway") or {}).get("modo")
+    if old_nat_modo != new_nat_modo:
+        plan.changes.append(
+            FieldChange("red_y_aislamiento.nat_gateway.modo", old_nat_modo, new_nat_modo, REQUIRES_DESTROY)
+        )
+
+    for key in ("cidr_permitido_gateway", "cidr_admin_ssh"):
+        if old_red.get(key) != new_red.get(key):
+            plan.changes.append(
+                FieldChange(f"red_y_aislamiento.{key}", old_red.get(key), new_red.get(key), IN_PLACE)
+            )
+
+    old_gw = current_snapshot.get("gateway", {}) or {}
+    new_gw = new_config.get("gateway", {}) or {}
+    if old_gw.get("load_balancing_strategy") != new_gw.get("load_balancing_strategy"):
+        plan.changes.append(
+            FieldChange(
+                "gateway.load_balancing_strategy",
+                old_gw.get("load_balancing_strategy"), new_gw.get("load_balancing_strategy"), IN_PLACE,
+            )
+        )
+
+    old_workloads = {wl["id"]: wl for wl in current_snapshot.get("workloads", []) or []}
+    new_workloads = {wl["id"]: wl for wl in new_config.get("workloads", []) or []}
+
+    for wl_id in old_workloads.keys() - new_workloads.keys():
+        plan.changes.append(FieldChange("workloads[].id", wl_id, None, RECREATE_CLUSTER, workload_id=wl_id))
+    for wl_id in new_workloads.keys() - old_workloads.keys():
+        plan.changes.append(FieldChange("workloads[].id", None, wl_id, RECREATE_CLUSTER, workload_id=wl_id))
+
+    for wl_id in old_workloads.keys() & new_workloads.keys():
+        old_wl, new_wl = old_workloads[wl_id], new_workloads[wl_id]
+        for key in WORKLOAD_RECREATE_KEYS:
+            if old_wl.get(key) != new_wl.get(key):
+                plan.changes.append(
+                    FieldChange(f"workloads[{wl_id}].{key}", old_wl.get(key), new_wl.get(key),
+                                RECREATE_CLUSTER, workload_id=wl_id)
+                )
+        for key in WORKLOAD_IN_PLACE_KEYS:
+            if old_wl.get(key) != new_wl.get(key):
+                plan.changes.append(
+                    FieldChange(f"workloads[{wl_id}].{key}", old_wl.get(key), new_wl.get(key),
+                                IN_PLACE, workload_id=wl_id)
+                )
+
+    return plan
+
+
 def generate_manifests(config: Dict[str, Any], out_dir: Path, builder: Optional["TopologyBuilder"] = None) -> Dict[str, Any]:
     """Escribe todos los manifiestos de la topología y devuelve sus rutas."""
     builder = builder or TopologyBuilder(config)
@@ -969,22 +1090,55 @@ def _phases_for(only: str) -> set:
     raise ValueError(f"--only inválido: {only}")
 
 
+class RequiresDestroyError(Exception):
+    """plan_changes() detectó un cambio que no es modificable en caliente."""
+
+
 def _open_state_store(config: Dict[str, Any]):
     """Abre (o recupera) el despliegue activo en PostgreSQL. Si la BD no es
-    alcanzable, lanza ANTES de que se cree nada en AWS (guardia de la Fase 2)."""
+    alcanzable, lanza ANTES de que se cree nada en AWS (guardia de la Fase 2).
+
+    Si ya existía un despliegue activo, compara su `config_snapshot` contra
+    `config` con `plan_changes()`: si el plan exige destroy (p.ej. cambió
+    `vpc_cidr`), aborta con un mensaje explícito en vez de intentar aplicar un
+    cambio que AwsNetworkManager no puede hacer en caliente. Si el plan es
+    aplicable, actualiza el snapshot para que la próxima comparación sea
+    correcta.
+    """
     from infra_state import PostgresInfraStateStore
 
     cliente = config["cliente"]
     red = config["red_y_aislamiento"]
     store = PostgresInfraStateStore()
     store.ping()  # aborta aquí si PostgreSQL no responde
+
+    existing = store.get_active_deployment(cliente["id"], cliente["entorno"], red["region"])
+    config_hash = config_hash_of(config)
+
+    if existing and existing.get("config_snapshot"):
+        plan = plan_changes(existing["config_snapshot"], config)
+        if not plan.is_no_op:
+            print("[CAMBIOS] plan_changes detectó diferencias respecto al despliegue activo:")
+            print("\n".join(f"  {line}" for line in plan.summary().splitlines()))
+            if plan.requires_destroy:
+                raise RequiresDestroyError(
+                    "Uno o más cambios requieren destroy + provision (no son modificables en "
+                    "caliente): " + "; ".join(
+                        c.field for c in plan.changes if c.classification == REQUIRES_DESTROY
+                    ) + ". Corre 'destroy_infra.py' y luego 'generate_infra.py --run' de nuevo."
+                )
+            if plan.clusters_to_recreate:
+                print(f"[CAMBIOS] Clústeres worker a relanzar: {', '.join(plan.clusters_to_recreate)}")
+
     deployment_id = store.open_deployment(
         client_id=cliente["id"],
         environment=cliente["entorno"],
         region=red["region"],
-        config_hash=config_hash_of(config),
+        config_hash=config_hash,
         config_snapshot=config,
     )
+    if existing:
+        store.update_config_snapshot(deployment_id, config_hash, config)
     return store, deployment_id
 
 
@@ -1037,6 +1191,13 @@ def deploy(
             )
             deployment_id = existing["deployment_id"] if existing else None
             print(f"[ESTADO] (dry-run, solo lectura) deployment_id={deployment_id or '(ninguno todavía)'}")
+            if existing and existing.get("config_snapshot"):
+                plan = plan_changes(existing["config_snapshot"], config)
+                if not plan.is_no_op:
+                    print("[CAMBIOS] (dry-run) plan_changes respecto al despliegue activo:")
+                    print("\n".join(f"  {line}" for line in plan.summary().splitlines()))
+                    if plan.requires_destroy:
+                        print("[CAMBIOS] Requeriría destroy + provision (no aplicable en caliente).")
         else:
             t0 = time.monotonic()
             state, deployment_id = _open_state_store(config)
@@ -1249,6 +1410,9 @@ def main() -> int:
 
     except ConfigValidationError as e:
         print(f"\n[ERROR DE CONFIGURACIÓN] {e}", file=sys.stderr)
+        return 1
+    except RequiresDestroyError as e:
+        print(f"\n[CAMBIOS NO APLICABLES EN CALIENTE] {e}", file=sys.stderr)
         return 1
     except Exception as e:  # noqa: BLE001 - frontera del CLI
         print(f"\n[ERROR INESPERADO] {e}", file=sys.stderr)

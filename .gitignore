@@ -91,6 +91,7 @@ docker_images/gateway/litellm_config.yaml
 # Espejo local de estado (PostgresInfraStateStore) y mirrors de prueba
 .sooniverse_state.*.json
 tests/_tmp_mirrors/
+tests/_tmp_nginx_smoke/
 
 # Artefactos por cliente (Fase 6, multi-cliente): manifiestos SkyPilot y
 # config de bastion de cada clients/<id>/config_global.yaml.

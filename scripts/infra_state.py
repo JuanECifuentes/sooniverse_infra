@@ -72,6 +72,15 @@ class InfraStateStore(Protocol):
     ) -> None:
         ...
 
+    def update_config_snapshot(
+        self, deployment_id: str, config_hash: str, config_snapshot: Dict[str, Any]
+    ) -> None:
+        """Reemplaza `config_snapshot`/`config_hash` tras aceptar un `plan_changes`.
+        `open_deployment` NO actualiza el snapshot de un despliegue ya activo (para no
+        pisarlo antes de que el operador vea el plan) -esto se llama explícitamente
+        después de decidir aplicar los cambios."""
+        ...
+
     def record_resource(self, deployment_id: str, **fields: Any) -> None:
         """UPSERT de un recurso. Campos esperados: resource_type, component, aws_id,
         aws_arn, region, availability_zone, parent_aws_id, delete_order,
@@ -190,6 +199,13 @@ class InMemoryInfraStateStore:
         dep.status = status
         if error is not None:
             dep.last_error = error
+
+    def update_config_snapshot(
+        self, deployment_id: str, config_hash: str, config_snapshot: Dict[str, Any]
+    ) -> None:
+        dep = self._deployments[deployment_id]
+        dep.config_hash = config_hash
+        dep.config_snapshot = config_snapshot
 
     def record_resource(self, deployment_id: str, **fields: Any) -> None:
         aws_id = fields.get("aws_id")
@@ -345,7 +361,8 @@ class PostgresInfraStateStore:
             cur.execute(
                 """
                 SELECT deployment_id, client_id, environment, region, cloud, status,
-                       managed_network, config_hash, created_at, updated_at, destroyed_at, last_error
+                       managed_network, config_hash, config_snapshot,
+                       created_at, updated_at, destroyed_at, last_error
                 FROM sooniverse.infra_deployment
                 WHERE client_id = %s AND environment = %s AND region = %s
                   AND status NOT IN ('destroyed', 'error')
@@ -393,6 +410,32 @@ class PostgresInfraStateStore:
                     VALUES (%s, 'network', 'set_deployment_status', %s, %s)
                     """,
                     (deployment_id, "error" if status == "error" else "ok", f"status -> {status}"),
+                )
+        self._mirror(deployment_id)
+
+    def update_config_snapshot(
+        self, deployment_id: str, config_hash: str, config_snapshot: Dict[str, Any]
+    ) -> None:
+        from psycopg2.extras import Json
+
+        snapshot = _strip_secrets(config_snapshot)
+        conn = self._connect()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE sooniverse.infra_deployment
+                    SET config_hash = %s, config_snapshot = %s, updated_at = now()
+                    WHERE deployment_id = %s
+                    """,
+                    (config_hash, Json(snapshot), deployment_id),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO sooniverse.infra_event (deployment_id, phase, action, status, message)
+                    VALUES (%s, 'network', 'update_config_snapshot', 'ok', 'contrato actualizado tras plan_changes')
+                    """,
+                    (deployment_id,),
                 )
         self._mirror(deployment_id)
 

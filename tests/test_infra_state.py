@@ -141,3 +141,58 @@ def test_local_mirror_file_written(store):
     assert mirror_path.exists()
     assert deployment_id in mirror_path.read_text(encoding="utf-8")
     mirror_path.unlink()
+
+
+def test_unique_active_deployment_index_blocks_second_active_row(store):
+    """ux_infra_deployment_active (database/002_infra_state.sql) debe impedir dos
+    filas 'activas' (status no en destroyed/error) para el mismo
+    (client_id, environment, region), incluso escribiendo SQL crudo -no solo
+    vía open_deployment(), que ya deduplica en Python antes de insertar."""
+    import psycopg2
+
+    store.open_deployment(TEST_CLIENT, TEST_ENV, TEST_REGION)
+
+    conn = store._connect()
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO sooniverse.infra_deployment "
+                "(deployment_id, client_id, environment, region, status) "
+                "VALUES (gen_random_uuid(), %s, %s, %s, 'creating')",
+                (TEST_CLIENT, TEST_ENV, TEST_REGION),
+            )
+    conn.rollback()
+
+
+def test_two_destroyed_rows_for_same_key_are_allowed(store):
+    """La restricción única solo aplica a filas activas: dos despliegues ya
+    destruidos del mismo (cliente, entorno, región) no deben chocar entre sí
+    (representan ciclos de vida históricos distintos)."""
+    dep1 = store.open_deployment(TEST_CLIENT, TEST_ENV, TEST_REGION)
+    store.close_deployment(dep1)
+
+    dep2 = store.open_deployment(TEST_CLIENT, TEST_ENV, TEST_REGION)
+    store.close_deployment(dep2)
+
+    assert dep1 != dep2
+
+
+def test_get_active_deployment_includes_config_snapshot(store):
+    snapshot = {"cliente": {"id": TEST_CLIENT}, "region": TEST_REGION}
+    store.open_deployment(TEST_CLIENT, TEST_ENV, TEST_REGION, config_snapshot=snapshot)
+
+    active = store.get_active_deployment(TEST_CLIENT, TEST_ENV, TEST_REGION)
+    assert active is not None
+    assert active["config_snapshot"]["cliente"]["id"] == TEST_CLIENT
+
+
+def test_update_config_snapshot_persists_and_strips_secrets(store):
+    deployment_id = store.open_deployment(TEST_CLIENT, TEST_ENV, TEST_REGION, config_snapshot={"v": 1})
+    store.update_config_snapshot(
+        deployment_id, "newhash", {"v": 2, "secrets": {"DB_PASSWORD": "nope"}}
+    )
+
+    active = store.get_active_deployment(TEST_CLIENT, TEST_ENV, TEST_REGION)
+    assert active["config_hash"] == "newhash"
+    assert active["config_snapshot"]["v"] == 2
+    assert "DB_PASSWORD" not in active["config_snapshot"].get("secrets", {})
