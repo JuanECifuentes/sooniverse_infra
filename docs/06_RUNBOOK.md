@@ -77,11 +77,30 @@ sky exec sooniverse-<cliente>-<entorno>-gw "curl -sv --max-time 5 http://$GW_WOR
   ```
 - **Solución:** esperar 1-2 minutos (las ENIs de instancias recién terminadas tardan en liberarse) y re-correr `destroy_infra.py --yes` — es idempotente, solo reintenta lo que falló.
 
+## `destroy_infra.py` no puede borrar la VPC: queda un SG `sky-sg-*` sin dueño
+
+- **Síntoma:** tras varios reintentos, todo se borra salvo la VPC, con `DependencyViolation`; `aws ec2 describe-security-groups --filters Name=vpc-id,Values=<vpc-id>` muestra un SG adicional (además de `default` y los nuestros) con un nombre tipo `sky-sg-<usuario>-<hash>` y tag `skypilot=true`.
+- **Causa:** confirmado en una corrida real. SkyPilot puede auto-crear su propio Security Group ("Auto-created security group for Ray workers") dentro de nuestra VPC en ciertas circunstancias, y **no lo registramos en `sooniverse.infra_resource`** -el mecanismo de propiedad correctamente se niega a borrar algo que no reconoce, pero eso bloquea el borrado de la VPC. Esto es exactamente el escenario "discovered_dependency" que la especificación original del proyecto contemplaba detectar automáticamente (por VPC + prefijo de nombre `sky-sg-`) y que **todavía no está implementado**.
+- **Diagnóstico:**
+  ```bash
+  aws ec2 describe-security-groups --region <region> --filters Name=vpc-id,Values=<vpc-id> \
+    --query 'SecurityGroups[].{Id:GroupId,Name:GroupName}'
+  ```
+- **Solución manual** (verificar primero que no tenga ENIs asociadas, es decir que `describe-network-interfaces` para esa VPC ya esté vacío):
+  ```bash
+  aws ec2 revoke-security-group-ingress --region <region> --group-id <sg-id> --ip-permissions '<copiar de describe-security-groups>'
+  aws ec2 revoke-security-group-egress  --region <region> --group-id <sg-id> --ip-permissions '<copiar de describe-security-groups>'
+  aws ec2 delete-security-group --region <region> --group-id <sg-id>
+  python scripts/destroy_infra.py --yes   # ahora sí borra la VPC
+  ```
+- **Pendiente (mejora futura, no implementada):** que `AwsNetworkManager` detecte SGs `sky-sg-*` dentro de su propia VPC durante `destroy()`, los registre como `discovered_dependency` y los borre en el mismo ciclo, sin intervención manual.
+
 ## `--scan-orphans` encuentra recursos inesperados
 
 - **Causa posible 1:** un `destroy_infra.py` anterior falló a medias (algún recurso en `report.failed`).
 - **Causa posible 2:** alguien borró la fila de `infra_deployment` a mano en PostgreSQL sin pasar por `destroy_infra.py`.
 - **Solución:** revisar la salida (`deployment_status` de cada huérfano) antes de purgar. `--purge-orphans --yes` los borra en orden seguro, pero es irreversible — confirmar que de verdad no pertenecen a un despliegue activo de otro cliente antes de correrlo.
+- **Falso positivo conocido:** un NAT Gateway recién borrado (por nosotros, correctamente) puede seguir apareciendo unos minutos en `describe-nat-gateways` con `State: deleted` -AWS conserva el registro visible un rato-, y `--scan-orphans` lo listará como "no-registrado" (porque nuestro propio `mark_resource_state` ya lo marcó `deleted` en la BD, así que deja de contar como "conocido"). No representa ningún coste ni acción pendiente; verificar el campo `State` antes de asumir que es un huérfano real.
 
 ## Aviso de solape de CIDR entre clientes
 

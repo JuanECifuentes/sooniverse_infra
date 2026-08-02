@@ -25,8 +25,6 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -288,14 +286,42 @@ def discover_worker_ips(cluster: str, env: Dict[str, str], region: str) -> List[
     return []
 
 
-def check_worker_health(ip: str, port: int) -> bool:
-    """GET /health con timeout corto. vLLM expone /health en su servidor OpenAI-compatible."""
-    req = urllib.request.Request(f"http://{ip}:{port}/health")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_REMOTE_LINE_RE = re.compile(r"^\([^)]*pid=\d+\)\s?(.*)$")
+
+
+def check_worker_health(ip: str, port: int, gateway_cluster: str) -> bool:
+    """GET /health con timeout corto, ejecutado VÍA el gateway (`sky exec`).
+
+    El worker vive en la subred privada (sin IP pública): un intento directo
+    desde donde corre este script -normalmente la máquina del operador, fuera
+    de la VPC- nunca puede alcanzar esa IP y siempre reportaría "no sano" sin
+    importar el estado real del worker (bug real encontrado en una corrida de
+    despliegue real: el pool quedaba vacío aunque vLLM ya respondía /health).
+    El gateway, que sí vive dentro de la VPC, es quien puede comprobarlo de
+    verdad -el mismo patrón que ya usa verify_deployment.py::check_gateway_reaches_workers.
+
+    OJO: 'sky exec' imprime "Command to run: <comando>" como eco ANTES de
+    ejecutar, así que buscar el marcador contra TODO el stdout siempre lo
+    encuentra -incluso si el comando remoto falló- porque el texto del
+    marcador ya aparece literalmente en esa línea de eco (segundo bug real,
+    encontrado en la misma corrida: se reportaba "sano" siempre, sin importar
+    el estado real). Por eso se filtra a solo las líneas con el prefijo
+    "(cluster, pid=NNN)" que sky antepone a la salida real del comando.
+    """
+    cmd = [
+        "sky", "exec", gateway_cluster,
+        f"curl -sf --max-time {HEALTH_CHECK_TIMEOUT_SECONDS} http://{ip}:{port}/health "
+        ">/dev/null 2>&1 && echo SOONIVERSE_HEALTH_OK || echo SOONIVERSE_HEALTH_FAIL",
+    ]
     try:
-        with urllib.request.urlopen(req, timeout=HEALTH_CHECK_TIMEOUT_SECONDS) as resp:
-            return 200 <= resp.status < 300
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=HEALTH_CHECK_TIMEOUT_SECONDS + 25)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
+
+    clean = _ANSI_RE.sub("", result.stdout or "")
+    remote_lines = [m.group(1) for line in clean.splitlines() if (m := _REMOTE_LINE_RE.match(line.strip()))]
+    return "SOONIVERSE_HEALTH_OK" in "\n".join(remote_lines)
 
 
 def build_endpoints(config: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -315,7 +341,7 @@ def build_endpoints(config: Dict[str, Any]) -> List[Dict[str, Any]]:
         frac = wl.get("asignacion_fraccional", {})
         for found in discover_worker_ips(cluster, env, region):
             ip = found["ip"]
-            healthy = check_worker_health(ip, wl["puerto"])
+            healthy = check_worker_health(ip, wl["puerto"], names["__gateway__"])
             if not healthy:
                 print(f"   [WARNING] {ip}:{wl['puerto']} no respondió /health; "
                       "queda fuera del pool de LiteLLM (se reintentará en la próxima sincronización)")

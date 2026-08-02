@@ -682,6 +682,10 @@ class TopologyBuilder:
         }
 
     # -- config de cliente SkyPilot para el Nodo Gateway ------------------------
+    @property
+    def has_network_outputs(self) -> bool:
+        return self._network_outputs is not None
+
     def build_sky_gateway_config(self) -> Dict[str, Any]:
         """
         Fuerza al Nodo Gateway a nacer en la misma VPC que los workers (con su
@@ -803,6 +807,66 @@ def build_network_spec_from_config(config: Dict[str, Any]) -> "Any":
         nat_timeout_seconds=nat.get("timeout_segundos", 300),
         extra_tags=red.get("tags_obligatorios") or {},
         aws_profile=red.get("aws_profile"),
+    )
+
+
+def load_network_outputs_from_state(config: Dict[str, Any], state: Any, deployment_id: str) -> Optional["Any"]:
+    """Reconstruye `aws_network.NetworkOutputs` a partir de lo YA registrado en
+    PostgreSQL para `deployment_id`.
+
+    Necesario porque `--only gateway` / `--only workers` / `--only endpoints` se
+    pueden invocar como procesos SEPARADOS de `--only network` (documentado en
+    docs/07_REFERENCIA_CLI.md como flujo válido). `TopologyBuilder._network_outputs`
+    solo vive en memoria durante una corrida; sin esto, una invocación de
+    `--only gateway` en modo 'auto' no tenía forma de saber el vpc_name/SG reales
+    ya creados, y `build_sky_gateway_config()` producía `{"aws": {}}` -SkyPilot
+    entonces lanzaba el gateway en la VPC por defecto de la cuenta, no en la
+    nuestra (bug real encontrado en una corrida de prueba real).
+
+    Devuelve None si el despliegue no tiene (todavía) VPC + ambos SGs registrados.
+    """
+    from aws_network import NetworkOutputs
+
+    resources = state.list_resources(deployment_id)
+    by_component: Dict[str, List[Dict[str, Any]]] = {}
+    for res in resources:
+        by_component.setdefault(res["component"], []).append(res)
+
+    def first(component: str) -> Optional[Dict[str, Any]]:
+        rows = by_component.get(component)
+        return rows[0] if rows else None
+
+    vpc_row = first("vpc")
+    sg_gw_row = first("sg-gateway")
+    sg_wk_row = first("sg-workers")
+    if not vpc_row or not sg_gw_row or not sg_wk_row:
+        return None
+
+    cliente = config["cliente"]
+
+    def resolved_name(row: Dict[str, Any], fallback_suffix: str) -> str:
+        attrs = row.get("attributes") or {}
+        return attrs.get("name") or f"sooniverse-{cliente['id']}-{cliente['entorno']}-{fallback_suffix}"
+
+    return NetworkOutputs(
+        deployment_id=deployment_id,
+        vpc_id=vpc_row["aws_id"],
+        vpc_name=resolved_name(vpc_row, "vpc"),
+        availability_zones=sorted({
+            r["availability_zone"] for r in by_component.get("subnet-public", []) if r.get("availability_zone")
+        }),
+        public_subnet_ids=[r["aws_id"] for r in by_component.get("subnet-public", [])],
+        private_subnet_ids=[r["aws_id"] for r in by_component.get("subnet-private", [])],
+        internet_gateway_id=(first("igw") or {}).get("aws_id"),
+        nat_gateway_ids=[r["aws_id"] for r in by_component.get("nat", [])],
+        elastic_ip_allocation_ids=[r["aws_id"] for r in by_component.get("eip", [])],
+        public_route_table_id=(first("rtb-public") or {}).get("aws_id"),
+        private_route_table_ids=[r["aws_id"] for r in by_component.get("rtb-private", [])],
+        sg_gateway_id=sg_gw_row["aws_id"],
+        sg_gateway_name=resolved_name(sg_gw_row, "gateway"),
+        sg_workers_id=sg_wk_row["aws_id"],
+        sg_workers_name=resolved_name(sg_wk_row, "workers"),
+        managed_by_us=True,
     )
 
 
@@ -1094,6 +1158,13 @@ class RequiresDestroyError(Exception):
     """plan_changes() detectó un cambio que no es modificable en caliente."""
 
 
+class NetworkNotProvisionedError(Exception):
+    """gestion_red='auto' pero no hay NetworkOutputs disponibles (ni en memoria ni
+    en el estado) al intentar lanzar el gateway o los workers. Lanzar de todos
+    modos dejaría que SkyPilot eligiera la VPC por defecto de la cuenta en
+    silencio -exactamente el bug real que motivó esta guarda."""
+
+
 def _open_state_store(config: Dict[str, Any]):
     """Abre (o recupera) el despliegue activo en PostgreSQL. Si la BD no es
     alcanzable, lanza ANTES de que se cree nada en AWS (guardia de la Fase 2).
@@ -1203,6 +1274,16 @@ def deploy(
             state, deployment_id = _open_state_store(config)
             print(f"[ESTADO] deployment_id={deployment_id} ({time.monotonic() - t0:.1f}s)")
 
+        # Si la red ya fue aprovisionada en una corrida anterior (o en una invocación
+        # separada de --only network), reconstruye vpc_name/SG reales desde el estado
+        # ANTES de las fases de gateway/workers -así --only gateway / --only workers
+        # invocados solos siguen apuntando a la VPC correcta, no a la que SkyPilot
+        # elegiría por defecto.
+        if deployment_id and state:
+            loaded_outputs = load_network_outputs_from_state(config, state, deployment_id)
+            if loaded_outputs:
+                builder.apply_network_outputs(loaded_outputs)
+
     # --- FASE: network --------------------------------------------------------
     if "network" in phases:
         print("\n--- [RED] Red AWS (VPC/subredes/NAT/Security Groups) ---")
@@ -1243,6 +1324,18 @@ def deploy(
     elif "gateway" in phases and artefactos.get("gateway"):
         print("\n--- [GATEWAY] Nodo Gateway (público) ---")
 
+        if red.get("gestion_red", "auto") == "auto" and not builder.has_network_outputs:
+            # Guarda dura: sin esto, build_sky_gateway_config() produce "{}" en
+            # silencio y SkyPilot lanza el gateway en la VPC por defecto de la
+            # cuenta -no en la nuestra- (bug real encontrado en una corrida real:
+            # `--only gateway` invocado sin que `--only network` hubiera corrido
+            # antes, en el mismo proceso o en uno previo con estado persistido).
+            raise NetworkNotProvisionedError(
+                "gestion_red='auto' pero no hay red aprovisionada (ni en memoria ni en "
+                "el estado de PostgreSQL) para este cliente/entorno/región. Corre primero "
+                "'generate_infra.py --run --only network' (o '--run --only all')."
+            )
+
         gw_cfg = builder.build_sky_gateway_config()
         gateway_env: Dict[str, str] = {}
         if gw_cfg:
@@ -1270,6 +1363,13 @@ def deploy(
         print(f"\n--- [WORKERS] --dry-run: se lanzarían: {clusters} ---")
     elif "workers" in phases:
         print("\n--- [WORKERS] Workers vLLM (subred privada) ---")
+
+        if red.get("gestion_red", "auto") == "auto" and not builder.has_network_outputs:
+            raise NetworkNotProvisionedError(
+                "gestion_red='auto' pero no hay red aprovisionada (ni en memoria ni en "
+                "el estado de PostgreSQL) para este cliente/entorno/región. Corre primero "
+                "'generate_infra.py --run --only network' (o '--run --only all')."
+            )
 
         sky_cfg = builder.build_sky_workers_config(gateway_ip=gateway_ip)
         worker_env: Dict[str, str] = {}
@@ -1413,6 +1513,9 @@ def main() -> int:
         return 1
     except RequiresDestroyError as e:
         print(f"\n[CAMBIOS NO APLICABLES EN CALIENTE] {e}", file=sys.stderr)
+        return 1
+    except NetworkNotProvisionedError as e:
+        print(f"\n[RED NO APROVISIONADA] {e}", file=sys.stderr)
         return 1
     except Exception as e:  # noqa: BLE001 - frontera del CLI
         print(f"\n[ERROR INESPERADO] {e}", file=sys.stderr)

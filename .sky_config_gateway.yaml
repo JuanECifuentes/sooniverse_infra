@@ -1,8 +1,0 @@
-# ==============================================================================
-# ARCHIVO GENERADO AUTOMÁTICAMENTE POR SOONIVERSE INFRA GENERATOR
-# NO EDITAR MANUALMENTE. MODIFICAR config_global.yaml EN SU LUGAR.
-# ==============================================================================
-
-aws:
-  vpc_name: sooniverse-vpc
-  security_group_name: sooniverse-gateway

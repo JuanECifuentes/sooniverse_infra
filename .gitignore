@@ -83,6 +83,7 @@ sky_*.yaml
 .sky_generated.*.yaml
 # Config de cliente SkyPilot con VPC / bastion / IPs internas
 .sky_config_workers.yaml
+.sky_config_gateway.yaml
 # Pool de endpoints privados descubierto por scripts/sync_endpoints.py
 .sooniverse_endpoints.json
 .sooniverse_endpoints.healthy.json

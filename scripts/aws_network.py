@@ -328,28 +328,28 @@ class AwsNetworkManager:
     def ensure_vpc(self) -> str:
         """Reutiliza la VPC de este deployment_id si ya existe; si no, la crea con
         DNS support/hostnames habilitados y espera a que quede 'available'."""
+        name = self._name("vpc")
         existing = self._find_by_component(self.ec2.describe_vpcs, "VpcId", "vpc")
         if existing:
             vpc_id = existing["VpcId"]
             logger.info("[SKIP][RED:VPC] Reutilizando VPC existente %s", vpc_id)
-            self._record("vpc", "vpc", vpc_id)
+            self._record("vpc", "vpc", vpc_id, attributes={"name": name})
             return vpc_id
 
-        name = self._name("vpc")
         t0 = time.monotonic()
         resp = self.ec2.create_vpc(
             CidrBlock=self.spec.vpc_cidr,
             TagSpecifications=self._tag_specs("vpc", "vpc", name),
         )
         vpc_id = resp["Vpc"]["VpcId"]
-        self._record("vpc", "vpc", vpc_id, state="creating")
+        self._record("vpc", "vpc", vpc_id, state="creating", attributes={"name": name})
         self._guard_not_default_vpc(vpc_id)
 
         self.ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsSupport={"Value": True})
         self.ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsHostnames={"Value": True})
 
         self._wait("vpc_available", VpcIds=[vpc_id])
-        self._record("vpc", "vpc", vpc_id, state="active")
+        self._record("vpc", "vpc", vpc_id, state="active", attributes={"name": name})
         logger.info("[RED:VPC] VPC %s creada en %.1fs", vpc_id, time.monotonic() - t0)
         return vpc_id
 

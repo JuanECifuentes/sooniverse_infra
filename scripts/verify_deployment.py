@@ -19,14 +19,18 @@ Uso:
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 try:
     import yaml
@@ -73,6 +77,61 @@ class VerificationContext:
 
 def _sky_binary() -> Optional[str]:
     return shutil.which("sky")
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_REMOTE_LINE_RE = re.compile(r"^\([^)]*pid=\d+\)\s?(.*)$")
+
+
+def _sky_exec_remote_output(cluster: str, remote_cmd: str, timeout: int, retries: int = 2) -> str:
+    """Ejecuta `remote_cmd` en `cluster` vía 'sky exec' y devuelve SOLO la salida
+    real del comando remoto -no el "Command to run: <remote_cmd>" que 'sky exec'
+    imprime como eco ANTES de ejecutar. Sin este filtro, buscar un marcador de
+    texto (p.ej. "SOONIVERSE_CURL_FAIL") contra todo el stdout siempre lo
+    encuentra, porque ese texto ya aparece literalmente en la línea de eco del
+    comando -independientemente de si el comando remoto de verdad falló (bug
+    real encontrado en una corrida de despliegue real: dos comprobaciones
+    reportaban FAIL siempre, incluso cuando el curl remoto funcionaba).
+
+    Reintenta unas pocas veces: `sky exec` back-to-back sobre el mismo clúster
+    (p.ej. varias comprobaciones seguidas en la misma corrida de verify) puede
+    fallar de forma transitoria por contención de la sesión SSH/ControlMaster
+    -confirmado en una corrida real: la misma comprobación fallaba dentro de
+    verify_deployment.py pero funcionaba perfectamente al repetirla aislada
+    segundos después."""
+    last_output = ""
+    for attempt in range(retries):
+        try:
+            result = subprocess.run(["sky", "exec", cluster, remote_cmd], capture_output=True, text=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            result = None
+
+        if result is not None:
+            clean = _ANSI_RE.sub("", result.stdout or "")
+            lines = [m.group(1) for line in clean.splitlines() if (m := _REMOTE_LINE_RE.match(line.strip()))]
+            last_output = "\n".join(lines)
+            if last_output:
+                return last_output
+
+        if attempt < retries - 1:
+            time.sleep(3)
+
+    return last_output
+
+
+def _cluster_is_up(cluster: str) -> bool:
+    """True si 'sky status <cluster>' lo encuentra. OJO: a diferencia de
+    'sky status --ip', esta variante sale con código 0 INCLUSO si el clúster no
+    existe (solo imprime "not found" en stdout) -por eso se valida el texto, no
+    el returncode. Evita reportar FAIL crítico cuando el clúster en realidad
+    todavía no se aprovisionó."""
+    try:
+        result = subprocess.run(["sky", "status", cluster], capture_output=True, text=True, timeout=15)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    if result.returncode != 0:
+        return False
+    return "not found" not in result.stdout.lower()
 
 
 def _http_get(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 5) -> Optional[Dict[str, Any]]:
@@ -202,10 +261,12 @@ def check_gateway_reaches_workers(ctx: VerificationContext) -> CheckResult:
     gateway_cluster = f"sooniverse-{ctx.config['cliente']['id']}-{ctx.config['cliente']['entorno']}-gw"
     failures = []
     for ep in endpoints:
-        cmd = ["sky", "exec", gateway_cluster,
-               f"curl -sf --max-time 5 http://{ep['ip']}:{ep['port']}/health || echo SOONIVERSE_CURL_FAIL"]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if "SOONIVERSE_CURL_FAIL" in (result.stdout or ""):
+        remote_cmd = (
+            f"curl -sf --max-time 5 http://{ep['ip']}:{ep['port']}/health >/dev/null 2>&1 "
+            "&& echo SOONIVERSE_CURL_OK || echo SOONIVERSE_CURL_FAIL"
+        )
+        output = _sky_exec_remote_output(gateway_cluster, remote_cmd, timeout=30)
+        if "SOONIVERSE_CURL_OK" not in output:
             failures.append(f"{ep['ip']}:{ep['port']}")
 
     if failures:
@@ -224,13 +285,16 @@ def check_worker_has_internet_egress(ctx: VerificationContext) -> CheckResult:
 
     base = f"sooniverse-{ctx.config['cliente']['id']}-{ctx.config['cliente']['entorno']}"
     cluster = f"{base}-{workloads[0]['id']}".lower().replace("_", "-").replace(".", "-")
-    cmd = ["sky", "exec", cluster, "curl -sfI --max-time 5 https://huggingface.co || echo SOONIVERSE_CURL_FAIL"]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        return CheckResult(name, "FAIL", str(exc))
 
-    if "SOONIVERSE_CURL_FAIL" in (result.stdout or "") or result.returncode != 0:
+    if not _cluster_is_up(cluster):
+        return CheckResult(name, "N/A", f"Clúster '{cluster}' no aprovisionado todavía", critical=False)
+
+    remote_cmd = (
+        "curl -sfI --max-time 5 https://huggingface.co >/dev/null 2>&1 "
+        "&& echo SOONIVERSE_CURL_OK || echo SOONIVERSE_CURL_FAIL"
+    )
+    output = _sky_exec_remote_output(cluster, remote_cmd, timeout=30)
+    if "SOONIVERSE_CURL_OK" not in output:
         return CheckResult(name, "FAIL", "El worker no alcanzó huggingface.co vía NAT")
     return CheckResult(name, "OK", f"{cluster} tiene salida a Internet")
 
@@ -242,7 +306,9 @@ def check_litellm_lists_models(ctx: VerificationContext) -> CheckResult:
 
     master_key = _read_env_var("LITELLM_MASTER_KEY")
     headers = {"Authorization": f"Bearer {master_key}"} if master_key else {}
-    resp = _http_get(f"http://{ctx.gateway_ip}:4000/v1/models", headers=headers)
+    # A través de nginx (puerto 80), no del :4000 directo -ese puerto ya no está
+    # publicado al host desde la Fase 5 salvo 'exponer_puertos_directos: true'.
+    resp = _http_get(f"http://{ctx.gateway_ip}/v1/models", headers=headers)
     if resp is None or "error" in resp:
         return CheckResult(name, "FAIL", str(resp.get("error") if resp else "sin respuesta"))
 
@@ -261,7 +327,7 @@ def check_litellm_pool_health(ctx: VerificationContext) -> CheckResult:
 
     master_key = _read_env_var("LITELLM_MASTER_KEY")
     headers = {"Authorization": f"Bearer {master_key}"} if master_key else {}
-    resp = _http_get(f"http://{ctx.gateway_ip}:4000/health", headers=headers, timeout=15)
+    resp = _http_get(f"http://{ctx.gateway_ip}/health", headers=headers, timeout=15)
     if resp is None or "error" in resp:
         return CheckResult(name, "FAIL", str(resp.get("error") if resp else "sin respuesta"))
 
@@ -282,7 +348,7 @@ def check_end_to_end_completion(ctx: VerificationContext) -> CheckResult:
     headers = {"Authorization": f"Bearer {master_key}"} if master_key else {}
     model = ctx.config["workloads"][0].get("nombre_publico", ctx.config["workloads"][0]["id"])
     payload = {"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 16}
-    resp = _http_post(f"http://{ctx.gateway_ip}:4000/v1/chat/completions", payload, headers=headers)
+    resp = _http_post(f"http://{ctx.gateway_ip}/v1/chat/completions", payload, headers=headers)
     if resp is None or "error" in resp:
         return CheckResult(name, "FAIL", str(resp.get("error") if resp else "sin respuesta"))
     if "choices" not in resp.get("json", {}):
@@ -295,10 +361,16 @@ def check_nginx_routes(ctx: VerificationContext) -> CheckResult:
     if not ctx.gateway_ip:
         return CheckResult(name, "N/A", "No hay IP de gateway", critical=False)
 
+    # /v1/models exige autenticación: sin la master key, un 401 es la prueba de
+    # que nginx SÍ enrutó a LiteLLM (que respondió), no un fallo de ruteo.
+    master_key = _read_env_var("LITELLM_MASTER_KEY")
+    auth_headers = {"Authorization": f"Bearer {master_key}"} if master_key else {}
+
     routes = ["/", "/v1/models", "/panel/", "/healthz"]
     failures = []
     for route in routes:
-        resp = _http_get(f"http://{ctx.gateway_ip}{route}", timeout=5)
+        headers = auth_headers if route == "/v1/models" else None
+        resp = _http_get(f"http://{ctx.gateway_ip}{route}", headers=headers, timeout=5)
         if resp is None or "error" in resp:
             failures.append(route)
     if failures:
@@ -381,8 +453,15 @@ def build_context(config: Dict[str, Any], config_path: Path) -> VerificationCont
         gateway_cluster = f"sooniverse-{cliente['id']}-{cliente['entorno']}-gw"
         try:
             out = subprocess.run(["sky", "status", "--ip", gateway_cluster], capture_output=True, text=True, timeout=20)
-            lines = [l.strip() for l in out.stdout.strip().splitlines() if l.strip()]
-            ctx.gateway_ip = lines[-1] if lines else None
+            # 'sky status --ip' sobre un clúster inexistente sale con código != 0 e
+            # imprime "Cluster(s) not found: ..." en STDOUT (no en stderr) -sin
+            # validar el formato de IP, esa frase se colaba como "gateway_ip" y
+            # rompía cualquier URL construida con ella ("Invalid IPv6 URL").
+            if out.returncode == 0:
+                lines = [l.strip() for l in out.stdout.strip().splitlines() if IPV4_RE.match(l.strip())]
+                ctx.gateway_ip = lines[-1] if lines else None
+            else:
+                ctx.gateway_ip = None
         except (subprocess.TimeoutExpired, FileNotFoundError):
             ctx.gateway_ip = None
 

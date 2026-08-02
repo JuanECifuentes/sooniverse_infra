@@ -30,6 +30,24 @@ Si necesitás cambiar algo que vive en uno de estos archivos, el cambio va en `c
 9. **Todo nombre de recurso/clúster/clave de estado lleva `{cliente.id}-{entorno}` (y región donde aplica).** Nunca un nombre global. `cliente.id` se valida contra `^[a-z0-9-]{1,20}$` — es el límite más estricto de los que imponen los recursos AWS derivados, así que no lo relajes sin revisar todos los usos (nombre de SG, tag Name, nombre de clúster SkyPilot).
 10. **Todo comando destructivo requiere `--yes` o confirmación interactiva, y ofrece `--dry-run`.** Ver `confirm_destructive_action()` en `destroy_infra.py`.
 
+## 2.1 `sky exec` y el parseo de su salida (gotcha real, mordió dos veces)
+
+Si escribís código que ejecuta `sky exec <cluster> "<comando remoto>"` vía `subprocess.run(..., capture_output=True)` y luego busca un marcador de texto en `result.stdout` para saber si el comando remoto tuvo éxito: **`sky exec` imprime `"Command to run: <comando remoto literal>"` como eco ANTES de ejecutar nada.** Si tu comando remoto contiene el propio marcador como texto (p. ej. `curl ... || echo MI_MARCADOR`), ese marcador aparece en el eco **sin importar si el comando remoto de verdad corrió o falló** — una búsqueda ingenua de substring siempre "encuentra" el marcador y el chequeo queda roto en ambos sentidos (falso positivo si buscás éxito, falso negativo permanente si buscás fallo).
+
+Encontrado en una corrida de despliegue real: tres comprobaciones basadas en este patrón (`sync_endpoints.py::check_worker_health`, `verify_deployment.py::check_gateway_reaches_workers` y `check_worker_has_internet_egress`) reportaban resultados incorrectos de forma **consistente**, no aleatoria.
+
+Solución aplicada (`_sky_exec_remote_output()` / `_ANSI_RE` + `_REMOTE_LINE_RE` en ambos archivos): quitar los códigos ANSI de color y quedarte solo con las líneas que `sky exec` prefija con `(nombre-clúster-o-sky-cmd, pid=NNNN)` -esas sí son la salida real del comando remoto, la línea de eco no lleva ese prefijo. Si escribís una comprobación nueva basada en `sky exec`, reusá ese helper en vez de repetir el patrón ingenuo.
+
+Además: `sky exec` de vuelta a un mismo clúster puede fallar de forma **transitoria** si se invoca varias veces seguidas en poco tiempo (contención de SSH/ControlMaster) -confirmado en la misma corrida: la comprobación fallaba dentro del script pero funcionaba perfectamente al repetirla aislada segundos después. Por eso `_sky_exec_remote_output()` reintenta un par de veces con una pequeña espera antes de darse por vencido.
+
+## 2.2 nginx: `proxy_set_header` NO se combina entre niveles
+
+Si un `location {}` define **cualquier** `proxy_set_header`, deja de heredar **todos** los que estaban definidos en el `server {}` que lo contiene -no se combinan, se reemplazan. Encontrado en una corrida real: `location /panel/` agregaba `proxy_set_header X-Script-Name /panel;` sin repetir `Host`/`X-Real-IP`/`X-Forwarded-For`/`X-Forwarded-Proto`, así que Django recibía como `HTTP_HOST` el nombre del `upstream` (`sooniverse_metrics`) en vez del host real, y tiraba `DisallowedHost`. Si necesitás un `proxy_set_header` extra en un `location` que ya vive bajo un `server` con otros definidos, repetilos todos ahí (ver `scripts/render_gateway_stack.py::render_nginx_conf`).
+
+## 2.3 `--only gateway` / `--only workers` como invocaciones separadas de `--only network`
+
+`TopologyBuilder._network_outputs` solo vive en memoria durante una corrida de `deploy()`. Si `--only network` corrió en un proceso y `--only gateway` en OTRO proceso posterior (uso documentado y válido, ver `docs/07_REFERENCIA_CLI.md`), sin `load_network_outputs_from_state()` (que reconstruye `NetworkOutputs` desde PostgreSQL) el segundo proceso no tenía forma de saber el `vpc_name`/SG reales. Encontrado en una corrida real: el Gateway terminó lanzado en la VPC por defecto de la cuenta, completamente aislado de los workers. Ahora hay una guarda dura (`NetworkNotProvisionedError`) que aborta en vez de dejar que SkyPilot elija en silencio -si tocás el flujo de fases de `deploy()`, no la quites.
+
 ## 3. Cómo validar un cambio SIN aprovisionar nada real
 
 En orden de costo creciente:
