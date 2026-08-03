@@ -381,6 +381,7 @@ def build_endpoints(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "weight": wl.get("peso_balanceo", 1),
                 "max_model_len": frac.get("max_model_len"),
                 "healthy": healthy,
+                "capacidades": wl.get("capacidades", {}),
             })
 
     return endpoints
