@@ -901,10 +901,11 @@ class AwsNetworkManager:
                 code = exc.response["Error"]["Code"]
                 self.state.mark_resource_state(self.deployment_id, item.aws_id, "error")
                 report.failed.append({"item": item, "error": code, "message": str(exc)})
+                vpc_id_hint = self._vpc_id_for_diagnostics(item)
                 report.manual_actions_required.append(
                     f"Revisar manualmente {item.component} ({item.aws_id}): {code}. "
                     f"Comando de diagnóstico: aws ec2 describe-network-interfaces "
-                    f"--filters Name=vpc-id,Values=<vpc-id> --region {self.spec.region}"
+                    f"--filters Name=vpc-id,Values={vpc_id_hint} --region {self.spec.region}"
                 )
                 logger.error("[DESTROY] Fallo borrando %s %s: %s", item.component, item.aws_id, exc)
 
@@ -946,6 +947,7 @@ class AwsNetworkManager:
         elif component in ("subnet-public", "subnet-private"):
             self.ec2.delete_subnet(SubnetId=aws_id)
         elif component == "vpc":
+            self._sweep_untracked_security_groups(aws_id)
             self.ec2.delete_vpc(VpcId=aws_id)
         else:
             raise NetworkError(f"Componente desconocido en destroy: {component}")
@@ -955,6 +957,46 @@ class AwsNetworkManager:
             if res.get("aws_id") == item.aws_id:
                 return res.get("parent_aws_id")
         return None
+
+    def _vpc_id_for_diagnostics(self, item: PlannedDeletion) -> str:
+        if item.component == "vpc":
+            return item.aws_id
+        return self._resource_vpc_id(item) or "<vpc-id-desconocida>"
+
+    def _sweep_untracked_security_groups(self, vpc_id: str) -> None:
+        """SkyPilot crea su propio Security Group ('sky-sg-*') por clúster además
+        de los sooniverse-<cliente>-<entorno>-{gateway,workers} que gestionamos
+        nosotros. Ese SG nunca se registra en infra_resource, así que el bucle
+        principal de destroy() nunca lo intenta borrar -y bloquea DeleteVpc con
+        DependencyViolation aunque los SG propios y todas las instancias ya estén
+        fuera (confirmado en una corrida real: 'sky-sg-ifu-be3e' seguía vivo
+        después de que sg-gateway, sg-workers y ambos clústeres SkyPilot se
+        hubieran borrado sin error). El SG 'default' se deja: AWS lo borra solo
+        al borrar la VPC y no se puede eliminar explícitamente."""
+        try:
+            sgs = self.ec2.describe_security_groups(
+                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+            )["SecurityGroups"]
+        except ClientError as exc:
+            logger.warning("[DESTROY] No se pudo listar Security Groups de %s: %s", vpc_id, exc)
+            return
+
+        for sg in sgs:
+            if sg["GroupName"] == "default":
+                continue
+            sg_id = sg["GroupId"]
+            try:
+                self._revoke_all_sg_rules(sg_id)
+                self.ec2.delete_security_group(GroupId=sg_id)
+                logger.info(
+                    "[DESTROY] Security Group no rastreado %s (%s) eliminado antes de borrar la VPC.",
+                    sg_id, sg["GroupName"],
+                )
+            except ClientError as exc:
+                logger.warning(
+                    "[DESTROY] No se pudo eliminar el Security Group no rastreado %s (%s): %s",
+                    sg_id, sg["GroupName"], exc,
+                )
 
     def _revoke_all_sg_rules(self, sg_id: str) -> None:
         sg = self.ec2.describe_security_groups(GroupIds=[sg_id])["SecurityGroups"][0]

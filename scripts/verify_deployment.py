@@ -378,6 +378,53 @@ def check_nginx_routes(ctx: VerificationContext) -> CheckResult:
     return CheckResult(name, "OK", f"{len(routes)} ruta(s) verificadas")
 
 
+# LiteLLM tarda 1-4 min en aceptar conexiones cada vez que sync_endpoints.py lo
+# recarga (Prisma + init del proxy); el rango varía bastante entre corridas
+# reales. Confirmado: las 4 comprobaciones de abajo fallaban con
+# 502/connection-refused justo después de una resincronización de endpoints, y
+# pasaban a OK sin tocar nada minutos después -no era un problema de red ni de
+# config, sino de no esperar. Mismo timeout que sync_endpoints.LITELLM_READY_TIMEOUT_SECONDS
+# para no reportar FAIL en verify por algo que sync ya está esperando activamente.
+LITELLM_CHECK_TIMEOUT_SECONDS = 300
+LITELLM_CHECK_POLL_INTERVAL_SECONDS = 10
+
+
+def _retry_until_ok(
+    check_fn: Callable[[VerificationContext], CheckResult],
+    ctx: VerificationContext,
+    timeout: int = LITELLM_CHECK_TIMEOUT_SECONDS,
+    interval: int = LITELLM_CHECK_POLL_INTERVAL_SECONDS,
+) -> CheckResult:
+    """Reintenta `check_fn(ctx)` con espera fija hasta que deje de fallar o se
+    agote `timeout`. N/A se devuelve tal cual (no hay nada que esperar: falta
+    'sky', no hay deployment activo, etc.)."""
+    deadline = time.monotonic() + timeout
+    result = check_fn(ctx)
+    waited = 0
+    while result.status == "FAIL" and time.monotonic() < deadline:
+        print(f"  [ESPERA] '{result.name}' aún falla ({waited}s/{timeout}s): {result.detail}")
+        time.sleep(interval)
+        waited += interval
+        result = check_fn(ctx)
+    return result
+
+
+def check_litellm_lists_models_retry(ctx: VerificationContext) -> CheckResult:
+    return _retry_until_ok(check_litellm_lists_models, ctx)
+
+
+def check_litellm_pool_health_retry(ctx: VerificationContext) -> CheckResult:
+    return _retry_until_ok(check_litellm_pool_health, ctx)
+
+
+def check_end_to_end_completion_retry(ctx: VerificationContext) -> CheckResult:
+    return _retry_until_ok(check_end_to_end_completion, ctx)
+
+
+def check_nginx_routes_retry(ctx: VerificationContext) -> CheckResult:
+    return _retry_until_ok(check_nginx_routes, ctx)
+
+
 def check_db_registers_workers(ctx: VerificationContext) -> CheckResult:
     name = "La BD registra los workers (sooniverse.worker_node)"
     from db_setup import connect, resolve_db_config
@@ -421,10 +468,10 @@ CHECKS: List[Callable[[VerificationContext], CheckResult]] = [
     check_workers_sg_no_open_cidr,
     check_gateway_reaches_workers,
     check_worker_has_internet_egress,
-    check_litellm_lists_models,
-    check_litellm_pool_health,
-    check_end_to_end_completion,
-    check_nginx_routes,
+    check_litellm_lists_models_retry,
+    check_litellm_pool_health_retry,
+    check_end_to_end_completion_retry,
+    check_nginx_routes_retry,
     check_db_registers_workers,
 ]
 

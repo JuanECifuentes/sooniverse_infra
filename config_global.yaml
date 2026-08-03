@@ -123,3 +123,12 @@ workloads:
       habilitado: true
       gpu_memory_utilization: 0.95 # Asignación de VRAM fraccional (0.0 - 1.0)
       max_model_len: 16384
+    # Capacidades reales de ESTE modelo/checkpoint. El generador solo activa en
+    # vLLM las banderas correspondientes si aquí están en true -evita mandarle
+    # tool_choice="auto" o imágenes a un modelo que nunca las va a soportar.
+    # scripts/test_model_capabilities.py sondea el modelo ya desplegado y avisa
+    # si lo declarado acá no coincide con lo que el modelo responde de verdad.
+    capacidades:
+      vision: true               # Este checkpoint de Qwen3.5 sí tiene torre de visión.
+      tool_calling: false        # Sin --tool-call-parser confirmado para este checkpoint: no anunciarlo.
+      tool_call_parser: null     # ej. "hermes" o "qwen" -requerido si tool_calling: true.

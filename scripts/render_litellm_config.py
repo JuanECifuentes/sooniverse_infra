@@ -78,6 +78,11 @@ def build_model_list(endpoints: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "id": f"{ep.get('workload_id', 'wl')}-{ip.replace('.', '-')}-{port}",
                 "sooniverse_worker_ip": ip,
                 "sooniverse_workload": ep.get("workload_id"),
+                # Capacidades declaradas en config_global.yaml (ver
+                # scripts/test_model_capabilities.py para la verificación real
+                # contra el modelo desplegado). Informativo para cualquier
+                # cliente que lea /v1/models y quiera adaptar su UI.
+                "sooniverse_capabilities": ep.get("capacidades", {}),
             },
         })
 

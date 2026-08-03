@@ -202,3 +202,32 @@ def test_missing_workloads_section_rejected():
     cfg["workloads"] = []
     with pytest.raises(ConfigValidationError):
         ConfigValidator.validate(cfg)
+
+
+# -- capacidades --------------------------------------------------------------
+def test_capacidades_non_bool_vision_rejected():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["capacidades"]["vision"] = "si"
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_capacidades_tool_calling_without_parser_rejected():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["capacidades"]["tool_calling"] = True
+    cfg["workloads"][0]["capacidades"]["tool_call_parser"] = None
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_capacidades_tool_calling_with_parser_is_valid():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["capacidades"]["tool_calling"] = True
+    cfg["workloads"][0]["capacidades"]["tool_call_parser"] = "hermes"
+    ConfigValidator.validate(cfg)
+
+
+def test_capacidades_absent_is_valid():
+    cfg = clone(load_base_config())
+    del cfg["workloads"][0]["capacidades"]
+    ConfigValidator.validate(cfg)

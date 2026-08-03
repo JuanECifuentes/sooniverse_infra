@@ -350,6 +350,21 @@ class ConfigValidator:
             if not puerto or not isinstance(puerto, int):
                 raise ConfigValidationError(f"Workload '{wl_id}': Debe especificar un 'puerto' entero.")
 
+            capacidades = wl.get("capacidades", {})
+            if capacidades:
+                if not isinstance(capacidades, dict):
+                    raise ConfigValidationError(f"Workload '{wl_id}': 'capacidades' debe ser un objeto.")
+                for campo in ("vision", "tool_calling"):
+                    if campo in capacidades and not isinstance(capacidades[campo], bool):
+                        raise ConfigValidationError(
+                            f"Workload '{wl_id}': 'capacidades.{campo}' debe ser booleano."
+                        )
+                if capacidades.get("tool_calling") and not capacidades.get("tool_call_parser"):
+                    raise ConfigValidationError(
+                        f"Workload '{wl_id}': 'capacidades.tool_calling: true' requiere "
+                        "'capacidades.tool_call_parser' (ej. 'hermes', 'qwen')."
+                    )
+
 
 # =============================================================================
 # SCRIPTS REMOTOS
@@ -401,6 +416,9 @@ cd {remote_root}/docker_images/{modelo}
 export MODEL_NAME="${{MODEL_NAME}}"
 export GPU_MEMORY_UTILIZATION="${{GPU_MEMORY_UTILIZATION}}"
 export MAX_MODEL_LEN="${{MAX_MODEL_LEN}}"
+export ENABLE_VISION="${{ENABLE_VISION}}"
+export ENABLE_TOOL_CALLING="${{ENABLE_TOOL_CALLING}}"
+export TOOL_CALL_PARSER="${{TOOL_CALL_PARSER}}"
 
 sudo docker compose up -d
 sudo docker compose ps
@@ -656,6 +674,7 @@ class TopologyBuilder:
         if wl.get("tipo_instancia"):
             resources["instance_type"] = wl["tipo_instancia"]
 
+        capacidades = wl.get("capacidades", {})
         envs = {
             **self._base_envs(),
             "ROL_NODO": "worker",
@@ -665,6 +684,13 @@ class TopologyBuilder:
             "GPU_MEMORY_UTILIZATION": str(frac.get("gpu_memory_utilization", 0.95)),
             "MAX_MODEL_LEN": str(frac.get("max_model_len", 16384)),
             "VLLM_PORT": str(wl["puerto"]),
+            # Capacidades declaradas (ver config_global.yaml): el entrypoint solo
+            # agrega --enable-auto-tool-choice/--limit-mm-per-prompt si aquí están
+            # activas, para no anunciarle a un cliente (Open WebUI, LiteLLM) una
+            # función que este modelo no soporta de verdad.
+            "ENABLE_VISION": "1" if capacidades.get("vision", True) else "0",
+            "ENABLE_TOOL_CALLING": "1" if capacidades.get("tool_calling", False) else "0",
+            "TOOL_CALL_PARSER": capacidades.get("tool_call_parser") or "",
         }
 
         return {
