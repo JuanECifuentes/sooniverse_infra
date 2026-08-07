@@ -12,8 +12,7 @@ Espera `metricas` (services.ResumenMetricas) en el contexto.
             <div class="l-chart-col">
                 <div class="l-bar-track">
                     <span class="sv-bar {% if not punto.total_tokens %}sv-bar--empty{% endif %}"
-                          style="height: {{ punto.altura_pct }}%"
-                          title="{{ punto.etiqueta }} — {{ punto.total_tokens|intcomma }} tokens ({{ punto.request_count|intcomma }} peticiones)">
+                          style="height: {{ punto.altura_pct }}%">
                         {% if punto.total_tokens %}
                             {% widthratio punto.prompt_tokens punto.total_tokens 100 as prompt_pct %}
                             <span class="sv-bar__prompt" style="height: {{ prompt_pct }}%"></span>
@@ -37,6 +36,28 @@ Espera `metricas` (services.ResumenMetricas) en el contexto.
         <span class="l-spacer"></span>
         <span class="sv-mono sv-muted">{{ metricas.serie|length }} periodo(s) · {{ metricas.desde }} → {{ metricas.hasta }}</span>
     </div>
+
+    <table class="sv-table sv-visually-hidden">
+        <caption>Consumo de tokens por periodo (los mismos datos representados en la gráfica)</caption>
+        <thead>
+            <tr>
+                <th scope="col">Periodo</th>
+                <th scope="col" class="sv-num">Prompt</th>
+                <th scope="col" class="sv-num">Total</th>
+                <th scope="col" class="sv-num">Peticiones</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for punto in metricas.serie %}
+                <tr>
+                    <td>{{ punto.etiqueta }}</td>
+                    <td class="sv-num">{{ punto.prompt_tokens|intcomma }}</td>
+                    <td class="sv-num">{{ punto.total_tokens|intcomma }}</td>
+                    <td class="sv-num">{{ punto.request_count|intcomma }}</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
 {% else %}
     <div class="l-empty">
         <span class="sv-eyebrow">Sin datos</span>
