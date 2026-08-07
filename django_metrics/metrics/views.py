@@ -56,6 +56,27 @@ def _date_or_none(value):
         return None
 
 
+def _peticiones_payload(resultado):
+    return {
+        "items": [
+            {
+                "ts": e.event_ts.isoformat(),
+                "model": e.model_name,
+                "input": e.prompt_tokens,
+                "output": e.completion_tokens,
+                "cost": float(e.spend_usd),
+                "session": (e.api_key.key_alias if e.api_key_id and e.api_key else None) or "(sin registro)",
+            }
+            for e in resultado["items"]
+        ],
+        "page": resultado["page"],
+        "page_size": resultado["page_size"],
+        "total": resultado["total"],
+        "has_prev": resultado["has_prev"],
+        "has_next": resultado["has_next"],
+    }
+
+
 def _rango_por_defecto():
     hasta = timezone.localdate()
     return hasta - timedelta(days=settings.METRICS_DEFAULT_WINDOW_DAYS), hasta
@@ -93,11 +114,18 @@ def dashboard(request):
         granularity=granularity, api_key_ids=api_key_ids, modelos=modelos_activos,
         desde=desde, hasta=hasta,
     )
+    peticiones = services.obtener_peticiones(
+        api_key_ids=api_key_ids, modelos=modelos_activos, desde=desde, hasta=hasta,
+    )
+
+    payload = _metricas_payload(metricas, api_key_ids)
+    payload["requests"] = _peticiones_payload(peticiones)
 
     contexto = {
         "seccion": "metricas",
         "form": form,
         "metricas": metricas,
+        "peticiones": peticiones,
         "granularities": TokenUsageRollup.GRANULARITIES,
         "granularity_activa": granularity,
         "api_key_ids_activos": api_key_ids,
@@ -107,7 +135,7 @@ def dashboard(request):
         "api_keys": api_keys,
         "modelos": modelos,
         "pool": services.estado_pool(),
-        "metricas_payload": _metricas_payload(metricas, api_key_ids),
+        "metricas_payload": payload,
     }
     return render(request, "metrics/dashboard.html", contexto)
 
@@ -226,12 +254,36 @@ def metrics_api(request):
     api_key_ids = _ints_or_none(request.GET.getlist("api_key"))
     modelos_filtro = request.GET.getlist("modelo") or None
 
+    page = _int_or_none(request.GET.get("page")) or 1
+    page_size = _int_or_none(request.GET.get("page_size")) or 50
+    if page < 1:
+        return JsonResponse({"error": "'page' debe ser mayor o igual a 1."}, status=400)
+    if not (1 <= page_size <= 200):
+        return JsonResponse({"error": "'page_size' debe estar entre 1 y 200."}, status=400)
+
+    sort_by = request.GET.get("sort") or "fecha"
+    if sort_by not in services.PETICIONES_SORT_FIELDS:
+        return JsonResponse(
+            {"error": f"'sort' inválido: '{sort_by}'. Usa uno de: "
+                      f"{', '.join(services.PETICIONES_SORT_FIELDS)}."},
+            status=400,
+        )
+    sort_dir = request.GET.get("dir") or "desc"
+    if sort_dir not in ("asc", "desc"):
+        return JsonResponse({"error": "'dir' inválido. Usa 'asc' o 'desc'."}, status=400)
+
     metricas = services.obtener_metricas(
         granularity=granularity, api_key_ids=api_key_ids, modelos=modelos_filtro,
         desde=desde, hasta=hasta,
     )
+    peticiones = services.obtener_peticiones(
+        api_key_ids=api_key_ids, modelos=modelos_filtro, desde=desde, hasta=hasta,
+        page=page, page_size=page_size, sort_by=sort_by, sort_dir=sort_dir,
+    )
 
-    return JsonResponse(_metricas_payload(metricas, api_key_ids))
+    payload = _metricas_payload(metricas, api_key_ids)
+    payload["requests"] = _peticiones_payload(peticiones)
+    return JsonResponse(payload)
 
 
 @staff_member_required

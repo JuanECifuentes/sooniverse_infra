@@ -189,6 +189,49 @@ def obtener_metricas(
     return resumen
 
 
+PETICIONES_SORT_FIELDS = {"fecha": "event_ts", "coste": "spend_usd"}
+
+
+def obtener_peticiones(
+    api_key_ids: Optional[List[int]] = None,
+    modelos: Optional[List[str]] = None,
+    desde: Optional[date] = None,
+    hasta: Optional[date] = None,
+    page: int = 1,
+    page_size: int = 50,
+    sort_by: str = "fecha",
+    sort_dir: str = "desc",
+) -> Dict[str, Any]:
+    """Lista paginada de peticiones individuales (fila a fila) para la card
+    de detalle del dashboard. A diferencia de `obtener_metricas`, consulta
+    TokenUsageEvent directamente: el rollup no tiene granularidad de petición."""
+    hasta = hasta or timezone.localdate()
+    desde = desde or (hasta - timedelta(days=30))
+
+    qs = TokenUsageEvent.objects.filter(event_ts__date__gte=desde, event_ts__date__lte=hasta)
+    if api_key_ids:
+        qs = qs.filter(api_key_id__in=api_key_ids)
+    if modelos:
+        qs = qs.filter(model_name__in=modelos)
+
+    campo = PETICIONES_SORT_FIELDS.get(sort_by, "event_ts")
+    prefijo = "-" if sort_dir == "desc" else ""
+    qs = qs.select_related("api_key").order_by(f"{prefijo}{campo}", "-id")
+
+    total = qs.count()
+    inicio = (page - 1) * page_size
+    items = list(qs[inicio:inicio + page_size])
+
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "has_prev": page > 1,
+        "has_next": inicio + page_size < total,
+    }
+
+
 def resumen_api_keys(solo_activas: bool = False) -> List[Dict[str, Any]]:
     """Listado de API Keys con su consumo acumulado (para la tabla del gestor)."""
     qs = ApiKeyRegistry.objects.all()

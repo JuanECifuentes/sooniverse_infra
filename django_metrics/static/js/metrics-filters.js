@@ -29,6 +29,12 @@ if (panel) {
     presets: document.getElementById("metrics-presets"),
     badgeConError: document.getElementById("badge-con-error"),
     badgeSinError: document.getElementById("badge-sin-error"),
+    tablaPeticiones: document.getElementById("tabla-peticiones-body"),
+    peticionesTotal: document.querySelector('[data-field="peticiones-total"]'),
+    peticionesPrev: document.getElementById("peticiones-prev"),
+    peticionesNext: document.getElementById("peticiones-next"),
+    peticionesPageLabel: document.getElementById("peticiones-page-label"),
+    sortButtons: document.querySelectorAll(".l-sort-btn"),
   };
 
   const multiselects = {
@@ -66,6 +72,9 @@ if (panel) {
     api_key: readCheckedValues("api_key"),
     desde: els.desde.value,
     hasta: els.hasta.value,
+    page: 1,
+    sort: "fecha",
+    dir: "desc",
   };
 
   let requestCounter = 0;
@@ -78,6 +87,9 @@ if (panel) {
     if (s.hasta) p.set("hasta", s.hasta);
     s.modelo.forEach((m) => p.append("modelo", m));
     s.api_key.forEach((k) => p.append("api_key", k));
+    p.set("page", s.page);
+    p.set("sort", s.sort);
+    p.set("dir", s.dir);
     return p;
   }
 
@@ -203,6 +215,50 @@ if (panel) {
     const mostrarApiKey = data.mostrar_desglose_api_key && data.por_api_key.length > 0;
     els.cardApiKey.hidden = !mostrarApiKey;
     if (mostrarApiKey) renderTable(els.tablaApiKey, data.por_api_key, "api_key");
+
+    if (data.requests) renderPeticiones(data.requests);
+  }
+
+  function renderPeticiones(requests) {
+    if (els.peticionesTotal) els.peticionesTotal.textContent = fmtInt(requests.total);
+    if (els.peticionesPageLabel) els.peticionesPageLabel.textContent = `Página ${requests.page}`;
+    if (els.peticionesPrev) els.peticionesPrev.disabled = !requests.has_prev;
+    if (els.peticionesNext) els.peticionesNext.disabled = !requests.has_next;
+
+    els.sortButtons.forEach((btn) => {
+      const arrow = btn.querySelector("[data-sort-arrow]");
+      if (!arrow) return;
+      const active = btn.dataset.sort === state.sort;
+      arrow.dataset.active = active ? "true" : "false";
+      if (active) arrow.dataset.dir = state.dir;
+      else delete arrow.dataset.dir;
+    });
+
+    if (!els.tablaPeticiones) return;
+    if (!requests.items.length) {
+      els.tablaPeticiones.innerHTML =
+        '<tr><td colspan="6" class="sv-help">Sin peticiones en la ventana seleccionada.</td></tr>';
+      return;
+    }
+    els.tablaPeticiones.innerHTML = requests.items
+      .map((r) => {
+        const fecha = new Date(r.ts);
+        const corta = fecha.toLocaleDateString("es-ES", { day: "2-digit", month: "short" }) +
+          ", " + fecha.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+        const sesion = escapeHtml(r.session);
+        return `<tr>
+          <td data-label="Fecha"><time datetime="${r.ts}">${corta}</time></td>
+          <td data-label="Modelo" class="sv-mono">${escapeHtml(r.model)}</td>
+          <td data-label="Entrada" class="sv-num">${fmtInt(r.input)}</td>
+          <td data-label="Salida" class="sv-num">${fmtInt(r.output)}</td>
+          <td data-label="Coste" class="sv-num">$${fmtUsd(r.cost)}</td>
+          <td data-label="Sesión">
+            <span class="sv-mono">${sesion}</span>
+            <button type="button" class="l-copy-btn" data-copy="${sesion}" aria-label="Copiar sesión">⧉</button>
+          </td>
+        </tr>`;
+      })
+      .join("");
   }
 
   async function applyFilters() {
@@ -266,6 +322,7 @@ if (panel) {
 
   els.granularity.addEventListener("change", () => {
     state.granularity = els.granularity.value;
+    state.page = 1;
     applyFilters();
   });
 
@@ -273,6 +330,7 @@ if (panel) {
     input.addEventListener("change", () => {
       state.desde = els.desde.value;
       state.hasta = els.hasta.value;
+      state.page = 1;
       applyFilters();
     });
   });
@@ -281,6 +339,7 @@ if (panel) {
     details.querySelector(".sv-multiselect__panel").addEventListener("change", (e) => {
       if (e.target.matches('input[type="checkbox"]')) {
         state[group] = readCheckedValues(group);
+        state.page = 1;
         applyFilters();
       }
     });
@@ -293,6 +352,7 @@ if (panel) {
     const cb = findCheckbox(group, value);
     if (cb) cb.checked = false;
     state[group] = state[group].filter((v) => v !== value);
+    state.page = 1;
     applyFilters();
   });
 
@@ -305,6 +365,7 @@ if (panel) {
     state.hasta = range.hasta;
     els.desde.value = range.desde;
     els.hasta.value = range.hasta;
+    state.page = 1;
     applyFilters();
   });
 
@@ -316,8 +377,49 @@ if (panel) {
     state.hasta = isoDate(today);
     els.desde.value = state.desde;
     els.hasta.value = state.hasta;
+    state.page = 1;
     applyFilters();
   });
+
+  els.sortButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const column = btn.dataset.sort;
+      state.dir = state.sort === column && state.dir === "desc" ? "asc" : "desc";
+      state.sort = column;
+      state.page = 1;
+      applyFilters();
+    });
+  });
+
+  if (els.peticionesPrev) {
+    els.peticionesPrev.addEventListener("click", () => {
+      if (els.peticionesPrev.disabled) return;
+      state.page -= 1;
+      applyFilters();
+    });
+  }
+  if (els.peticionesNext) {
+    els.peticionesNext.addEventListener("click", () => {
+      if (els.peticionesNext.disabled) return;
+      state.page += 1;
+      applyFilters();
+    });
+  }
+
+  if (els.tablaPeticiones) {
+    els.tablaPeticiones.addEventListener("click", (e) => {
+      const btn = e.target.closest(".l-copy-btn");
+      if (!btn || !btn.dataset.copy) return;
+      navigator.clipboard.writeText(btn.dataset.copy).then(
+        () => {
+          btn.dataset.copied = "true";
+          announce("Sesión copiada");
+          setTimeout(() => delete btn.dataset.copied, 1500);
+        },
+        () => announce("No se pudo copiar la sesión")
+      );
+    });
+  }
 
   document.addEventListener("click", (e) => {
     document.querySelectorAll(".sv-multiselect[open]").forEach((details) => {
