@@ -118,8 +118,60 @@
           <option>—</option>
         </select>
       </label>
+      <label>
+        <span class="sv-label">Buscar (search)</span><br>
+        <input class="sv-input" type="search" placeholder="Sesión, request-id…" style="padding:8px 12px; width:100%;">
+      </label>
+      <label>
+        <span class="sv-label">Ventana (number)</span><br>
+        <input class="sv-input" type="number" value="30" style="padding:8px 12px; width:100%;">
+      </label>
     </div>
     <p class="sv-error" style="margin-top:8px;">La fecha "desde" no puede ser posterior a "hasta".</p>
+  </div>
+
+  <div class="ks-section">
+    <h2>Multi-select (API Keys / Modelos)</h2>
+    <div class="ks-row">
+      <details class="sv-multiselect" open>
+        <summary class="sv-multiselect__trigger">
+          <span>Modelos <span class="sv-multiselect__count">2</span></span>
+          <span class="sv-multiselect__chevron" aria-hidden="true"></span>
+        </summary>
+        <div class="sv-multiselect__panel">
+          <label class="sv-multiselect__option"><input type="checkbox" checked> gpt-4o</label>
+          <label class="sv-multiselect__option"><input type="checkbox" checked> claude-5-sonnet</label>
+          <label class="sv-multiselect__option"><input type="checkbox"> llama-3.1-70b</label>
+          <label class="sv-multiselect__option"><input type="checkbox"> mixtral-8x7b</label>
+        </div>
+      </details>
+      <details class="sv-multiselect">
+        <summary class="sv-multiselect__trigger">
+          <span>API Keys</span>
+          <span class="sv-multiselect__chevron" aria-hidden="true"></span>
+        </summary>
+        <div class="sv-multiselect__panel">
+          <span class="sv-multiselect__empty">Sin coincidencias</span>
+        </div>
+      </details>
+    </div>
+    <div class="l-chips" style="margin-top:12px;">
+      <span class="sv-chip">gpt-4o <button class="sv-chip__remove" aria-label="Quitar gpt-4o">×</button></span>
+      <span class="sv-chip">claude-5-sonnet <button class="sv-chip__remove" aria-label="Quitar claude-5-sonnet">×</button></span>
+    </div>
+  </div>
+
+  <div class="ks-section">
+    <h2>Estado de carga</h2>
+    <div class="ks-row">
+      <button class="sv-btn sv-btn--primary" aria-busy="true" style="padding:10px 16px;">
+        <span class="sv-spinner" aria-hidden="true"></span> Aplicando…
+      </button>
+      <button class="sv-btn sv-btn--secondary" aria-busy="true" style="padding:10px 16px;">
+        <span class="sv-spinner" aria-hidden="true"></span> Cargando…
+      </button>
+      <span class="sv-spinner sv-spinner--lg" aria-hidden="true"></span>
+    </div>
   </div>
 
   <div class="ks-section">
