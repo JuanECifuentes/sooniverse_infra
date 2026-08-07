@@ -184,8 +184,25 @@
                         <h3>Evolución del consumo</h3>
                     </div>
                 </div>
-                <div class="l-card__body" id="metrics-chart-wrap">
-                    {% include "metrics/_chart.html" %}
+                <div class="l-card__body">
+                    {{ metricas_payload|json_script:"metrics-initial-payload" }}
+                    <div class="l-chart-canvas-wrap">
+                        <canvas id="metrics-chart-canvas" role="img" aria-describedby="metrics-chart-table-caption"></canvas>
+                    </div>
+                    <table class="sv-table sv-visually-hidden" id="metrics-chart-table">
+                        <caption id="metrics-chart-table-caption">
+                            Consumo de tokens por periodo (los mismos datos representados en la gráfica)
+                        </caption>
+                        <thead>
+                            <tr>
+                                <th scope="col">Periodo</th>
+                                <th scope="col" class="sv-num">Prompt</th>
+                                <th scope="col" class="sv-num">Completion</th>
+                                <th scope="col" class="sv-num">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody id="metrics-chart-table-body"></tbody>
+                    </table>
                 </div>
             </article>
 
@@ -312,5 +329,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{% static 'js/vendor/chart.umd.min.js' %}"></script>
 <script type="module" src="{% static 'js/metrics-filters.js' %}"></script>
+<script type="module" src="{% static 'js/metrics-charts.js' %}"></script>
 {% endblock %}

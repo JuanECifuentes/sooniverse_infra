@@ -107,6 +107,7 @@ def dashboard(request):
         "api_keys": api_keys,
         "modelos": modelos,
         "pool": services.estado_pool(),
+        "metricas_payload": _metricas_payload(metricas, api_key_ids),
     }
     return render(request, "metrics/dashboard.html", contexto)
 
@@ -160,6 +161,43 @@ def serie_json(request):
     })
 
 
+def _metricas_payload(metricas, api_key_ids):
+    """Serializa un ResumenMetricas al contrato JSON que consume el panel
+    (metrics-filters.js/metrics-charts.js). Usado tanto por `metrics_api` como
+    por el bootstrap inicial que renderiza `dashboard` para el primer pintado."""
+    return {
+        "granularity": metricas.granularity,
+        "granularity_label": metricas.granularity_label,
+        "desde": metricas.desde.isoformat(),
+        "hasta": metricas.hasta.isoformat(),
+        "summary": {
+            "request_count": metricas.request_count,
+            "prompt_tokens": metricas.prompt_tokens,
+            "completion_tokens": metricas.completion_tokens,
+            "total_tokens": metricas.total_tokens,
+            "spend_usd": float(metricas.spend_usd),
+            "error_count": metricas.error_count,
+            "tokens_por_request": metricas.tokens_por_request,
+            "ratio_completion": metricas.ratio_completion,
+        },
+        "series": {
+            "labels": [p.etiqueta for p in metricas.serie],
+            "total_tokens": [p.total_tokens for p in metricas.serie],
+            "prompt_tokens": [p.prompt_tokens for p in metricas.serie],
+            "completion_tokens": [p.completion_tokens for p in metricas.serie],
+            "request_count": [p.request_count for p in metricas.serie],
+            "altura_pct": [p.altura_pct for p in metricas.serie],
+        },
+        "por_modelo": [
+            {**m, "spend_usd": float(m.get("spend_usd") or 0)} for m in metricas.por_modelo
+        ],
+        "por_api_key": [
+            {**k, "spend_usd": float(k.get("spend_usd") or 0)} for k in metricas.por_api_key
+        ] if metricas.por_api_key else [],
+        "mostrar_desglose_api_key": not (api_key_ids and len(api_key_ids) == 1),
+    }
+
+
 @staff_member_required
 def metrics_api(request):
     """
@@ -193,37 +231,7 @@ def metrics_api(request):
         desde=desde, hasta=hasta,
     )
 
-    return JsonResponse({
-        "granularity": metricas.granularity,
-        "granularity_label": metricas.granularity_label,
-        "desde": metricas.desde.isoformat(),
-        "hasta": metricas.hasta.isoformat(),
-        "summary": {
-            "request_count": metricas.request_count,
-            "prompt_tokens": metricas.prompt_tokens,
-            "completion_tokens": metricas.completion_tokens,
-            "total_tokens": metricas.total_tokens,
-            "spend_usd": float(metricas.spend_usd),
-            "error_count": metricas.error_count,
-            "tokens_por_request": metricas.tokens_por_request,
-            "ratio_completion": metricas.ratio_completion,
-        },
-        "series": {
-            "labels": [p.etiqueta for p in metricas.serie],
-            "total_tokens": [p.total_tokens for p in metricas.serie],
-            "prompt_tokens": [p.prompt_tokens for p in metricas.serie],
-            "completion_tokens": [p.completion_tokens for p in metricas.serie],
-            "request_count": [p.request_count for p in metricas.serie],
-            "altura_pct": [p.altura_pct for p in metricas.serie],
-        },
-        "por_modelo": [
-            {**m, "spend_usd": float(m.get("spend_usd") or 0)} for m in metricas.por_modelo
-        ],
-        "por_api_key": [
-            {**k, "spend_usd": float(k.get("spend_usd") or 0)} for k in metricas.por_api_key
-        ] if metricas.por_api_key else [],
-        "mostrar_desglose_api_key": not (api_key_ids and len(api_key_ids) == 1),
-    })
+    return JsonResponse(_metricas_payload(metricas, api_key_ids))
 
 
 @staff_member_required

@@ -22,7 +22,6 @@ if (panel) {
     expandBtn: document.getElementById("metrics-expand-range"),
     content: document.getElementById("metrics-content"),
     live: document.getElementById("metrics-live"),
-    chartWrap: document.getElementById("metrics-chart-wrap"),
     chartGranularityLabel: document.getElementById("chart-granularity-label"),
     tablaModelo: document.getElementById("tabla-modelo-body"),
     tablaApiKey: document.getElementById("tabla-apikey-body"),
@@ -151,55 +150,6 @@ if (panel) {
     });
   }
 
-  function renderChart(data) {
-    const { labels, total_tokens, prompt_tokens, request_count, altura_pct } = data.series;
-    if (!labels.length) {
-      els.chartWrap.innerHTML = `
-        <div class="l-empty">
-          <span class="sv-eyebrow">Sin datos</span>
-          <p class="sv-body">No hay consumo registrado en esta ventana.<br>
-             Ejecuta el refresco de métricas o genera tráfico a través del gateway.</p>
-        </div>`;
-      return;
-    }
-
-    const cols = labels
-      .map((etiqueta, i) => {
-        const totalTok = total_tokens[i];
-        const promptTok = prompt_tokens[i];
-        const promptPct = totalTok ? Math.round((promptTok / totalTok) * 10000) / 100 : 0;
-        const title = `${escapeHtml(etiqueta)} — ${fmtInt(totalTok)} tokens (${fmtInt(request_count[i])} peticiones)`;
-        return `
-          <div class="l-chart-col">
-            <div class="l-bar-track">
-              <span class="sv-bar${totalTok ? "" : " sv-bar--empty"}" style="height: ${altura_pct[i]}%" title="${title}">
-                ${totalTok ? `<span class="sv-bar__prompt" style="height: ${promptPct}%"></span>` : ""}
-              </span>
-            </div>
-            <span class="sv-axis">${escapeHtml(etiqueta)}</span>
-          </div>`;
-      })
-      .join("");
-
-    els.chartWrap.innerHTML = `
-      <div class="sv-chart" role="img"
-           aria-label="Consumo de tokens ${escapeHtml(data.granularity_label.toLowerCase())} entre ${data.desde} y ${data.hasta}">
-        ${cols}
-      </div>
-      <div class="l-legend l-mt-lg">
-        <span class="l-legend__item">
-          <span class="sv-legend__swatch sv-legend__swatch--total"></span>
-          <span class="sv-mono">Tokens totales</span>
-        </span>
-        <span class="l-legend__item">
-          <span class="sv-legend__swatch sv-legend__swatch--prompt"></span>
-          <span class="sv-mono">Prompt (entrada)</span>
-        </span>
-        <span class="l-spacer"></span>
-        <span class="sv-mono sv-muted">${labels.length} periodo(s) · ${data.desde} → ${data.hasta}</span>
-      </div>`;
-  }
-
   function renderTable(tbody, rows, kind) {
     if (!rows.length) {
       tbody.innerHTML = '<tr><td colspan="4" class="sv-help">Sin datos en la ventana seleccionada.</td></tr>';
@@ -229,6 +179,8 @@ if (panel) {
   }
 
   function render(data) {
+    panel.dispatchEvent(new CustomEvent("metrics:data", { detail: data }));
+
     const isEmpty = data.summary.request_count === 0 && data.series.labels.length === 0;
     els.emptyBanner.hidden = !isEmpty;
     els.content.hidden = isEmpty;
@@ -246,7 +198,6 @@ if (panel) {
     els.badgeSinError.hidden = data.summary.error_count !== 0;
 
     els.chartGranularityLabel.textContent = `Serie ${data.granularity_label.toLowerCase()}`;
-    renderChart(data);
 
     renderTable(els.tablaModelo, data.por_modelo, "modelo");
     const mostrarApiKey = data.mostrar_desglose_api_key && data.por_api_key.length > 0;
