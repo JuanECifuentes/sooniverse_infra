@@ -107,7 +107,7 @@ DATABASES = {
         "CONN_MAX_AGE": 60,
         "OPTIONS": {
             # Permite referirse a las tablas del esquema aislado sin cualificar.
-            "options": "-c search_path=sooniverse,public",
+            "options": "-c search_path=sooniverse",
             "connect_timeout": 10,
         },
     }

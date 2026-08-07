@@ -53,7 +53,7 @@ Si el rol es restringido, replica la política oficial de SkyPilot para AWS.
 
 El stack necesita una PostgreSQL **alcanzable desde el Nodo Gateway** (RDS,
 instancia externa o el contenedor incluido). La comparten LiteLLM (tablas
-`public."LiteLLM_*"`) y el panel de métricas (esquema `sooniverse`).
+`sooniverse."LiteLLM_*"`) y el panel de métricas (esquema `sooniverse`).
 
 ```bash
 # Verificar alcance y estado del esquema antes de desplegar
@@ -645,7 +645,7 @@ Diagnóstico en orden:
 python scripts/db_setup.py --check
 
 # 2. ¿LiteLLM está registrando?
-psql -c 'SELECT COUNT(*) FROM public."LiteLLM_SpendLogs";'
+psql -c 'SELECT COUNT(*) FROM sooniverse."LiteLLM_SpendLogs";'
 
 # 3. ¿El ETL corrió?
 psql -c 'SELECT COUNT(*) FROM sooniverse.token_usage_event;'

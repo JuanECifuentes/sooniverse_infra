@@ -177,7 +177,7 @@ def verify_schema(conn) -> bool:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT 1 FROM information_schema.tables "
-            "WHERE table_schema = 'public' AND table_name = 'LiteLLM_SpendLogs'"
+            "WHERE table_schema = 'sooniverse' AND table_name = 'LiteLLM_SpendLogs'"
         )
         litellm_ready = cur.fetchone() is not None
     print(f"   [{'OK  ' if litellm_ready else 'WAIT'}] LiteLLM_SpendLogs "

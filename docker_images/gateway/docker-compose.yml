@@ -54,7 +54,7 @@ services:
     container_name: sooniverse-litellm
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
     environment:
-      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD}@${DB_HOST:-postgres}:${DB_PORT:-5432}/${DB_NAME:-sooniverse}
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD}@${DB_HOST:-postgres}:${DB_PORT:-5432}/${DB_NAME:-sooniverse}?schema=sooniverse
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}
       LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-sooniverse-salt-change-me}
       REDIS_HOST: redis

@@ -13,7 +13,7 @@ El proyecto ya funciona parcialmente:
 - ✅ Un contrato único `config_global.yaml` que un generador Python traduce a manifiestos SkyPilot y stacks Docker Compose.
 - ✅ `scripts/generate_infra.py` levanta el **Nodo Gateway** (LiteLLM + Open WebUI + Django de métricas + Redis + nginx) y los **clústeres worker** vLLM con SkyPilot.
 - ✅ `scripts/sync_endpoints.py` descubre IPs privadas de los workers y recarga el balanceador de LiteLLM.
-- ✅ `scripts/db_setup.py` ingesta `database/init_schema.sql` en PostgreSQL (esquema `sooniverse`, convive con las tablas nativas `public."LiteLLM_*"`).
+- ✅ `scripts/db_setup.py` ingesta `database/init_schema.sql` en PostgreSQL (esquema `sooniverse`, convive con las tablas nativas `sooniverse."LiteLLM_*"`).
 - ❌ **La VPC, subredes, Internet Gateway, NAT Gateway, route tables y Security Groups se crean A MANO desde la consola de AWS** (ver `Manual_VPC_SecurityGroup.md`). Este es el hueco principal.
 - ❌ No existe un `destroy` real: hoy se hace `sky down` y luego borrado manual de la VPC, con riesgo de dejar NAT Gateways y Elastic IPs cobrando.
 - ❌ La comunicación Gateway↔Workers depende de reglas de SG creadas a mano y de la suerte con los SG que SkyPilot genera por su cuenta.
