@@ -15,7 +15,7 @@
 
 CREATE SCHEMA IF NOT EXISTS sooniverse;
 
-SET search_path TO sooniverse, public;
+SET search_path TO sooniverse;
 
 -- -----------------------------------------------------------------------------
 -- 1. DESPLIEGUES (uno por cliente/entorno/región activo a la vez)
