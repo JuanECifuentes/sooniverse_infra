@@ -323,6 +323,66 @@
                 </div>
             </article>
         </section>
+
+        {# --------------------------------------------------------- PETICIONES #}
+        <section class="l-mb-lg l-mt-lg">
+            <article class="sv-card l-card--flush" id="card-peticiones">
+                <div class="l-card__head">
+                    <div class="l-stack l-stack--tight">
+                        <span class="sv-eyebrow">Detalle</span>
+                        <h3>Peticiones individuales</h3>
+                    </div>
+                    <span class="sv-mono sv-muted" id="peticiones-total-label">
+                        <span data-field="peticiones-total">{{ peticiones.total|intcomma }}</span> en total
+                    </span>
+                </div>
+                <div class="l-table-wrap">
+                    <table class="sv-table sv-table--responsive" id="tabla-peticiones">
+                        <caption class="sv-visually-hidden">Peticiones individuales en la ventana seleccionada</caption>
+                        <thead>
+                            <tr>
+                                <th scope="col">
+                                    <button type="button" class="l-sort-btn" data-sort="fecha">
+                                        Fecha<span class="l-sort-arrow" data-sort-arrow="fecha"></span>
+                                    </button>
+                                </th>
+                                <th scope="col">Modelo</th>
+                                <th scope="col" class="sv-num">Entrada</th>
+                                <th scope="col" class="sv-num">Salida</th>
+                                <th scope="col" class="sv-num">
+                                    <button type="button" class="l-sort-btn" data-sort="coste">
+                                        Coste<span class="l-sort-arrow" data-sort-arrow="coste"></span>
+                                    </button>
+                                </th>
+                                <th scope="col">Sesión</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tabla-peticiones-body">
+                            {% for p in peticiones.items %}
+                                <tr>
+                                    <td data-label="Fecha"><time datetime="{{ p.event_ts|date:'c' }}">{{ p.event_ts|date:"d M, H:i" }}</time></td>
+                                    <td data-label="Modelo" class="sv-mono">{{ p.model_name }}</td>
+                                    <td data-label="Entrada" class="sv-num">{{ p.prompt_tokens|intcomma }}</td>
+                                    <td data-label="Salida" class="sv-num">{{ p.completion_tokens|intcomma }}</td>
+                                    <td data-label="Coste" class="sv-num">${{ p.spend_usd|floatformat:4 }}</td>
+                                    <td data-label="Sesión">
+                                        <span class="sv-mono">{{ p.api_key.key_alias|default:"(sin registro)" }}</span>
+                                        <button type="button" class="l-copy-btn" data-copy="{{ p.api_key.key_alias|default:'' }}" aria-label="Copiar sesión">⧉</button>
+                                    </td>
+                                </tr>
+                            {% empty %}
+                                <tr><td colspan="6" class="sv-help">Sin peticiones en la ventana seleccionada.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                <div class="l-pagination">
+                    <button type="button" class="sv-btn sv-btn--ghost sv-btn--sm" id="peticiones-prev" {% if not peticiones.has_prev %}disabled{% endif %}>Anterior</button>
+                    <span class="sv-mono" id="peticiones-page-label">Página {{ peticiones.page }}</span>
+                    <button type="button" class="sv-btn sv-btn--ghost sv-btn--sm" id="peticiones-next" {% if not peticiones.has_next %}disabled{% endif %}>Siguiente</button>
+                </div>
+            </article>
+        </section>
     </div>
 </div>
 </div>
