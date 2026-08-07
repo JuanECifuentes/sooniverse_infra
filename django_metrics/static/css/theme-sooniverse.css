@@ -596,6 +596,20 @@ a:hover {
 
 .sv-multiselect__empty { color: var(--text-muted); font-size: var(--text-sm); }
 
+/* Overlay de carga: atenúa el panel completo (filtros + resultados) debajo */
+.l-loading-overlay {
+    background-color: color-mix(in srgb, var(--surface-0) 55%, transparent);
+}
+#metrics-panel[aria-busy="true"] #metrics-filters,
+#metrics-panel[aria-busy="true"] #metrics-content {
+    opacity: 0.5;
+    transition: opacity var(--dur-base) var(--ease-out);
+}
+@media (prefers-reduced-motion: reduce) {
+    #metrics-panel[aria-busy="true"] #metrics-filters,
+    #metrics-panel[aria-busy="true"] #metrics-content { transition: none; }
+}
+
 /* Chip de filtro activo, con affordance de borrado */
 .sv-chip {
     display: inline-flex;

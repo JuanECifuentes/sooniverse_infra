@@ -8,6 +8,7 @@ Todas requieren staff autenticado: el panel expone gestión de credenciales.
 from __future__ import annotations
 
 import logging
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -16,6 +17,7 @@ from django.contrib.admin.views.decorators import staff_member_required
 from django.http import JsonResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from . import services
@@ -42,6 +44,23 @@ def _int_or_none(value):
         return None
 
 
+def _ints_or_none(values):
+    enteros = [v for v in (_int_or_none(v) for v in values) if v is not None]
+    return enteros or None
+
+
+def _date_or_none(value):
+    try:
+        return date.fromisoformat(value) if value else None
+    except ValueError:
+        return None
+
+
+def _rango_por_defecto():
+    hasta = timezone.localdate()
+    return hasta - timedelta(days=settings.METRICS_DEFAULT_WINDOW_DAYS), hasta
+
+
 # =============================================================================
 # MÓDULO DE MÉTRICAS
 # =============================================================================
@@ -58,18 +77,21 @@ def dashboard(request):
 
     form = FiltroMetricasForm(request.GET or None, api_keys=api_keys, modelos=modelos)
     granularity = TokenUsageRollup.DAILY
-    api_key_id = None
-    modelo = None
-    dias = None
+    api_key_ids = []
+    modelos_activos = []
+    desde_default, hasta_default = _rango_por_defecto()
+    desde, hasta = desde_default, hasta_default
 
     if form.is_valid():
         granularity = form.cleaned_data.get("granularity") or TokenUsageRollup.DAILY
-        api_key_id = _int_or_none(form.cleaned_data.get("api_key"))
-        modelo = form.cleaned_data.get("modelo") or None
-        dias = form.cleaned_data.get("dias")
+        api_key_ids = _ints_or_none(form.cleaned_data.get("api_key") or []) or []
+        modelos_activos = form.cleaned_data.get("modelo") or []
+        desde = form.cleaned_data.get("desde") or desde_default
+        hasta = form.cleaned_data.get("hasta") or hasta_default
 
     metricas = services.obtener_metricas(
-        granularity=granularity, api_key_id=api_key_id, dias=dias, modelo=modelo
+        granularity=granularity, api_key_ids=api_key_ids, modelos=modelos_activos,
+        desde=desde, hasta=hasta,
     )
 
     contexto = {
@@ -78,27 +100,38 @@ def dashboard(request):
         "metricas": metricas,
         "granularities": TokenUsageRollup.GRANULARITIES,
         "granularity_activa": granularity,
-        "api_key_activa": api_key_id,
+        "api_key_ids_activos": api_key_ids,
+        "modelos_activos": modelos_activos,
+        "desde_activa": desde,
+        "hasta_activa": hasta,
         "api_keys": api_keys,
+        "modelos": modelos,
         "pool": services.estado_pool(),
-        "query_base": request.GET.urlencode(),
     }
     return render(request, "metrics/dashboard.html", contexto)
 
 
 @staff_member_required
 def serie_json(request):
-    """Endpoint JSON de la serie temporal (para integraciones externas)."""
+    """Endpoint JSON de la serie temporal (para integraciones externas).
+    Contrato heredado: valores únicos de `api_key`/`modelo` y ventana en `dias`."""
+    api_key_id = _int_or_none(request.GET.get("api_key"))
+    modelo = request.GET.get("modelo") or None
+    dias = _int_or_none(request.GET.get("dias"))
+    hasta = timezone.localdate()
+    desde = (hasta - timedelta(days=dias)) if dias else None
+
     metricas = services.obtener_metricas(
         granularity=request.GET.get("granularity", TokenUsageRollup.DAILY),
-        api_key_id=_int_or_none(request.GET.get("api_key")),
-        dias=_int_or_none(request.GET.get("dias")),
-        modelo=request.GET.get("modelo") or None,
+        api_key_ids=[api_key_id] if api_key_id else None,
+        modelos=[modelo] if modelo else None,
+        desde=desde,
+        hasta=hasta if dias else None,
     )
 
     return JsonResponse({
         "granularity": metricas.granularity,
-        "api_key_id": metricas.api_key_id,
+        "api_key_id": metricas.api_key_ids[0] if len(metricas.api_key_ids) == 1 else None,
         "desde": metricas.desde.isoformat(),
         "hasta": metricas.hasta.isoformat(),
         "totales": {
@@ -124,6 +157,72 @@ def serie_json(request):
         "por_modelo": [
             {**m, "spend_usd": float(m.get("spend_usd") or 0)} for m in metricas.por_modelo
         ],
+    })
+
+
+@staff_member_required
+def metrics_api(request):
+    """
+    Endpoint JSON consumido por el filtrado asíncrono del panel (metrics-filters.js).
+    Acepta valores repetidos para `api_key` y `modelo` (selección múltiple).
+    """
+    granularity = request.GET.get("granularity") or TokenUsageRollup.DAILY
+    if granularity not in dict(TokenUsageRollup.GRANULARITIES):
+        return JsonResponse(
+            {"error": f"Agrupación inválida: '{granularity}'. Usa uno de: "
+                      f"{', '.join(v for v, _ in TokenUsageRollup.GRANULARITIES)}."},
+            status=400,
+        )
+
+    desde_raw, hasta_raw = request.GET.get("desde"), request.GET.get("hasta")
+    desde, hasta = _date_or_none(desde_raw), _date_or_none(hasta_raw)
+    if desde_raw and not desde:
+        return JsonResponse({"error": f"Fecha 'desde' inválida: '{desde_raw}'. Usa AAAA-MM-DD."}, status=400)
+    if hasta_raw and not hasta:
+        return JsonResponse({"error": f"Fecha 'hasta' inválida: '{hasta_raw}'. Usa AAAA-MM-DD."}, status=400)
+    if desde and hasta and desde > hasta:
+        return JsonResponse({"error": "'desde' no puede ser posterior a 'hasta'."}, status=400)
+    if not desde and not hasta:
+        desde, hasta = _rango_por_defecto()
+
+    api_key_ids = _ints_or_none(request.GET.getlist("api_key"))
+    modelos_filtro = request.GET.getlist("modelo") or None
+
+    metricas = services.obtener_metricas(
+        granularity=granularity, api_key_ids=api_key_ids, modelos=modelos_filtro,
+        desde=desde, hasta=hasta,
+    )
+
+    return JsonResponse({
+        "granularity": metricas.granularity,
+        "granularity_label": metricas.granularity_label,
+        "desde": metricas.desde.isoformat(),
+        "hasta": metricas.hasta.isoformat(),
+        "summary": {
+            "request_count": metricas.request_count,
+            "prompt_tokens": metricas.prompt_tokens,
+            "completion_tokens": metricas.completion_tokens,
+            "total_tokens": metricas.total_tokens,
+            "spend_usd": float(metricas.spend_usd),
+            "error_count": metricas.error_count,
+            "tokens_por_request": metricas.tokens_por_request,
+            "ratio_completion": metricas.ratio_completion,
+        },
+        "series": {
+            "labels": [p.etiqueta for p in metricas.serie],
+            "total_tokens": [p.total_tokens for p in metricas.serie],
+            "prompt_tokens": [p.prompt_tokens for p in metricas.serie],
+            "completion_tokens": [p.completion_tokens for p in metricas.serie],
+            "request_count": [p.request_count for p in metricas.serie],
+            "altura_pct": [p.altura_pct for p in metricas.serie],
+        },
+        "por_modelo": [
+            {**m, "spend_usd": float(m.get("spend_usd") or 0)} for m in metricas.por_modelo
+        ],
+        "por_api_key": [
+            {**k, "spend_usd": float(k.get("spend_usd") or 0)} for k in metricas.por_api_key
+        ] if metricas.por_api_key else [],
+        "mostrar_desglose_api_key": not (api_key_ids and len(api_key_ids) == 1),
     })
 
 

@@ -8,6 +8,7 @@ urlpatterns = [
     # Módulo de métricas
     path("", views.dashboard, name="dashboard"),
     path("serie.json", views.serie_json, name="serie_json"),
+    path("api/metrics/", views.metrics_api, name="metrics_api"),
     path("refrescar/", views.refrescar, name="refrescar"),
 
     # Gestor de API Keys

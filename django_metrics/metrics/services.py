@@ -59,7 +59,7 @@ class SeriePunto:
 class ResumenMetricas:
     granularity: str
     granularity_label: str
-    api_key_id: Optional[int]
+    api_key_ids: List[int]
     desde: date
     hasta: date
     serie: List[SeriePunto] = field(default_factory=list)
@@ -91,28 +91,28 @@ def _etiqueta_periodo(periodo: date, granularity: str) -> str:
 
 def obtener_metricas(
     granularity: str = TokenUsageRollup.DAILY,
-    api_key_id: Optional[int] = None,
-    dias: Optional[int] = None,
-    modelo: Optional[str] = None,
+    api_key_ids: Optional[List[int]] = None,
+    modelos: Optional[List[str]] = None,
+    desde: Optional[date] = None,
+    hasta: Optional[date] = None,
 ) -> ResumenMetricas:
     """
     Construye el resumen del panel leyendo las agregaciones pre-calculadas.
-    `api_key_id` filtra toda la vista (gráficas y tablas) a una sola API Key.
+    `api_key_ids`/`modelos` filtran por una o varias API Keys / modelos a la vez.
     """
     if granularity not in GRANULARITY_WINDOWS:
         granularity = TokenUsageRollup.DAILY
 
-    ventana = dias or GRANULARITY_WINDOWS[granularity]
-    hasta = timezone.localdate()
-    desde = hasta - timedelta(days=ventana)
+    hasta = hasta or timezone.localdate()
+    desde = desde or (hasta - timedelta(days=GRANULARITY_WINDOWS[granularity]))
 
     qs = TokenUsageRollup.objects.filter(
         granularity=granularity, bucket_start__gte=desde, bucket_start__lte=hasta
     )
-    if api_key_id:
-        qs = qs.filter(api_key_id=api_key_id)
-    if modelo:
-        qs = qs.filter(model_name=modelo)
+    if api_key_ids:
+        qs = qs.filter(api_key_id__in=api_key_ids)
+    if modelos:
+        qs = qs.filter(model_name__in=modelos)
 
     # --- serie temporal -------------------------------------------------------
     buckets = (
@@ -149,7 +149,7 @@ def obtener_metricas(
     resumen = ResumenMetricas(
         granularity=granularity,
         granularity_label=GRANULARITY_LABELS[granularity],
-        api_key_id=api_key_id,
+        api_key_ids=list(api_key_ids or []),
         desde=desde,
         hasta=hasta,
         serie=serie,
@@ -172,8 +172,8 @@ def obtener_metricas(
         .order_by("-total_tokens")[:12]
     )
 
-    # --- desglose por API Key (solo cuando no hay filtro de key) --------------
-    if not api_key_id:
+    # --- desglose por API Key (solo cuando no hay exactamente una key filtrada) -
+    if not (api_key_ids and len(api_key_ids) == 1):
         resumen.por_api_key = list(
             qs.values("api_key_id", "api_key__key_alias", "api_key__is_active")
             .annotate(
@@ -369,7 +369,7 @@ def detalle_api_key(key_id: int, granularity: str = TokenUsageRollup.DAILY) -> D
     registro = ApiKeyRegistry.objects.get(pk=key_id)
     return {
         "registro": registro,
-        "metricas": obtener_metricas(granularity=granularity, api_key_id=key_id),
+        "metricas": obtener_metricas(granularity=granularity, api_key_ids=[key_id]),
         "auditoria": list(ApiKeyAudit.objects.filter(api_key_id=key_id)[:50]),
         "eventos_recientes": list(
             TokenUsageEvent.objects.filter(api_key_id=key_id)
