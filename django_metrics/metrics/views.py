@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from datetime import date, timedelta
-from decimal import Decimal
 
 from django.conf import settings
 from django.contrib import messages
@@ -64,14 +63,14 @@ def _peticiones_payload(resultado):
                 "model": e.model_name,
                 "input": e.prompt_tokens,
                 "output": e.completion_tokens,
-                "cost": float(e.spend_usd),
-                "session": (e.api_key.key_alias if e.api_key_id and e.api_key else None) or "(sin registro)",
+                "api_key": (e.api_key.key_alias if e.api_key_id and e.api_key else None) or "(sin registro)",
             }
             for e in resultado["items"]
         ],
         "page": resultado["page"],
         "page_size": resultado["page_size"],
         "total": resultado["total"],
+        "total_pages": resultado["total_pages"],
         "has_prev": resultado["has_prev"],
         "has_next": resultado["has_next"],
     }
@@ -255,7 +254,7 @@ def metrics_api(request):
     modelos_filtro = request.GET.getlist("modelo") or None
 
     page = _int_or_none(request.GET.get("page")) or 1
-    page_size = _int_or_none(request.GET.get("page_size")) or 50
+    page_size = _int_or_none(request.GET.get("page_size")) or 30
     if page < 1:
         return JsonResponse({"error": "'page' debe ser mayor o igual a 1."}, status=400)
     if not (1 <= page_size <= 200):
@@ -311,21 +310,25 @@ def refrescar(request):
 @staff_member_required
 def api_keys(request):
     """Listado, creación y monitoreo de consumo por API Key."""
-    form = ApiKeyForm(request.POST or None)
+    modelos_disponibles = sorted(set(
+        TokenUsageRollup.objects.values_list("model_name", flat=True)
+    ))
+    form = ApiKeyForm(request.POST or None, modelos=modelos_disponibles)
     key_emitida = None
 
     if request.method == "POST" and form.is_valid():
         datos = form.cleaned_data
+        vigencia = datos.get("vigencia")
+        duracion = f"{(vigencia - date.today()).days}d" if vigencia else None
         try:
             resultado = services.crear_api_key(
                 alias=datos["key_alias"],
                 owner_email=datos.get("owner_email") or "",
                 descripcion=datos.get("descripcion") or "",
                 modelos=datos.get("modelos") or None,
-                max_budget=float(datos["max_budget"]) if datos.get("max_budget") is not None else None,
                 rpm_limit=datos.get("rpm_limit"),
                 tpm_limit=datos.get("tpm_limit"),
-                duration=datos.get("duration") or None,
+                duration=duracion,
                 actor=_actor(request),
                 ip=_ip(request),
             )
@@ -334,7 +337,7 @@ def api_keys(request):
                 request,
                 f"API Key '{datos['key_alias']}' creada. Cópiala ahora: no se volverá a mostrar.",
             )
-            form = ApiKeyForm()
+            form = ApiKeyForm(modelos=modelos_disponibles)
         except LiteLLMError as exc:
             messages.error(request, f"LiteLLM rechazó la emisión: {exc}")
         except Exception as exc:  # noqa: BLE001
@@ -351,8 +354,8 @@ def api_keys(request):
         "filas": filas,
         "total_keys": len(filas),
         "total_activas": len(activas),
-        "consumo_global": sum((f["consumo_total"] or 0) for f in filas),
-        "gasto_global": sum((f["gasto"] or Decimal("0")) for f in filas),
+        "consumo_prompt_global": sum((f["consumo_prompt"] or 0) for f in filas),
+        "consumo_completion_global": sum((f["consumo_completion"] or 0) for f in filas),
         "litellm_url": settings.LITELLM_BASE_URL,
     }
     return render(request, "metrics/apikeys.html", contexto)

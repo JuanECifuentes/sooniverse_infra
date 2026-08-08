@@ -46,6 +46,29 @@ if (panel) {
   const fmtUsd = (n) =>
     Number(n || 0).toLocaleString("es-ES", { minimumFractionDigits: 4, maximumFractionDigits: 4 });
 
+  // Los presets fijan la fecha programáticamente; si flatpickr ya tomó el
+  // control del input (ver datepicker.js), asignar `.value` directo no
+  // actualiza su calendario/altInput visible y quedan desincronizados.
+  // triggerChange:false porque el llamador ya dispara su propio applyFilters().
+  function setDateValue(el, value) {
+    if (el._flatpickr) el._flatpickr.setDate(value, false);
+    else el.value = value;
+  }
+
+  // Contadores de tokens (no peticiones/costes): igual que human_tokens del
+  // servidor. >=1.000.000 -> "2,5M"; >=100.000 -> "125K"; si no, separador de miles.
+  function fmtCompacto(n, divisor, sufijo) {
+    let texto = (n / divisor).toFixed(1);
+    if (texto.endsWith(".0")) texto = texto.slice(0, -2);
+    return `${texto.replace(".", ",")}${sufijo}`;
+  }
+  function fmtTok(n) {
+    n = Number(n || 0);
+    if (Math.abs(n) >= 1_000_000) return fmtCompacto(n, 1_000_000, "M");
+    if (Math.abs(n) >= 100_000) return fmtCompacto(n, 1_000, "K");
+    return fmtInt(n);
+  }
+
   function escapeHtml(str) {
     return String(str).replace(/[&<>"']/g, (c) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -173,8 +196,8 @@ if (panel) {
           return `<tr>
             <td class="sv-mono">${escapeHtml(r.model_name)}</td>
             <td class="sv-num">${fmtInt(r.request_count)}</td>
-            <td class="sv-num sv-num--accent">${fmtInt(r.total_tokens)}</td>
-            <td class="sv-num">$${fmtUsd(r.spend_usd)}</td>
+            <td class="sv-num sv-num--accent">${fmtTok(r.prompt_tokens)}</td>
+            <td class="sv-num sv-num--accent">${fmtTok(r.completion_tokens)}</td>
           </tr>`;
         }
         const alias = r.api_key__key_alias ? escapeHtml(r.api_key__key_alias) : "(sin registro)";
@@ -183,8 +206,8 @@ if (panel) {
         return `<tr>
           <td><span class="sv-strong">${alias}</span>${inactiva}</td>
           <td class="sv-num">${fmtInt(r.request_count)}</td>
-          <td class="sv-num sv-num--accent">${fmtInt(r.total_tokens)}</td>
-          <td class="sv-num">$${fmtUsd(r.spend_usd)}</td>
+          <td class="sv-num sv-num--accent">${fmtTok(r.prompt_tokens)}</td>
+          <td class="sv-num sv-num--accent">${fmtTok(r.completion_tokens)}</td>
         </tr>`;
       })
       .join("");
@@ -198,10 +221,10 @@ if (panel) {
     els.content.hidden = isEmpty;
     if (isEmpty) return;
 
-    setField("total_tokens", fmtInt(data.summary.total_tokens));
-    setField("tokens_por_request", fmtInt(data.summary.tokens_por_request));
-    setField("prompt_tokens", fmtInt(data.summary.prompt_tokens));
-    setField("completion_tokens", fmtInt(data.summary.completion_tokens));
+    setField("total_tokens", fmtTok(data.summary.total_tokens));
+    setField("tokens_por_request", fmtTok(data.summary.tokens_por_request));
+    setField("prompt_tokens", fmtTok(data.summary.prompt_tokens));
+    setField("completion_tokens", fmtTok(data.summary.completion_tokens));
     setField("ratio_completion", data.summary.ratio_completion);
     setField("request_count", fmtInt(data.summary.request_count));
     setField("error_count", fmtInt(data.summary.error_count));
@@ -221,7 +244,7 @@ if (panel) {
 
   function renderPeticiones(requests) {
     if (els.peticionesTotal) els.peticionesTotal.textContent = fmtInt(requests.total);
-    if (els.peticionesPageLabel) els.peticionesPageLabel.textContent = `Página ${requests.page}`;
+    if (els.peticionesPageLabel) els.peticionesPageLabel.textContent = `Página ${requests.page} de ${requests.total_pages}`;
     if (els.peticionesPrev) els.peticionesPrev.disabled = !requests.has_prev;
     if (els.peticionesNext) els.peticionesNext.disabled = !requests.has_next;
 
@@ -237,7 +260,7 @@ if (panel) {
     if (!els.tablaPeticiones) return;
     if (!requests.items.length) {
       els.tablaPeticiones.innerHTML =
-        '<tr><td colspan="6" class="sv-help">Sin peticiones en la ventana seleccionada.</td></tr>';
+        '<tr><td colspan="5" class="sv-help">Sin peticiones en la ventana seleccionada.</td></tr>';
       return;
     }
     els.tablaPeticiones.innerHTML = requests.items
@@ -245,16 +268,15 @@ if (panel) {
         const fecha = new Date(r.ts);
         const corta = fecha.toLocaleDateString("es-ES", { day: "2-digit", month: "short" }) +
           ", " + fecha.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
-        const sesion = escapeHtml(r.session);
+        const apiKey = escapeHtml(r.api_key);
         return `<tr>
           <td data-label="Fecha"><time datetime="${r.ts}">${corta}</time></td>
           <td data-label="Modelo" class="sv-mono">${escapeHtml(r.model)}</td>
-          <td data-label="Entrada" class="sv-num">${fmtInt(r.input)}</td>
-          <td data-label="Salida" class="sv-num">${fmtInt(r.output)}</td>
-          <td data-label="Coste" class="sv-num">$${fmtUsd(r.cost)}</td>
-          <td data-label="Sesión">
-            <span class="sv-mono">${sesion}</span>
-            <button type="button" class="l-copy-btn" data-copy="${sesion}" aria-label="Copiar sesión">⧉</button>
+          <td data-label="Entrada" class="sv-num">${fmtTok(r.input)}</td>
+          <td data-label="Salida" class="sv-num">${fmtTok(r.output)}</td>
+          <td data-label="Api Key">
+            <span class="sv-mono">${apiKey}</span>
+            <button type="button" class="l-copy-btn" data-copy="${apiKey}" aria-label="Copiar API Key">⧉</button>
           </td>
         </tr>`;
       })
@@ -363,8 +385,8 @@ if (panel) {
     if (!range) return;
     state.desde = range.desde;
     state.hasta = range.hasta;
-    els.desde.value = range.desde;
-    els.hasta.value = range.hasta;
+    setDateValue(els.desde, range.desde);
+    setDateValue(els.hasta, range.hasta);
     state.page = 1;
     applyFilters();
   });
@@ -375,8 +397,8 @@ if (panel) {
     const today = new Date();
     state.desde = isoDate(addDays(today, -90));
     state.hasta = isoDate(today);
-    els.desde.value = state.desde;
-    els.hasta.value = state.hasta;
+    setDateValue(els.desde, state.desde);
+    setDateValue(els.hasta, state.hasta);
     state.page = 1;
     applyFilters();
   });
@@ -420,17 +442,6 @@ if (panel) {
       );
     });
   }
-
-  document.addEventListener("click", (e) => {
-    document.querySelectorAll(".sv-multiselect[open]").forEach((details) => {
-      if (!details.contains(e.target)) details.removeAttribute("open");
-    });
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      document.querySelectorAll(".sv-multiselect[open]").forEach((d) => d.removeAttribute("open"));
-    }
-  });
 
   updateChips();
   updatePresetHighlight();

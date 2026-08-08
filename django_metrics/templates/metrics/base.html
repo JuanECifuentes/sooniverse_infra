@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block titulo %}Panel{% endblock %} · {{ MARCA_NOMBRE_1 }}{{ MARCA_NOMBRE_2 }}</title>
 
+    <link rel="icon" type="image/png" sizes="192x192" href="{% static 'img/icon-192x192.png' %}">
+    <link rel="apple-touch-icon" href="{% static 'img/icon-192x192.png' %}">
+
     {# Maquetación (intercambiable por proyecto) #}
     <link rel="stylesheet" href="{% static 'css/layout.css' %}">
     {# Identidad de marca encapsulada: reemplazar SOLO este archivo para re-tematizar #}
@@ -19,7 +22,7 @@
         <header class="sv-header">
             <div class="l-container l-header">
                 <a class="l-brand" href="{% url 'metrics:dashboard' %}">
-                    <span class="sv-logo__node" aria-hidden="true"></span>
+                    <img class="sv-logo__node" src="{% static 'img/logo_sin_fondo.svg' %}" alt="" aria-hidden="true">
                     <span class="l-brand__stack">
                         <span class="sv-logo">
                             <span class="sv-logo__solid">{{ MARCA_NOMBRE_1 }}</span><span class="sv-logo__gradient">{{ MARCA_NOMBRE_2 }}</span>
@@ -60,12 +63,21 @@
 
         <footer class="sv-footer">
             <div class="l-container l-footer">
-                <span class="sv-tagline">{{ MARCA_TAGLINE }}</span>
-                <span>Gateway LiteLLM · {{ LITELLM_BASE_URL }}</span>
+                <div class="l-footer__info">
+                    <span class="sv-tagline">{{ MARCA_TAGLINE }}</span>
+                    <span>Gateway LiteLLM · {{ LITELLM_BASE_URL }}</span>
+                </div>
+                <a class="l-footer__credit" href="https://sooniverse.co" target="_blank" rel="noopener">
+                    Creado por <span class="sv-strong">Sooniverse</span>
+                </a>
             </div>
         </footer>
     </div>
 
+    <script src="{% static 'js/multiselect.js' %}"></script>
+    <script src="{% static 'js/spinner.js' %}"></script>
+    <script src="{% static 'js/vendor/flatpickr.min.js' %}"></script>
+    <script src="{% static 'js/datepicker.js' %}"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

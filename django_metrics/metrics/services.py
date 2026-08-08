@@ -166,6 +166,8 @@ def obtener_metricas(
         qs.values("model_name")
         .annotate(
             total_tokens=Sum("total_tokens"),
+            prompt_tokens=Sum("prompt_tokens"),
+            completion_tokens=Sum("completion_tokens"),
             request_count=Sum("request_count"),
             spend_usd=Sum("spend_usd"),
         )
@@ -198,7 +200,7 @@ def obtener_peticiones(
     desde: Optional[date] = None,
     hasta: Optional[date] = None,
     page: int = 1,
-    page_size: int = 50,
+    page_size: int = 30,
     sort_by: str = "fecha",
     sort_dir: str = "desc",
 ) -> Dict[str, Any]:
@@ -221,12 +223,14 @@ def obtener_peticiones(
     total = qs.count()
     inicio = (page - 1) * page_size
     items = list(qs[inicio:inicio + page_size])
+    total_pages = max(1, -(-total // page_size))  # ceil(total / page_size)
 
     return {
         "items": items,
         "page": page,
         "page_size": page_size,
         "total": total,
+        "total_pages": total_pages,
         "has_prev": page > 1,
         "has_next": inicio + page_size < total,
     }
