@@ -43,21 +43,31 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 .sv-header  { position: sticky; top: 0; z-index: 50; }
 .l-header   { display: flex; align-items: center; justify-content: space-between; gap: 24px; height: 68px; }
 .l-brand    { display: flex; align-items: center; gap: 10px; }
-.sv-logo__node { width: 9px; height: 9px; flex: 0 0 9px; }
+.sv-logo__node { width: 28px; height: 28px; flex: 0 0 28px; object-fit: contain; }
 .l-brand__stack { display: flex; flex-direction: column; gap: 2px; }
 .l-nav      { display: flex; align-items: center; gap: 28px; }
 .sv-nav__link { display: inline-block; padding: 6px 2px; }
 .l-header__meta { display: flex; align-items: center; gap: 10px; }
 
 /* Footer */
-.l-footer   { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 0; flex-wrap: wrap; }
+.l-footer          { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 0; flex-wrap: wrap; }
+.l-footer__info    { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.l-footer__credit  { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; }
 
 /* ---------------------------------------------------------------------------
    Panel de métricas (filtros + resultados) y overlay de carga
    --------------------------------------------------------------------------- */
 #metrics-panel        { position: relative; }
 #metrics-panel[aria-busy="true"] { pointer-events: none; }
-.l-loading-overlay     { position: absolute; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center; }
+/* El backdrop cubre todo el panel (puede ser muy alto); el spinner se fija
+   al viewport para seguir visible sin depender del scroll ni de la altura
+   del panel. */
+.l-loading-overlay     { position: absolute; inset: 0; z-index: 30; }
+.l-loading-overlay .sv-spinner { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+
+/* Overlay de página completa (spinner.js): bloquea toda la interfaz
+   mientras un <form data-spinner-submit> navega. */
+.l-loading-overlay--page { position: fixed; inset: 0; z-index: 9999; }
 
 /* ---------------------------------------------------------------------------
    Encabezado de sección
@@ -72,7 +82,7 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
    --------------------------------------------------------------------------- */
 .l-grid            { display: grid; gap: 18px; }
 .l-grid--kpi       { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
-.l-grid--split     { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); align-items: start; }
+.l-grid--split     { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); align-items: stretch; }
 .l-grid--halves    { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
 .l-grid--form      { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 .l-grid--filters   { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); align-items: end; }
@@ -106,8 +116,8 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 /* ---------------------------------------------------------------------------
    Segmentos (Diario / Semanal / Mensual)
    --------------------------------------------------------------------------- */
-.sv-segment          { display: inline-flex; align-items: center; gap: 2px; padding: 4px; }
-.sv-segment__item    { display: inline-block; padding: 8px 18px; text-align: center; white-space: nowrap; }
+.sv-segment          { display: flex; align-items: center; gap: 2px; padding: 4px; max-width: 100%; overflow-x: auto; }
+.sv-segment__item    { display: inline-block; padding: 8px 18px; text-align: center; white-space: nowrap; flex: 0 0 auto; }
 
 /* ---------------------------------------------------------------------------
    Badges y puntos de estado
@@ -118,7 +128,7 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 /* ---------------------------------------------------------------------------
    Formularios
    --------------------------------------------------------------------------- */
-.l-field       { display: flex; flex-direction: column; gap: 7px; }
+.l-field       { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
 .l-field--wide { grid-column: 1 / -1; }
 .sv-label      { display: block; }
 .sv-input, .sv-select, .sv-textarea { width: 100%; padding: 10px 13px; }
@@ -151,7 +161,7 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 }
 
 /* Multi-select (disclosure <details>/<summary>) */
-.sv-multiselect        { display: inline-block; min-width: 220px; }
+.sv-multiselect        { display: block; width: 100%; min-width: 0; }
 .sv-multiselect__trigger { width: 100%; padding: 10px 13px; }
 .sv-multiselect__count { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; }
 .sv-multiselect__chevron { width: 6px; height: 6px; flex: 0 0 6px; transform: rotate(45deg); margin-top: -2px; }
@@ -159,6 +169,7 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
     top: calc(100% + 6px);
     left: 0;
     right: 0;
+    min-width: 220px;
     z-index: 20;
     max-height: 280px;
     overflow-y: auto;
@@ -166,6 +177,39 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 }
 .sv-multiselect__option { padding: 8px 10px; }
 .sv-multiselect__empty  { padding: 8px 10px; display: block; }
+
+/* Flatpickr (datepicker vendorizado): estructura. Colores en theme-*.css.
+   El input real queda oculto (display:none, lo pone flatpickr) y en su
+   lugar se muestra el altInput, con la misma clase .sv-input. */
+.flatpickr-calendar     { position: absolute; width: 280px; padding: 12px; font-size: 13px; z-index: 9990; opacity: 0; visibility: hidden; }
+.flatpickr-calendar.open { opacity: 1; visibility: visible; }
+.flatpickr-months       { display: flex; align-items: center; justify-content: space-between; padding-bottom: 8px; }
+.flatpickr-month        { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; height: 26px; }
+.flatpickr-current-month{ display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 13px; padding: 0; }
+.flatpickr-current-month input.cur-year { width: 46px; padding: 0; border: none; background: none; font: inherit; }
+.flatpickr-current-month .flatpickr-monthDropdown-months { border: none; font: inherit; padding: 0 2px; }
+.flatpickr-prev-month, .flatpickr-next-month { display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 6px; cursor: pointer; }
+.flatpickr-prev-month svg, .flatpickr-next-month svg { width: 12px; height: 12px; }
+.flatpickr-weekdays     { display: flex; margin-top: 6px; }
+.flatpickr-weekdaycontainer { display: flex; width: 100%; }
+span.flatpickr-weekday  { flex: 1; text-align: center; font-size: 11px; padding: 4px 0; }
+.flatpickr-days         { display: flex; }
+.dayContainer           { display: grid; grid-template-columns: repeat(7, 1fr); row-gap: 2px; width: 100%; }
+.flatpickr-day          { display: flex; align-items: center; justify-content: center; height: 30px; margin: 0; border-radius: 6px; cursor: pointer; }
+.flatpickr-innerContainer, .flatpickr-rContainer { width: 100%; }
+
+/* Tooltip accesible (hover / focus-within, sin JS) */
+.sv-tooltip          { position: relative; display: inline-flex; align-items: center; margin-left: 6px; }
+.sv-tooltip__trigger { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; padding: 0; border-radius: 50%; }
+.sv-tooltip__bubble  {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    width: 230px;
+    padding: 10px 12px;
+    z-index: 40;
+    pointer-events: none;
+}
 
 /* ---------------------------------------------------------------------------
    Tablas
@@ -220,6 +264,8 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
    Scrollbar
    --------------------------------------------------------------------------- */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
+.sv-segment { scrollbar-width: thin; }
+.sv-segment::-webkit-scrollbar { height: 5px; }
 
 /* ---------------------------------------------------------------------------
    Responsive

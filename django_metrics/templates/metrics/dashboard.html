@@ -1,5 +1,5 @@
 {% extends "metrics/base.html" %}
-{% load humanize static %}
+{% load humanize static metrics_extras %}
 
 {% block titulo %}Métricas de consumo{% endblock %}
 
@@ -17,10 +17,10 @@
     </div>
 
     <div class="l-page-head__actions">
-        <form method="post" action="{% url 'metrics:refrescar' %}" class="l-inline-form">
+        <form method="post" action="{% url 'metrics:refrescar' %}" class="l-inline-form" data-spinner-submit>
             {% csrf_token %}
             <input type="hidden" name="next" value="{{ request.get_full_path }}">
-            <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm">Refrescar datos</button>
+            <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm" data-loading-text="Refrescando…">Refrescar datos</button>
         </form>
     </div>
 </div>
@@ -35,7 +35,7 @@
      data-default-desde="{{ desde_activa|date:'Y-m-d' }}"
      data-default-hasta="{{ hasta_activa|date:'Y-m-d' }}">
     <div class="l-loading-overlay" id="metrics-loading" hidden aria-hidden="true">
-        <span class="sv-spinner sv-spinner--lg" aria-hidden="true"></span>
+        {% include "metrics/_spinner.html" with size="lg" %}
     </div>
 
 {# ------------------------------------------------------------------ FILTROS #}
@@ -92,13 +92,13 @@
 
         <div class="l-field">
             <label class="sv-label" for="id_desde">Desde</label>
-            <input type="date" class="sv-input" id="id_desde" data-filter="desde"
+            <input type="text" class="sv-input" id="id_desde" data-filter="desde" data-flatpickr
                    value="{{ desde_activa|date:'Y-m-d' }}" aria-describedby="metrics-date-error">
         </div>
 
         <div class="l-field">
             <label class="sv-label" for="id_hasta">Hasta</label>
-            <input type="date" class="sv-input" id="id_hasta" data-filter="hasta"
+            <input type="text" class="sv-input" id="id_hasta" data-filter="hasta" data-flatpickr
                    value="{{ hasta_activa|date:'Y-m-d' }}" aria-describedby="metrics-date-error">
         </div>
 
@@ -136,8 +136,8 @@
             <article class="sv-card sv-card--metric">
                 <div class="l-kpi">
                     <span class="sv-eyebrow">Tokens totales</span>
-                    <span class="l-kpi__value"><span class="sv-metric" data-field="total_tokens">{{ metricas.total_tokens|intcomma }}</span></span>
-                    <span class="l-kpi__foot sv-mono sv-muted"><span data-field="tokens_por_request">{{ metricas.tokens_por_request|intcomma }}</span> por petición</span>
+                    <span class="l-kpi__value"><span class="sv-metric" data-field="total_tokens">{{ metricas.total_tokens|human_tokens }}</span></span>
+                    <span class="l-kpi__foot sv-mono sv-muted"><span data-field="tokens_por_request">{{ metricas.tokens_por_request|human_tokens }}</span> por petición</span>
                 </div>
             </article>
 
@@ -145,9 +145,9 @@
                 <div class="l-kpi">
                     <span class="sv-eyebrow">Entrada · Salida</span>
                     <span class="l-kpi__value">
-                        <span class="sv-metric-sm" data-field="prompt_tokens">{{ metricas.prompt_tokens|intcomma }}</span>
+                        <span class="sv-metric-sm" data-field="prompt_tokens">{{ metricas.prompt_tokens|human_tokens }}</span>
                         <span class="sv-mono sv-muted">/</span>
-                        <span class="sv-metric-sm" data-field="completion_tokens">{{ metricas.completion_tokens|intcomma }}</span>
+                        <span class="sv-metric-sm" data-field="completion_tokens">{{ metricas.completion_tokens|human_tokens }}</span>
                     </span>
                     <span class="l-kpi__foot sv-mono sv-muted"><span data-field="ratio_completion">{{ metricas.ratio_completion }}</span>% generación</span>
                 </div>
@@ -263,8 +263,8 @@
                             <tr>
                                 <th scope="col">Modelo</th>
                                 <th scope="col" class="sv-num">Peticiones</th>
-                                <th scope="col" class="sv-num">Tokens</th>
-                                <th scope="col" class="sv-num">USD</th>
+                                <th scope="col" class="sv-num">Entrada</th>
+                                <th scope="col" class="sv-num">Salida</th>
                             </tr>
                         </thead>
                         <tbody id="tabla-modelo-body">
@@ -272,8 +272,8 @@
                                 <tr>
                                     <td class="sv-mono">{{ fila.model_name }}</td>
                                     <td class="sv-num">{{ fila.request_count|intcomma }}</td>
-                                    <td class="sv-num sv-num--accent">{{ fila.total_tokens|intcomma }}</td>
-                                    <td class="sv-num">${{ fila.spend_usd|floatformat:4 }}</td>
+                                    <td class="sv-num sv-num--accent">{{ fila.prompt_tokens|human_tokens }}</td>
+                                    <td class="sv-num sv-num--accent">{{ fila.completion_tokens|human_tokens }}</td>
                                 </tr>
                             {% empty %}
                                 <tr><td colspan="4" class="sv-help">Sin datos en la ventana seleccionada.</td></tr>
@@ -298,8 +298,8 @@
                             <tr>
                                 <th scope="col">API Key</th>
                                 <th scope="col" class="sv-num">Peticiones</th>
-                                <th scope="col" class="sv-num">Tokens</th>
-                                <th scope="col" class="sv-num">USD</th>
+                                <th scope="col" class="sv-num">Entrada</th>
+                                <th scope="col" class="sv-num">Salida</th>
                             </tr>
                         </thead>
                         <tbody id="tabla-apikey-body">
@@ -312,8 +312,8 @@
                                         {% endif %}
                                     </td>
                                     <td class="sv-num">{{ fila.request_count|intcomma }}</td>
-                                    <td class="sv-num sv-num--accent">{{ fila.total_tokens|intcomma }}</td>
-                                    <td class="sv-num">${{ fila.spend_usd|floatformat:4 }}</td>
+                                    <td class="sv-num sv-num--accent">{{ fila.prompt_tokens|human_tokens }}</td>
+                                    <td class="sv-num sv-num--accent">{{ fila.completion_tokens|human_tokens }}</td>
                                 </tr>
                             {% empty %}
                                 <tr><td colspan="4" class="sv-help">Sin datos en la ventana seleccionada.</td></tr>
@@ -349,12 +349,7 @@
                                 <th scope="col">Modelo</th>
                                 <th scope="col" class="sv-num">Entrada</th>
                                 <th scope="col" class="sv-num">Salida</th>
-                                <th scope="col" class="sv-num">
-                                    <button type="button" class="l-sort-btn" data-sort="coste">
-                                        Coste<span class="l-sort-arrow" data-sort-arrow="coste"></span>
-                                    </button>
-                                </th>
-                                <th scope="col">Sesión</th>
+                                <th scope="col">Api Key</th>
                             </tr>
                         </thead>
                         <tbody id="tabla-peticiones-body">
@@ -362,23 +357,22 @@
                                 <tr>
                                     <td data-label="Fecha"><time datetime="{{ p.event_ts|date:'c' }}">{{ p.event_ts|date:"d M, H:i" }}</time></td>
                                     <td data-label="Modelo" class="sv-mono">{{ p.model_name }}</td>
-                                    <td data-label="Entrada" class="sv-num">{{ p.prompt_tokens|intcomma }}</td>
-                                    <td data-label="Salida" class="sv-num">{{ p.completion_tokens|intcomma }}</td>
-                                    <td data-label="Coste" class="sv-num">${{ p.spend_usd|floatformat:4 }}</td>
-                                    <td data-label="Sesión">
+                                    <td data-label="Entrada" class="sv-num">{{ p.prompt_tokens|human_tokens }}</td>
+                                    <td data-label="Salida" class="sv-num">{{ p.completion_tokens|human_tokens }}</td>
+                                    <td data-label="Api Key">
                                         <span class="sv-mono">{{ p.api_key.key_alias|default:"(sin registro)" }}</span>
-                                        <button type="button" class="l-copy-btn" data-copy="{{ p.api_key.key_alias|default:'' }}" aria-label="Copiar sesión">⧉</button>
+                                        <button type="button" class="l-copy-btn" data-copy="{{ p.api_key.key_alias|default:'' }}" aria-label="Copiar API Key">⧉</button>
                                     </td>
                                 </tr>
                             {% empty %}
-                                <tr><td colspan="6" class="sv-help">Sin peticiones en la ventana seleccionada.</td></tr>
+                                <tr><td colspan="5" class="sv-help">Sin peticiones en la ventana seleccionada.</td></tr>
                             {% endfor %}
                         </tbody>
                     </table>
                 </div>
                 <div class="l-pagination">
                     <button type="button" class="sv-btn sv-btn--ghost sv-btn--sm" id="peticiones-prev" {% if not peticiones.has_prev %}disabled{% endif %}>Anterior</button>
-                    <span class="sv-mono" id="peticiones-page-label">Página {{ peticiones.page }}</span>
+                    <span class="sv-mono" id="peticiones-page-label">Página {{ peticiones.page }} de {{ peticiones.total_pages }}</span>
                     <button type="button" class="sv-btn sv-btn--ghost sv-btn--sm" id="peticiones-next" {% if not peticiones.has_next %}disabled{% endif %}>Siguiente</button>
                 </div>
             </article>

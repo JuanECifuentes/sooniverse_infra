@@ -3,7 +3,7 @@ Gráfica de barras de consumo de tokens. CSS puro, sin librerías externas:
 el Gateway puede vivir en una VPC sin salida a CDNs.
 Espera `metricas` (services.ResumenMetricas) en el contexto.
 {% endcomment %}
-{% load humanize %}
+{% load humanize metrics_extras %}
 
 {% if metricas.serie %}
     <div class="sv-chart" role="img"
@@ -51,8 +51,8 @@ Espera `metricas` (services.ResumenMetricas) en el contexto.
             {% for punto in metricas.serie %}
                 <tr>
                     <td>{{ punto.etiqueta }}</td>
-                    <td class="sv-num">{{ punto.prompt_tokens|intcomma }}</td>
-                    <td class="sv-num">{{ punto.total_tokens|intcomma }}</td>
+                    <td class="sv-num">{{ punto.prompt_tokens|human_tokens }}</td>
+                    <td class="sv-num">{{ punto.total_tokens|human_tokens }}</td>
                     <td class="sv-num">{{ punto.request_count|intcomma }}</td>
                 </tr>
             {% endfor %}

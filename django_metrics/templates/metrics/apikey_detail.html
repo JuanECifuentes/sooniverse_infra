@@ -1,5 +1,5 @@
 {% extends "metrics/base.html" %}
-{% load humanize %}
+{% load humanize metrics_extras %}
 
 {% block titulo %}{{ registro.key_alias }}{% endblock %}
 
@@ -27,7 +27,7 @@
                    href="?granularity={{ valor }}">{{ etiqueta }}</a>
             {% endfor %}
         </div>
-        <form method="post" action="{% url 'metrics:api_key_toggle' registro.id %}" class="l-inline-form">
+        <form method="post" action="{% url 'metrics:api_key_toggle' registro.id %}" class="l-inline-form" data-spinner-submit>
             {% csrf_token %}
             <input type="hidden" name="next" value="{{ request.get_full_path }}">
             {% if registro.is_active %}
@@ -47,7 +47,7 @@
     <article class="sv-card sv-card--metric">
         <div class="l-kpi">
             <span class="sv-eyebrow">Tokens ({{ metricas.granularity_label|lower }})</span>
-            <span class="sv-metric">{{ metricas.total_tokens|intcomma }}</span>
+            <span class="sv-metric">{{ metricas.total_tokens|human_tokens }}</span>
             <span class="l-kpi__foot sv-mono sv-muted">{{ metricas.desde }} → {{ metricas.hasta }}</span>
         </div>
     </article>
@@ -55,9 +55,9 @@
         <div class="l-kpi">
             <span class="sv-eyebrow">Entrada · Salida</span>
             <span class="l-kpi__value">
-                <span class="sv-metric-sm">{{ metricas.prompt_tokens|intcomma }}</span>
+                <span class="sv-metric-sm">{{ metricas.prompt_tokens|human_tokens }}</span>
                 <span class="sv-mono sv-muted">/</span>
-                <span class="sv-metric-sm">{{ metricas.completion_tokens|intcomma }}</span>
+                <span class="sv-metric-sm">{{ metricas.completion_tokens|human_tokens }}</span>
             </span>
             <span class="l-kpi__foot sv-mono sv-muted">{{ metricas.ratio_completion }}% generación</span>
         </div>
@@ -66,7 +66,7 @@
         <div class="l-kpi">
             <span class="sv-eyebrow">Peticiones</span>
             <span class="sv-metric">{{ metricas.request_count|intcomma }}</span>
-            <span class="l-kpi__foot sv-mono sv-muted">{{ metricas.tokens_por_request|intcomma }} tokens/petición</span>
+            <span class="l-kpi__foot sv-mono sv-muted">{{ metricas.tokens_por_request|human_tokens }} tokens/petición</span>
         </div>
     </article>
     <article class="sv-card sv-card--secure">
@@ -140,7 +140,7 @@
                         <tr>
                             <td class="sv-mono">{{ fila.model_name }}</td>
                             <td class="sv-num">{{ fila.request_count|intcomma }}</td>
-                            <td class="sv-num sv-num--accent">{{ fila.total_tokens|intcomma }}</td>
+                            <td class="sv-num sv-num--accent">{{ fila.total_tokens|human_tokens }}</td>
                             <td class="sv-num">${{ fila.spend_usd|floatformat:4 }}</td>
                         </tr>
                     {% empty %}
@@ -176,9 +176,9 @@
                         <tr>
                             <td class="sv-mono">{{ ev.event_ts|date:"d/m H:i:s" }}</td>
                             <td class="sv-mono">{{ ev.model_name }}</td>
-                            <td class="sv-num">{{ ev.prompt_tokens|intcomma }}</td>
-                            <td class="sv-num">{{ ev.completion_tokens|intcomma }}</td>
-                            <td class="sv-num sv-num--accent">{{ ev.total_tokens|intcomma }}</td>
+                            <td class="sv-num">{{ ev.prompt_tokens|human_tokens }}</td>
+                            <td class="sv-num">{{ ev.completion_tokens|human_tokens }}</td>
+                            <td class="sv-num sv-num--accent">{{ ev.total_tokens|human_tokens }}</td>
                             <td>
                                 {% if ev.status == 'success' %}
                                     <span class="sv-badge sv-badge--success">ok</span>

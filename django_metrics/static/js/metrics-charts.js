@@ -23,6 +23,20 @@ if (panel && window.Chart) {
   const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const fmtInt = (n) => Number(n || 0).toLocaleString("es-ES");
 
+  // Todo lo que muestra esta gráfica es tokens, igual que human_tokens del
+  // servidor. >=1.000.000 -> "2,5M"; >=100.000 -> "125K"; si no, separador de miles.
+  function fmtCompacto(n, divisor, sufijo) {
+    let texto = (n / divisor).toFixed(1);
+    if (texto.endsWith(".0")) texto = texto.slice(0, -2);
+    return `${texto.replace(".", ",")}${sufijo}`;
+  }
+  function fmtTok(n) {
+    n = Number(n || 0);
+    if (Math.abs(n) >= 1_000_000) return fmtCompacto(n, 1_000_000, "M");
+    if (Math.abs(n) >= 100_000) return fmtCompacto(n, 1_000, "K");
+    return fmtInt(n);
+  }
+
   function escapeHtml(str) {
     return String(str).replace(/[&<>"']/g, (c) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -65,7 +79,7 @@ if (panel && window.Chart) {
             beginAtZero: true,
             border: { display: false },
             grid: { color: cssVar("--border-subtle") },
-            ticks: { color: cssVar("--text-muted"), callback: (value) => fmtInt(value) },
+            ticks: { color: cssVar("--text-muted"), callback: (value) => fmtTok(value) },
           },
         },
         plugins: {
@@ -76,8 +90,8 @@ if (panel && window.Chart) {
           },
           tooltip: {
             callbacks: {
-              label: (ctx) => `${ctx.dataset.label}: ${fmtInt(ctx.parsed.y)} tokens`,
-              footer: (items) => `Total: ${fmtInt(items.reduce((sum, it) => sum + it.parsed.y, 0))} tokens`,
+              label: (ctx) => `${ctx.dataset.label}: ${fmtTok(ctx.parsed.y)} tokens`,
+              footer: (items) => `Total: ${fmtTok(items.reduce((sum, it) => sum + it.parsed.y, 0))} tokens`,
             },
           },
         },
@@ -92,9 +106,9 @@ if (panel && window.Chart) {
         .map(
           (label, i) => `<tr>
             <td>${escapeHtml(label)}</td>
-            <td class="sv-num">${fmtInt(prompt_tokens[i])}</td>
-            <td class="sv-num">${fmtInt(completion_tokens[i])}</td>
-            <td class="sv-num sv-num--accent">${fmtInt(total_tokens[i])}</td>
+            <td class="sv-num">${fmtTok(prompt_tokens[i])}</td>
+            <td class="sv-num">${fmtTok(completion_tokens[i])}</td>
+            <td class="sv-num sv-num--accent">${fmtTok(total_tokens[i])}</td>
           </tr>`
         )
         .join("") || '<tr><td colspan="4" class="sv-help">Sin datos en la ventana seleccionada.</td></tr>';
