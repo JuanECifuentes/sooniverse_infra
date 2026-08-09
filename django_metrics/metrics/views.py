@@ -20,7 +20,7 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from . import services
-from .forms import ApiKeyForm, FiltroMetricasForm
+from .forms import ApiKeyForm
 from .litellm_client import LiteLLMError
 from .models import ApiKeyRegistry, TokenUsageRollup
 
@@ -89,46 +89,31 @@ def dashboard(request):
     """
     Panel de consumo de tokens con particiones Diaria / Semanal / Mensual y
     filtro por API Key específica.
+
+    Vista de solo lectura: siempre pinta la ventana/agrupación por defecto,
+    nunca lee filtros desde la querystring (el filtrado en vivo se hace por
+    fetch POST a `metrics_api`, sin reflejarse en la URL). Así, recargar la
+    página siempre limpia los filtros en vez de conservarlos.
     """
     api_keys = services.resumen_api_keys()
-    modelos = sorted(
-        TokenUsageRollup.objects.values_list("model_name", flat=True).distinct()
-    )
-
-    form = FiltroMetricasForm(request.GET or None, api_keys=api_keys, modelos=modelos)
+    modelos = services.modelos_unicos()
     granularity = TokenUsageRollup.DAILY
-    api_key_ids = []
-    modelos_activos = []
-    desde_default, hasta_default = _rango_por_defecto()
-    desde, hasta = desde_default, hasta_default
+    desde, hasta = _rango_por_defecto()
 
-    if form.is_valid():
-        granularity = form.cleaned_data.get("granularity") or TokenUsageRollup.DAILY
-        api_key_ids = _ints_or_none(form.cleaned_data.get("api_key") or []) or []
-        modelos_activos = form.cleaned_data.get("modelo") or []
-        desde = form.cleaned_data.get("desde") or desde_default
-        hasta = form.cleaned_data.get("hasta") or hasta_default
+    metricas = services.obtener_metricas(granularity=granularity, desde=desde, hasta=hasta)
+    peticiones = services.obtener_peticiones(desde=desde, hasta=hasta)
 
-    metricas = services.obtener_metricas(
-        granularity=granularity, api_key_ids=api_key_ids, modelos=modelos_activos,
-        desde=desde, hasta=hasta,
-    )
-    peticiones = services.obtener_peticiones(
-        api_key_ids=api_key_ids, modelos=modelos_activos, desde=desde, hasta=hasta,
-    )
-
-    payload = _metricas_payload(metricas, api_key_ids)
+    payload = _metricas_payload(metricas, [])
     payload["requests"] = _peticiones_payload(peticiones)
 
     contexto = {
         "seccion": "metricas",
-        "form": form,
         "metricas": metricas,
         "peticiones": peticiones,
         "granularities": TokenUsageRollup.GRANULARITIES,
         "granularity_activa": granularity,
-        "api_key_ids_activos": api_key_ids,
-        "modelos_activos": modelos_activos,
+        "modelos_activos": [],
+        "api_key_ids_activos": [],
         "desde_activa": desde,
         "hasta_activa": hasta,
         "api_keys": api_keys,
@@ -206,6 +191,7 @@ def _metricas_payload(metricas, api_key_ids):
             "error_count": metricas.error_count,
             "tokens_por_request": metricas.tokens_por_request,
             "ratio_completion": metricas.ratio_completion,
+            "tasa_error": metricas.tasa_error,
         },
         "series": {
             "labels": [p.etiqueta for p in metricas.serie],
@@ -226,12 +212,16 @@ def _metricas_payload(metricas, api_key_ids):
 
 
 @staff_member_required
+@require_POST
 def metrics_api(request):
     """
     Endpoint JSON consumido por el filtrado asíncrono del panel (metrics-filters.js).
     Acepta valores repetidos para `api_key` y `modelo` (selección múltiple).
+
+    POST (no GET): el filtrado es una consulta bajo demanda, no un estado de
+    navegación — así nunca queda reflejado ni cacheado en la URL de la página.
     """
-    granularity = request.GET.get("granularity") or TokenUsageRollup.DAILY
+    granularity = request.POST.get("granularity") or TokenUsageRollup.DAILY
     if granularity not in dict(TokenUsageRollup.GRANULARITIES):
         return JsonResponse(
             {"error": f"Agrupación inválida: '{granularity}'. Usa uno de: "
@@ -239,7 +229,7 @@ def metrics_api(request):
             status=400,
         )
 
-    desde_raw, hasta_raw = request.GET.get("desde"), request.GET.get("hasta")
+    desde_raw, hasta_raw = request.POST.get("desde"), request.POST.get("hasta")
     desde, hasta = _date_or_none(desde_raw), _date_or_none(hasta_raw)
     if desde_raw and not desde:
         return JsonResponse({"error": f"Fecha 'desde' inválida: '{desde_raw}'. Usa AAAA-MM-DD."}, status=400)
@@ -250,24 +240,24 @@ def metrics_api(request):
     if not desde and not hasta:
         desde, hasta = _rango_por_defecto()
 
-    api_key_ids = _ints_or_none(request.GET.getlist("api_key"))
-    modelos_filtro = request.GET.getlist("modelo") or None
+    api_key_ids = _ints_or_none(request.POST.getlist("api_key"))
+    modelos_filtro = request.POST.getlist("modelo") or None
 
-    page = _int_or_none(request.GET.get("page")) or 1
-    page_size = _int_or_none(request.GET.get("page_size")) or 30
+    page = _int_or_none(request.POST.get("page")) or 1
+    page_size = _int_or_none(request.POST.get("page_size")) or 30
     if page < 1:
         return JsonResponse({"error": "'page' debe ser mayor o igual a 1."}, status=400)
     if not (1 <= page_size <= 200):
         return JsonResponse({"error": "'page_size' debe estar entre 1 y 200."}, status=400)
 
-    sort_by = request.GET.get("sort") or "fecha"
+    sort_by = request.POST.get("sort") or "fecha"
     if sort_by not in services.PETICIONES_SORT_FIELDS:
         return JsonResponse(
             {"error": f"'sort' inválido: '{sort_by}'. Usa uno de: "
                       f"{', '.join(services.PETICIONES_SORT_FIELDS)}."},
             status=400,
         )
-    sort_dir = request.GET.get("dir") or "desc"
+    sort_dir = request.POST.get("dir") or "desc"
     if sort_dir not in ("asc", "desc"):
         return JsonResponse({"error": "'dir' inválido. Usa 'asc' o 'desc'."}, status=400)
 
@@ -310,9 +300,7 @@ def refrescar(request):
 @staff_member_required
 def api_keys(request):
     """Listado, creación y monitoreo de consumo por API Key."""
-    modelos_disponibles = sorted(set(
-        TokenUsageRollup.objects.values_list("model_name", flat=True)
-    ))
+    modelos_disponibles = services.modelos_unicos()
     form = ApiKeyForm(request.POST or None, modelos=modelos_disponibles)
     key_emitida = None
 
@@ -363,10 +351,14 @@ def api_keys(request):
 
 @staff_member_required
 def api_key_detalle(request, key_id: int):
-    """Consumo histórico y auditoría de una API Key concreta."""
-    granularity = request.GET.get("granularity", TokenUsageRollup.DAILY)
+    """Consumo histórico y auditoría de una API Key concreta.
+
+    Al igual que `dashboard`, siempre pinta la agrupación/ventana por
+    defecto: el filtrado en vivo (agrupación, desde, hasta) va por fetch POST
+    a `metrics_api` vía apikey-detail.js, nunca por querystring."""
+    desde, hasta = _rango_por_defecto()
     try:
-        contexto = services.detalle_api_key(key_id, granularity=granularity)
+        contexto = services.detalle_api_key(key_id, granularity=TokenUsageRollup.DAILY, desde=desde, hasta=hasta)
     except ApiKeyRegistry.DoesNotExist:
         messages.error(request, "La API Key solicitada no existe.")
         return redirect("metrics:api_keys")
@@ -374,6 +366,7 @@ def api_key_detalle(request, key_id: int):
     contexto["seccion"] = "apikeys"
     contexto["granularities"] = TokenUsageRollup.GRANULARITIES
     contexto["granularity_activa"] = contexto["metricas"].granularity
+    contexto["metricas_payload"] = _metricas_payload(contexto["metricas"], [key_id])
     return render(request, "metrics/apikey_detail.html", contexto)
 
 

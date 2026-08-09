@@ -43,21 +43,60 @@ if (panel && window.Chart) {
     }[c]));
   }
 
+  // Chart.js necesita rgba() para la transparencia de relleno; los tokens de
+  // color son hex sólidos, así que se convierten en tiempo de ejecución.
+  function hexToRgba(hex, alpha) {
+    const limpio = hex.replace("#", "");
+    const valor = parseInt(
+      limpio.length === 3 ? limpio.split("").map((c) => c + c).join("") : limpio,
+      16
+    );
+    const r = (valor >> 16) & 255, g = (valor >> 8) & 255, b = valor & 255;
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+
   let chart = null;
 
   function buildDatasets(series) {
+    const colorPrompt = cssVar("--chart-1");
+    const colorCompletion = cssVar("--chart-2");
+    const colorTendencia = cssVar("--chart-5");
     return [
       {
         label: "Prompt (entrada)",
         data: series.prompt_tokens,
-        backgroundColor: cssVar("--chart-1"),
+        backgroundColor: hexToRgba(colorPrompt, 0.32),
+        borderColor: colorPrompt,
+        borderWidth: 1.5,
+        borderSkipped: false,
         stack: "tokens",
       },
       {
         label: "Completion (salida)",
         data: series.completion_tokens,
-        backgroundColor: cssVar("--chart-2"),
+        backgroundColor: hexToRgba(colorCompletion, 0.32),
+        borderColor: colorCompletion,
+        borderWidth: 1.5,
+        borderSkipped: false,
         stack: "tokens",
+      },
+      // Línea de tendencia del total por periodo, superpuesta a las barras
+      // apiladas: no participa del stack "tokens" (si no, Chart.js la suma
+      // al alto de la pila en vez de trazarla sobre ella).
+      {
+        type: "line",
+        label: "Total (tendencia)",
+        data: series.total_tokens,
+        borderColor: colorTendencia,
+        backgroundColor: colorTendencia,
+        borderWidth: 2.5,
+        tension: 0.4,
+        fill: false,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        pointBackgroundColor: colorTendencia,
+        pointBorderColor: cssVar("--surface-1"),
+        pointBorderWidth: 1.5,
       },
     ];
   }
@@ -89,9 +128,27 @@ if (panel && window.Chart) {
             labels: { color: cssVar("--text-secondary"), boxWidth: 12, usePointStyle: true, pointStyle: "rect" },
           },
           tooltip: {
+            backgroundColor: cssVar("--surface-3"),
+            titleColor: cssVar("--text-primary"),
+            bodyColor: cssVar("--text-secondary"),
+            footerColor: cssVar("--text-primary"),
+            borderColor: cssVar("--border-strong"),
+            borderWidth: 1,
+            cornerRadius: 8,
+            padding: 10,
+            boxPadding: 4,
+            usePointStyle: true,
+            titleFont: { family: cssVar("--font-sans"), size: 13, weight: "600" },
+            bodyFont: { family: cssVar("--font-sans"), size: 12 },
+            footerFont: { family: cssVar("--font-mono"), size: 12, weight: "600" },
             callbacks: {
               label: (ctx) => `${ctx.dataset.label}: ${fmtTok(ctx.parsed.y)} tokens`,
-              footer: (items) => `Total: ${fmtTok(items.reduce((sum, it) => sum + it.parsed.y, 0))} tokens`,
+              // Solo suma las barras apiladas (stack: "tokens"); la línea de
+              // tendencia repite ese mismo total y no debe contarse dos veces.
+              footer: (items) => {
+                const apiladas = items.filter((it) => it.dataset.stack === "tokens");
+                return `Total: ${fmtTok(apiladas.reduce((sum, it) => sum + it.parsed.y, 0))} tokens`;
+              },
             },
           },
         },

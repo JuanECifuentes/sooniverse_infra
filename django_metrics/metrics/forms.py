@@ -4,8 +4,6 @@ from datetime import date
 
 from django import forms
 
-from .models import TokenUsageRollup
-
 
 class ApiKeyForm(forms.Form):
     """Alta de una nueva API Key (se emite en LiteLLM y se registra localmente)."""
@@ -53,30 +51,3 @@ class ApiKeyForm(forms.Form):
         if vigencia and vigencia <= date.today():
             raise forms.ValidationError("La fecha de vigencia debe ser posterior a hoy.")
         return vigencia
-
-
-class FiltroMetricasForm(forms.Form):
-    """Filtro del panel: granularidad de agregación + API Keys + modelos + rango de fechas."""
-
-    granularity = forms.ChoiceField(
-        label="Agrupación", required=False,
-        choices=TokenUsageRollup.GRANULARITIES, initial=TokenUsageRollup.DAILY,
-    )
-    api_key = forms.MultipleChoiceField(label="API Key", required=False, choices=[])
-    modelo = forms.MultipleChoiceField(label="Modelo", required=False, choices=[])
-    desde = forms.DateField(label="Desde", required=False)
-    hasta = forms.DateField(label="Hasta", required=False)
-
-    def __init__(self, *args, api_keys=None, modelos=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields["api_key"].choices = [
-            (str(k["id"]), k["key_alias"]) for k in (api_keys or [])
-        ]
-        self.fields["modelo"].choices = [(m, m) for m in (modelos or [])]
-
-    def clean(self):
-        cleaned = super().clean()
-        desde, hasta = cleaned.get("desde"), cleaned.get("hasta")
-        if desde and hasta and desde > hasta:
-            self.add_error("hasta", "La fecha \"hasta\" no puede ser anterior a \"desde\".")
-        return cleaned

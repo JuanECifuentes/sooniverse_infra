@@ -32,6 +32,8 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
     z-index: 0;
 }
 
+.text-cosmic { background: linear-gradient(135deg, #00FF87 0%, #60EFFF 50%, #8A2BE2 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
 /* ---------------------------------------------------------------------------
    Estructura de página
    --------------------------------------------------------------------------- */
@@ -44,6 +46,7 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 .l-header   { display: flex; align-items: center; justify-content: space-between; gap: 24px; height: 68px; }
 .l-brand    { display: flex; align-items: center; gap: 10px; }
 .sv-logo__node { width: 28px; height: 28px; flex: 0 0 28px; object-fit: contain; }
+.sv-logo__node--sm { width: 16px; height: 16px; flex: 0 0 16px; }
 .l-brand__stack { display: flex; flex-direction: column; gap: 2px; }
 .l-nav      { display: flex; align-items: center; gap: 28px; }
 .sv-nav__link { display: inline-block; padding: 6px 2px; }
@@ -160,12 +163,12 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
     .sv-spinner { animation: none; }
 }
 
-/* Multi-select (disclosure <details>/<summary>) */
-.sv-multiselect        { display: block; width: 100%; min-width: 0; }
+/* Multi-select y select único (disclosure <details>/<summary>) */
+.sv-multiselect, .sv-listbox { display: block; width: 100%; min-width: 0; }
 .sv-multiselect__trigger { width: 100%; padding: 10px 13px; }
 .sv-multiselect__count { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; }
 .sv-multiselect__chevron { width: 6px; height: 6px; flex: 0 0 6px; transform: rotate(45deg); margin-top: -2px; }
-.sv-multiselect__panel {
+.sv-multiselect__panel, .sv-listbox__panel {
     top: calc(100% + 6px);
     left: 0;
     right: 0;
@@ -175,14 +178,21 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
     overflow-y: auto;
     padding: 6px;
 }
-.sv-multiselect__option { padding: 8px 10px; }
+.sv-multiselect__option, .sv-listbox__option { padding: 8px 10px; }
 .sv-multiselect__empty  { padding: 8px 10px; display: block; }
+.sv-listbox__option     { display: flex; align-items: center; width: 100%; text-align: left; background: none; border: none; font: inherit; cursor: pointer; }
 
 /* Flatpickr (datepicker vendorizado): estructura. Colores en theme-*.css.
    El input real queda oculto (display:none, lo pone flatpickr) y en su
-   lugar se muestra el altInput, con la misma clase .sv-input. */
-.flatpickr-calendar     { position: absolute; width: 280px; padding: 12px; font-size: 13px; z-index: 9990; opacity: 0; visibility: hidden; }
-.flatpickr-calendar.open { opacity: 1; visibility: visible; }
+   lugar se muestra el altInput, con la misma clase .sv-input.
+   `display` (no solo opacity/visibility) tiene que alternar con `.open`:
+   si no, el calendario recién instanciado queda en flujo normal al final
+   del <body> -antes de la primera apertura, que es cuando flatpickr calcula
+   por primera vez el `top`/`left` absolutos- y su caja invisible sigue
+   contando para el alto de scroll de la página, dejando un hueco en blanco
+   debajo del footer hasta que se abre el datepicker por primera vez. */
+.flatpickr-calendar     { position: absolute; width: 280px; padding: 12px; font-size: 13px; z-index: 9990; opacity: 0; visibility: hidden; display: none; }
+.flatpickr-calendar.open { opacity: 1; visibility: visible; display: block; }
 .flatpickr-months       { display: flex; align-items: center; justify-content: space-between; padding-bottom: 8px; }
 .flatpickr-month        { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; height: 26px; }
 .flatpickr-current-month{ display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 13px; padding: 0; }
@@ -221,6 +231,14 @@ span.flatpickr-weekday  { flex: 1; text-align: center; font-size: 11px; padding:
 .sv-table th.sv-num,
 .sv-table td.sv-num { text-align: right; white-space: nowrap; }
 .sv-table thead th  { position: sticky; top: 0; z-index: 2; }
+/* Nombres de modelo pueden ser muy largos (paths tipo proveedor/familia);
+   se acortan con ellipsis en vez de forzar la tabla a desbordar. `max-width`
+   en una celda no se respeta con table-layout:auto (el navegador la crece
+   igual para ajustar el contenido); esta tabla necesita layout fijo para
+   que la columna quede realmente acotada. */
+#akd-tabla-modelo   { table-layout: fixed; }
+#akd-tabla-modelo th:first-child,
+.l-cell--modelo     { width: 285px; max-width: 285px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .l-table-actions    { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
 .l-inline-form      { display: inline; }
 
@@ -234,24 +252,6 @@ span.flatpickr-weekday  { flex: 1; text-align: center; font-size: 11px; padding:
    Gráfica Chart.js (dashboard principal)
    --------------------------------------------------------------------------- */
 .l-chart-canvas-wrap { position: relative; height: 320px; }
-
-/* ---------------------------------------------------------------------------
-   Gráfica de barras CSS (legacy: detalle de API Key, sin JS)
-   --------------------------------------------------------------------------- */
-.sv-chart        { position: relative; display: flex; align-items: flex-end; gap: 6px; height: 260px; padding: 8px 0 0; overflow-x: auto; }
-.l-chart-col     { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 8px; flex: 1 1 0; min-width: 26px; height: 100%; }
-.l-bar-track     { display: flex; align-items: flex-end; justify-content: center; width: 100%; height: 100%; }
-.sv-bar          { position: relative; display: block; width: 100%; max-width: 46px; min-height: 2px; }
-.sv-bar__prompt  { position: absolute; left: 0; right: 0; bottom: 0; }
-.sv-axis         { display: block; text-align: center; white-space: nowrap; }
-.l-chart-axis-x  { display: flex; gap: 6px; margin-top: 6px; }
-.sv-gridline     { position: absolute; left: 0; right: 0; }
-
-.l-legend        { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
-.l-legend__item  { display: inline-flex; align-items: center; gap: 7px; }
-.sv-legend__swatch { display: inline-block; width: 13px; height: 13px; flex: 0 0 13px; }
-
-.l-empty         { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 200px; text-align: center; }
 
 /* ---------------------------------------------------------------------------
    Mensajes

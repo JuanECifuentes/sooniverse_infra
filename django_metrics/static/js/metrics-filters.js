@@ -6,10 +6,14 @@
 const panel = document.getElementById("metrics-panel");
 if (panel) {
   const API_URL = panel.dataset.apiUrl;
-  const DASHBOARD_URL = panel.dataset.dashboardUrl;
+
+  function getCsrfToken() {
+    const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  }
 
   const els = {
-    granularity: document.getElementById("id_granularity"),
+    granularity: document.getElementById("metrics-granularity"),
     desde: document.getElementById("id_desde"),
     hasta: document.getElementById("id_hasta"),
     dateError: document.getElementById("metrics-date-error"),
@@ -43,8 +47,6 @@ if (panel) {
   };
 
   const fmtInt = (n) => Number(n || 0).toLocaleString("es-ES");
-  const fmtUsd = (n) =>
-    Number(n || 0).toLocaleString("es-ES", { minimumFractionDigits: 4, maximumFractionDigits: 4 });
 
   // Los presets fijan la fecha programáticamente; si flatpickr ya tomó el
   // control del input (ver datepicker.js), asignar `.value` directo no
@@ -90,7 +92,7 @@ if (panel) {
   }
 
   const state = {
-    granularity: els.granularity.value,
+    granularity: els.granularity.querySelector(".sv-listbox__option--active")?.dataset.value || "daily",
     modelo: readCheckedValues("modelo"),
     api_key: readCheckedValues("api_key"),
     desde: els.desde.value,
@@ -114,10 +116,6 @@ if (panel) {
     p.set("sort", s.sort);
     p.set("dir", s.dir);
     return p;
-  }
-
-  function syncUrl(s) {
-    history.replaceState(null, "", `${DASHBOARD_URL}?${buildParams(s).toString()}`);
   }
 
   function announce(msg) {
@@ -185,9 +183,20 @@ if (panel) {
     });
   }
 
+  function updateGranularityHighlight() {
+    const etiqueta = els.granularity.querySelector(`[data-value="${state.granularity}"]`)?.textContent.trim();
+    els.granularity.querySelectorAll("[data-value]").forEach((btn) => {
+      const activo = btn.dataset.value === state.granularity;
+      btn.classList.toggle("sv-listbox__option--active", activo);
+      btn.setAttribute("aria-selected", activo ? "true" : "false");
+    });
+    const label = els.granularity.querySelector("[data-listbox-label]");
+    if (label && etiqueta) label.textContent = etiqueta;
+  }
+
   function renderTable(tbody, rows, kind) {
     if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="4" class="sv-help">Sin datos en la ventana seleccionada.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5" class="sv-help">Sin datos en la ventana seleccionada.</td></tr>';
       return;
     }
     tbody.innerHTML = rows
@@ -196,8 +205,9 @@ if (panel) {
           return `<tr>
             <td class="sv-mono">${escapeHtml(r.model_name)}</td>
             <td class="sv-num">${fmtInt(r.request_count)}</td>
-            <td class="sv-num sv-num--accent">${fmtTok(r.prompt_tokens)}</td>
-            <td class="sv-num sv-num--accent">${fmtTok(r.completion_tokens)}</td>
+            <td class="sv-num">${fmtTok(r.prompt_tokens)}</td>
+            <td class="sv-num">${fmtTok(r.completion_tokens)}</td>
+            <td class="sv-num sv-num--accent">${fmtTok(r.total_tokens)}</td>
           </tr>`;
         }
         const alias = r.api_key__key_alias ? escapeHtml(r.api_key__key_alias) : "(sin registro)";
@@ -206,8 +216,9 @@ if (panel) {
         return `<tr>
           <td><span class="sv-strong">${alias}</span>${inactiva}</td>
           <td class="sv-num">${fmtInt(r.request_count)}</td>
-          <td class="sv-num sv-num--accent">${fmtTok(r.prompt_tokens)}</td>
-          <td class="sv-num sv-num--accent">${fmtTok(r.completion_tokens)}</td>
+          <td class="sv-num">${fmtTok(r.prompt_tokens)}</td>
+          <td class="sv-num">${fmtTok(r.completion_tokens)}</td>
+          <td class="sv-num sv-num--accent">${fmtTok(r.total_tokens)}</td>
         </tr>`;
       })
       .join("");
@@ -228,7 +239,7 @@ if (panel) {
     setField("ratio_completion", data.summary.ratio_completion);
     setField("request_count", fmtInt(data.summary.request_count));
     setField("error_count", fmtInt(data.summary.error_count));
-    setField("spend_usd", fmtUsd(data.summary.spend_usd));
+    setField("tasa_error", data.summary.tasa_error);
     els.badgeConError.hidden = data.summary.error_count === 0;
     els.badgeSinError.hidden = data.summary.error_count !== 0;
 
@@ -293,9 +304,9 @@ if (panel) {
     els.dateError.hidden = true;
     els.hasta.removeAttribute("aria-invalid");
 
-    syncUrl(state);
     updateChips();
     updatePresetHighlight();
+    updateGranularityHighlight();
 
     if (activeController) activeController.abort();
     const controller = new AbortController();
@@ -313,7 +324,12 @@ if (panel) {
     const startedAt = performance.now();
 
     try {
-      const res = await fetch(`${API_URL}?${buildParams(state).toString()}`, { signal: controller.signal });
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: { "X-CSRFToken": getCsrfToken() },
+        body: buildParams(state),
+        signal: controller.signal,
+      });
       const body = await res.json().catch(() => null);
       if (myRequestId !== requestCounter) return;
       if (!res.ok) throw new Error((body && body.error) || `Error ${res.status} al cargar métricas.`);
@@ -342,8 +358,11 @@ if (panel) {
     }
   }
 
-  els.granularity.addEventListener("change", () => {
-    state.granularity = els.granularity.value;
+  els.granularity.querySelector(".sv-listbox__panel").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-value]");
+    if (!btn) return;
+    state.granularity = btn.dataset.value;
+    els.granularity.removeAttribute("open");
     state.page = 1;
     applyFilters();
   });
@@ -445,4 +464,5 @@ if (panel) {
 
   updateChips();
   updatePresetHighlight();
+  updateGranularityHighlight();
 }
