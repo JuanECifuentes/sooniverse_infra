@@ -19,15 +19,10 @@
     <div class="l-shell">
         <div class="sv-aura" aria-hidden="true"></div>
 
-        <header class="sv-header">
-            <div class="l-container l-header">
+        <header class="sv-header" id="main-header">
+            <div class="l-header">
                 <a class="l-brand" href="{% url 'metrics:dashboard' %}">
-                    <img class="sv-logo__node" src="{% static 'img/logo_sin_fondo.svg' %}" alt="" aria-hidden="true">
-                    <span class="l-brand__stack">
-                        <span class="sv-logo">
-                            <span class="sv-logo__solid">{{ MARCA_NOMBRE_1 }}</span><span class="sv-logo__gradient">{{ MARCA_NOMBRE_2 }}</span>
-                        </span>
-                    </span>
+                    <img class="logo-img" src="{% static 'img/logo_completo_sin_fondo_soloNombre2.svg' %}" alt="Sooniverse">
                 </a>
 
                 <nav class="l-nav">
@@ -84,5 +79,20 @@
     <script src="{% static 'js/vendor/flatpickr.min.js' %}"></script>
     <script src="{% static 'js/datepicker.js' %}"></script>
     {% block scripts %}{% endblock %}
+    <script>
+        (function() {
+            'use strict';
+            const header = document.getElementById('main-header');
+            if (!header) return;
+            function updateHeader() {
+                const scrollY = window.scrollY || window.pageYOffset || document.documentElement.scrollTop || 0;
+                if (scrollY > 15) header.classList.add('scrolled');
+                else header.classList.remove('scrolled');
+            }
+            window.addEventListener('scroll', updateHeader, { passive: true });
+            document.addEventListener('scroll', updateHeader, { passive: true });
+            updateHeader();
+        })();
+    </script>
 </body>
 </html>
