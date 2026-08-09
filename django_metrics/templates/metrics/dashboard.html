@@ -31,7 +31,6 @@
 {# ---------------------------------------------------- PANEL (filtros + datos) #}
 <div id="metrics-panel"
      data-api-url="{% url 'metrics:metrics_api' %}"
-     data-dashboard-url="{% url 'metrics:dashboard' %}"
      data-default-desde="{{ desde_activa|date:'Y-m-d' }}"
      data-default-hasta="{{ hasta_activa|date:'Y-m-d' }}">
     <div class="l-loading-overlay" id="metrics-loading" hidden aria-hidden="true">
@@ -40,19 +39,28 @@
 
 {# ------------------------------------------------------------------ FILTROS #}
 <section class="sv-panel l-mb-lg">
-    <div class="l-grid l-grid--filters" id="metrics-filters">
+    <div class="l-grid l-grid--filters" id="metrics-filters" style="margin-bottom: 0.625rem;">
         <div class="l-field">
-            <label class="sv-label" for="id_granularity">Agrupación</label>
-            <select class="sv-select" name="granularity" id="id_granularity" data-filter="granularity">
-                {% for valor, etiqueta in granularities %}
-                    <option value="{{ valor }}" {% if granularity_activa == valor %}selected{% endif %}>{{ etiqueta }}</option>
-                {% endfor %}
-            </select>
+            <span class="sv-label" id="label_granularity">Agrupación</span>
+            <details class="sv-disclosure sv-multiselect sv-listbox" id="metrics-granularity" aria-labelledby="label_granularity">
+                <summary class="sv-multiselect__trigger">
+                    <span data-listbox-label>{{ metricas.granularity_label }}</span>
+                    <span class="sv-multiselect__chevron" aria-hidden="true"></span>
+                </summary>
+                <div class="sv-multiselect__panel sv-listbox__panel" role="listbox" aria-labelledby="label_granularity">
+                    {% for valor, etiqueta in granularities %}
+                        <button type="button" class="sv-multiselect__option sv-listbox__option {% if granularity_activa == valor %}sv-listbox__option--active{% endif %}"
+                                data-value="{{ valor }}" role="option" aria-selected="{% if granularity_activa == valor %}true{% else %}false{% endif %}">
+                            <span>{{ etiqueta }}</span>
+                        </button>
+                    {% endfor %}
+                </div>
+            </details>
         </div>
 
         <div class="l-field">
             <span class="sv-label" id="label_modelo">Modelo</span>
-            <details class="sv-multiselect" data-filter-group="modelo" aria-labelledby="label_modelo">
+            <details class="sv-disclosure sv-multiselect" data-filter-group="modelo" aria-labelledby="label_modelo">
                 <summary class="sv-multiselect__trigger">
                     <span>Modelos<span class="sv-multiselect__count" data-count-for="modelo" hidden></span></span>
                     <span class="sv-multiselect__chevron" aria-hidden="true"></span>
@@ -72,7 +80,7 @@
 
         <div class="l-field">
             <span class="sv-label" id="label_api_key">API Key</span>
-            <details class="sv-multiselect" data-filter-group="api_key" aria-labelledby="label_api_key">
+            <details class="sv-disclosure sv-multiselect" data-filter-group="api_key" aria-labelledby="label_api_key">
                 <summary class="sv-multiselect__trigger">
                     <span>API Keys<span class="sv-multiselect__count" data-count-for="api_key" hidden></span></span>
                     <span class="sv-multiselect__chevron" aria-hidden="true"></span>
@@ -168,9 +176,9 @@
 
             <article class="sv-card sv-card--secure">
                 <div class="l-kpi">
-                    <span class="sv-eyebrow">Gasto estimado</span>
-                    <span class="l-kpi__value"><span class="sv-metric">$<span data-field="spend_usd">{{ metricas.spend_usd|floatformat:4 }}</span></span></span>
-                    <span class="l-kpi__foot sv-mono sv-muted">USD · ventana actual</span>
+                    <span class="sv-eyebrow">Tasa de error</span>
+                    <span class="l-kpi__value"><span class="sv-metric" data-field="tasa_error">{{ metricas.tasa_error }}</span><span class="sv-metric">%</span></span>
+                    <span class="l-kpi__foot sv-mono sv-muted">ventana actual</span>
                 </div>
             </article>
         </section>
@@ -265,6 +273,7 @@
                                 <th scope="col" class="sv-num">Peticiones</th>
                                 <th scope="col" class="sv-num">Entrada</th>
                                 <th scope="col" class="sv-num">Salida</th>
+                                <th scope="col" class="sv-num">Total</th>
                             </tr>
                         </thead>
                         <tbody id="tabla-modelo-body">
@@ -272,11 +281,12 @@
                                 <tr>
                                     <td class="sv-mono">{{ fila.model_name }}</td>
                                     <td class="sv-num">{{ fila.request_count|intcomma }}</td>
-                                    <td class="sv-num sv-num--accent">{{ fila.prompt_tokens|human_tokens }}</td>
-                                    <td class="sv-num sv-num--accent">{{ fila.completion_tokens|human_tokens }}</td>
+                                    <td class="sv-num">{{ fila.prompt_tokens|human_tokens }}</td>
+                                    <td class="sv-num">{{ fila.completion_tokens|human_tokens }}</td>
+                                    <td class="sv-num sv-num--accent">{{ fila.total_tokens|human_tokens }}</td>
                                 </tr>
                             {% empty %}
-                                <tr><td colspan="4" class="sv-help">Sin datos en la ventana seleccionada.</td></tr>
+                                <tr><td colspan="5" class="sv-help">Sin datos en la ventana seleccionada.</td></tr>
                             {% endfor %}
                         </tbody>
                     </table>
@@ -300,6 +310,7 @@
                                 <th scope="col" class="sv-num">Peticiones</th>
                                 <th scope="col" class="sv-num">Entrada</th>
                                 <th scope="col" class="sv-num">Salida</th>
+                                <th scope="col" class="sv-num">Total</th>
                             </tr>
                         </thead>
                         <tbody id="tabla-apikey-body">
@@ -312,11 +323,12 @@
                                         {% endif %}
                                     </td>
                                     <td class="sv-num">{{ fila.request_count|intcomma }}</td>
-                                    <td class="sv-num sv-num--accent">{{ fila.prompt_tokens|human_tokens }}</td>
-                                    <td class="sv-num sv-num--accent">{{ fila.completion_tokens|human_tokens }}</td>
+                                    <td class="sv-num">{{ fila.prompt_tokens|human_tokens }}</td>
+                                    <td class="sv-num">{{ fila.completion_tokens|human_tokens }}</td>
+                                    <td class="sv-num sv-num--accent">{{ fila.total_tokens|human_tokens }}</td>
                                 </tr>
                             {% empty %}
-                                <tr><td colspan="4" class="sv-help">Sin datos en la ventana seleccionada.</td></tr>
+                                <tr><td colspan="5" class="sv-help">Sin datos en la ventana seleccionada.</td></tr>
                             {% endfor %}
                         </tbody>
                     </table>

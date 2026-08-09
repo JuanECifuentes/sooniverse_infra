@@ -80,6 +80,10 @@ class ResumenMetricas:
     def tokens_por_request(self) -> int:
         return round(self.total_tokens / self.request_count) if self.request_count else 0
 
+    @property
+    def tasa_error(self) -> float:
+        return round(self.error_count / self.request_count * 100, 1) if self.request_count else 0.0
+
 
 def _etiqueta_periodo(periodo: date, granularity: str) -> str:
     if granularity == TokenUsageRollup.MONTHLY:
@@ -234,6 +238,20 @@ def obtener_peticiones(
         "has_prev": page > 1,
         "has_next": inicio + page_size < total,
     }
+
+
+def modelos_unicos() -> List[str]:
+    """Nombres de modelo con datos, deduplicados sin distinguir mayúsculas ni
+    espacios sobrantes. Cubre inconsistencias reales de la BD de pruebas
+    (p. ej. 'gpt-4o' y 'GPT-4o ' no deben aparecer como dos opciones)."""
+    vistos: Dict[str, str] = {}
+    for crudo in TokenUsageRollup.objects.values_list("model_name", flat=True).distinct():
+        limpio = (crudo or "").strip()
+        if not limpio:
+            continue
+        clave = limpio.lower()
+        vistos.setdefault(clave, limpio)
+    return sorted(vistos.values(), key=str.lower)
 
 
 def resumen_api_keys(solo_activas: bool = False) -> List[Dict[str, Any]]:
@@ -412,11 +430,16 @@ def reactivar_api_key(key_id: int, actor: str = "system", ip: Optional[str] = No
     return registro
 
 
-def detalle_api_key(key_id: int, granularity: str = TokenUsageRollup.DAILY) -> Dict[str, Any]:
+def detalle_api_key(
+    key_id: int,
+    granularity: str = TokenUsageRollup.DAILY,
+    desde: Optional[date] = None,
+    hasta: Optional[date] = None,
+) -> Dict[str, Any]:
     registro = ApiKeyRegistry.objects.get(pk=key_id)
     return {
         "registro": registro,
-        "metricas": obtener_metricas(granularity=granularity, api_key_ids=[key_id]),
+        "metricas": obtener_metricas(granularity=granularity, api_key_ids=[key_id], desde=desde, hasta=hasta),
         "auditoria": list(ApiKeyAudit.objects.filter(api_key_id=key_id)[:50]),
         "eventos_recientes": list(
             TokenUsageEvent.objects.filter(api_key_id=key_id)

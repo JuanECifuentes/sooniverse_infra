@@ -232,7 +232,7 @@ h4, .sv-h4 {
     letter-spacing: -0.4px;
 }
 .sv-logo__solid    { color: var(--text-primary); }
-.sv-logo__gradient { color: var(--accent); }
+.sv-logo__gradient { background: linear-gradient(135deg, #00FF87 0%, #60EFFF 50%, #8A2BE2 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
 
 /* ----------------------------------------------------------------------------
    5. ENLACES
@@ -495,7 +495,7 @@ a:hover {
    10b. MULTI-SELECT (disclosure nativo <details>/<summary>, sin JS obligatorio
         para abrir/cerrar; el módulo de filtros solo escucha "change" dentro)
    ---------------------------------------------------------------------------- */
-.sv-multiselect { position: relative; }
+.sv-multiselect, .sv-listbox { position: relative; }
 
 .sv-multiselect__trigger {
     display: flex;
@@ -514,7 +514,8 @@ a:hover {
 }
 .sv-multiselect__trigger::-webkit-details-marker { display: none; }
 .sv-multiselect__trigger:hover { border-color: var(--border-strong); }
-.sv-multiselect[open] > .sv-multiselect__trigger {
+.sv-multiselect[open] > .sv-multiselect__trigger,
+.sv-listbox[open] > .sv-multiselect__trigger {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-soft);
 }
@@ -536,9 +537,11 @@ a:hover {
     border-width: 0 1.4px 1.4px 0;
     transition: transform var(--dur-fast) var(--ease-out);
 }
-.sv-multiselect[open] .sv-multiselect__chevron { transform: rotate(-135deg); }
+.sv-multiselect[open] .sv-multiselect__chevron,
+.sv-listbox[open] .sv-multiselect__chevron { transform: rotate(-135deg); }
 
-.sv-multiselect__panel {
+.sv-multiselect__panel,
+.sv-listbox__panel {
     position: absolute;
     background-color: var(--surface-2);
     border: 1px solid var(--border-strong);
@@ -546,7 +549,8 @@ a:hover {
     box-shadow: var(--shadow-2);
 }
 
-.sv-multiselect__option {
+.sv-multiselect__option,
+.sv-listbox__option {
     display: flex;
     align-items: center;
     gap: var(--space-2);
@@ -556,7 +560,8 @@ a:hover {
     border-radius: var(--radius-sm);
     transition: var(--sv-transition);
 }
-.sv-multiselect__option:hover { background-color: var(--surface-3); }
+.sv-multiselect__option:hover,
+.sv-listbox__option:hover { background-color: var(--surface-3); }
 
 .sv-multiselect__option input[type="checkbox"] {
     appearance: none;
@@ -583,6 +588,27 @@ a:hover {
 }
 
 .sv-multiselect__empty { color: var(--text-muted); font-size: var(--text-sm); }
+
+/* Select único "seleccionable" (Agrupación): mismo disclosure que el
+   multi-select, pero opciones de elección única sin checkbox — la fila
+   activa se resalta con el mismo tratamiento accent-soft que el resto del
+   panel (chips, badges), en vez de depender del estilo nativo del navegador
+   para <option>, que en Chrome/Windows ignora el CSS del popup. */
+.sv-listbox__option {
+    color: var(--text-primary);
+    border-radius: var(--radius-sm);
+    transition: var(--sv-transition);
+}
+.sv-listbox__option:hover { background-color: var(--surface-3); }
+.sv-listbox__option--active {
+    background-color: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+}
+.sv-listbox__option:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
 
 /* Flatpickr (datepicker vendorizado) */
 .flatpickr-calendar {
@@ -643,13 +669,15 @@ span.flatpickr-weekday { color: var(--text-muted); background: transparent; font
     background-color: color-mix(in srgb, var(--surface-0) 55%, transparent);
 }
 #metrics-panel[aria-busy="true"] #metrics-filters,
-#metrics-panel[aria-busy="true"] #metrics-content {
+#metrics-panel[aria-busy="true"] #metrics-content,
+#metrics-panel[aria-busy="true"] #akd-content {
     opacity: 0.5;
     transition: opacity var(--dur-base) var(--ease-out);
 }
 @media (prefers-reduced-motion: reduce) {
     #metrics-panel[aria-busy="true"] #metrics-filters,
-    #metrics-panel[aria-busy="true"] #metrics-content { transition: none; }
+    #metrics-panel[aria-busy="true"] #metrics-content,
+    #metrics-panel[aria-busy="true"] #akd-content { transition: none; }
 }
 
 /* Chip de filtro activo, con affordance de borrado */
@@ -784,34 +812,6 @@ span.flatpickr-weekday { color: var(--text-muted); background: transparent; font
    12. GRÁFICA (Chart.js: colores leídos desde estas variables en tiempo de
        ejecución vía getComputedStyle; aquí solo se fija la paleta)
    ---------------------------------------------------------------------------- */
-.sv-chart { background-color: transparent; }
-
-.sv-bar {
-    background: var(--accent);
-    border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-    transition: var(--sv-transition);
-}
-.sv-bar:hover { background: var(--accent-hover); }
-
-.sv-bar__prompt {
-    background-color: var(--accent-pressed);
-    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
-}
-
-.sv-bar--empty { background: var(--surface-2); }
-
-.sv-axis {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    letter-spacing: 0.3px;
-}
-.sv-gridline { border-top: 1px solid var(--border-subtle); }
-
-/* Leyenda */
-.sv-legend__swatch { border-radius: 3px; }
-.sv-legend__swatch--total  { background: var(--accent); }
-.sv-legend__swatch--prompt { background-color: var(--accent-pressed); }
 
 /* ----------------------------------------------------------------------------
    13. MENSAJES DEL SISTEMA

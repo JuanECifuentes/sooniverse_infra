@@ -30,3 +30,18 @@ def human_tokens(value):
     if abs(numero) >= 100_000:
         return _formato_compacto(numero, 1_000, "K")
     return intcomma(numero)
+
+
+@register.filter
+def unique_ci(valores):
+    """Deduplica una lista de strings sin distinguir mayúsculas ni espacios
+    sobrantes, conservando la primera forma vista. Para listas guardadas en
+    BD (como `allowed_models`) que puedan tener duplicados por errores de
+    captura, evitando repetir el mismo tag varias veces en la interfaz."""
+    vistos = {}
+    for valor in valores or []:
+        limpio = (valor or "").strip()
+        if not limpio:
+            continue
+        vistos.setdefault(limpio.lower(), limpio)
+    return list(vistos.values())
