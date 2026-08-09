@@ -861,9 +861,93 @@ span.flatpickr-weekday { color: var(--text-muted); background: transparent; font
     border-bottom-color: var(--accent);
 }
 
+#main-header,
 .sv-header {
-    background-color: var(--surface-0);
-    border-bottom: 1px solid var(--border-subtle);
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: 0;
+    z-index: 50;
+    width: 100%;
+    background-color: transparent;
+    border: none;
+    padding: 0;
+}
+
+#main-header .l-header,
+.sv-header .l-header {
+    width: 100%;
+    max-width: 100%;
+    margin-left: auto;
+    margin-right: auto;
+    padding: 0.75rem 1.5rem;
+    background-color: rgba(13, 13, 14, 0);
+    backdrop-filter: blur(0px);
+    -webkit-backdrop-filter: blur(0px);
+    border: 1px solid rgba(255, 255, 255, 0);
+    border-radius: 0px;
+    transform: translateY(0);
+    transition: transform 0.8s cubic-bezier(0.16, 1, 0.3, 1),
+                width 0.8s cubic-bezier(0.16, 1, 0.3, 1),
+                max-width 0.8s cubic-bezier(0.16, 1, 0.3, 1),
+                padding 0.8s cubic-bezier(0.16, 1, 0.3, 1),
+                background-color 0.8s cubic-bezier(0.16, 1, 0.3, 1),
+                border-color 0.8s cubic-bezier(0.16, 1, 0.3, 1),
+                border-radius 0.8s cubic-bezier(0.16, 1, 0.3, 1),
+                backdrop-filter 0.8s cubic-bezier(0.16, 1, 0.3, 1),
+                -webkit-backdrop-filter 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+    box-sizing: border-box;
+}
+
+#main-header.scrolled .l-header,
+.sv-header.scrolled .l-header {
+    width: calc(100% - 1.5rem);
+    margin-left: auto;
+    margin-right: auto;
+    border-radius: 12px;
+    padding: 0.45rem 1rem;
+    background-color: rgba(13, 13, 14, 0.35);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    transform: translateY(0.75rem);
+}
+
+#main-header .logo-img,
+.sv-header .logo-img {
+    height: 1.75rem;
+    width: auto;
+    transition: height 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+#main-header.scrolled .logo-img,
+.sv-header.scrolled .logo-img {
+    height: 1.4rem;
+}
+
+@media (min-width: 768px) {
+    #main-header .l-header,
+    .sv-header .l-header {
+        padding: 1.25rem 3rem;
+        max-width: 100%;
+    }
+    #main-header.scrolled .l-header,
+    .sv-header.scrolled .l-header {
+        width: calc(100% - 2rem);
+        max-width: 1360px;
+        border-radius: 16px;
+        padding: 0.6rem 2rem;
+        transform: translateY(1rem);
+    }
+    #main-header .logo-img,
+    .sv-header .logo-img {
+        height: 2.25rem;
+    }
+    #main-header.scrolled .logo-img,
+    .sv-header.scrolled .logo-img {
+        height: 1.75rem;
+    }
 }
 
 .sv-footer {
@@ -926,5 +1010,12 @@ span.flatpickr-weekday { color: var(--text-muted); background: transparent; font
     *, *::before, *::after {
         transition-duration: 0.01ms !important;
         animation-duration: 0.01ms !important;
+    }
+
+    #main-header .l-header,
+    .sv-header .l-header,
+    #main-header .logo-img,
+    .sv-header .logo-img {
+        transition-duration: 0.8s !important;
     }
 }
