@@ -1,0 +1,9 @@
+{% comment %}
+Spinner reutilizable. Uso:
+  {% include "metrics/_spinner.html" %}
+  {% include "metrics/_spinner.html" with size="lg" %}
+Para botones que se auto-deshabilitan y muestran este mismo spinner al
+enviar un <form>, añade el atributo `data-spinner-submit` al <form>
+(ver static/js/spinner.js, cargado globalmente desde base.html).
+{% endcomment %}
+<span class="sv-spinner{% if size %} sv-spinner--{{ size }}{% endif %}" aria-hidden="true"></span>

@@ -10,6 +10,11 @@
 
 html, body { margin: 0; padding: 0; min-height: 100%; }
 
+/* Los componentes fijan su propio `display` (flex/grid/inline-flex); sin este
+   refuerzo, esas reglas de autor ganan sobre el `[hidden]{display:none}` del
+   navegador aunque el atributo esté presente. */
+[hidden] { display: none !important; }
+
 /* Grano digital: capa fija sobre todo el viewport */
 .sv-noise {
     position: fixed;
@@ -27,25 +32,45 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
     z-index: 0;
 }
 
+.text-cosmic { background: linear-gradient(135deg, #00FF87 0%, #60EFFF 50%, #8A2BE2 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
 /* ---------------------------------------------------------------------------
    Estructura de página
    --------------------------------------------------------------------------- */
 .l-shell    { position: relative; z-index: 1; display: flex; flex-direction: column; min-height: 100vh; }
 .l-container{ width: 100%; max-width: 1360px; margin: 0 auto; padding: 0 24px; }
-.l-main     { flex: 1 1 auto; padding: 32px 0 56px; }
+.l-main     { flex: 1 1 auto; padding: 120px 0 56px; }
 
 /* Header */
-.sv-header  { position: sticky; top: 0; z-index: 50; }
-.l-header   { display: flex; align-items: center; justify-content: space-between; gap: 24px; height: 68px; }
+.sv-header  { position: fixed; top: 0; left: 0; right: 0; z-index: 50; }
+.l-header   { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .l-brand    { display: flex; align-items: center; gap: 10px; }
-.sv-logo__node { width: 9px; height: 9px; flex: 0 0 9px; }
+.sv-logo__node { width: 28px; height: 28px; flex: 0 0 28px; object-fit: contain; }
+.sv-logo__node--sm { width: 16px; height: 16px; flex: 0 0 16px; }
 .l-brand__stack { display: flex; flex-direction: column; gap: 2px; }
 .l-nav      { display: flex; align-items: center; gap: 28px; }
 .sv-nav__link { display: inline-block; padding: 6px 2px; }
 .l-header__meta { display: flex; align-items: center; gap: 10px; }
 
 /* Footer */
-.l-footer   { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 0; flex-wrap: wrap; }
+.l-footer          { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 0; flex-wrap: wrap; }
+.l-footer__info    { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.l-footer__credit  { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; }
+
+/* ---------------------------------------------------------------------------
+   Panel de métricas (filtros + resultados) y overlay de carga
+   --------------------------------------------------------------------------- */
+#metrics-panel        { position: relative; }
+#metrics-panel[aria-busy="true"] { pointer-events: none; }
+/* El backdrop cubre todo el panel (puede ser muy alto); el spinner se fija
+   al viewport para seguir visible sin depender del scroll ni de la altura
+   del panel. */
+.l-loading-overlay     { position: absolute; inset: 0; z-index: 30; }
+.l-loading-overlay .sv-spinner { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+
+/* Overlay de página completa (spinner.js): bloquea toda la interfaz
+   mientras un <form data-spinner-submit> navega. */
+.l-loading-overlay--page { position: fixed; inset: 0; z-index: 9999; }
 
 /* ---------------------------------------------------------------------------
    Encabezado de sección
@@ -60,7 +85,7 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
    --------------------------------------------------------------------------- */
 .l-grid            { display: grid; gap: 18px; }
 .l-grid--kpi       { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
-.l-grid--split     { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); align-items: start; }
+.l-grid--split     { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); align-items: stretch; }
 .l-grid--halves    { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
 .l-grid--form      { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 .l-grid--filters   { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); align-items: end; }
@@ -94,8 +119,8 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 /* ---------------------------------------------------------------------------
    Segmentos (Diario / Semanal / Mensual)
    --------------------------------------------------------------------------- */
-.sv-segment          { display: inline-flex; align-items: center; gap: 2px; padding: 4px; }
-.sv-segment__item    { display: inline-block; padding: 8px 18px; text-align: center; white-space: nowrap; }
+.sv-segment          { display: flex; align-items: center; gap: 2px; padding: 4px; max-width: 100%; overflow-x: auto; }
+.sv-segment__item    { display: inline-block; padding: 8px 18px; text-align: center; white-space: nowrap; flex: 0 0 auto; }
 
 /* ---------------------------------------------------------------------------
    Badges y puntos de estado
@@ -106,7 +131,7 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 /* ---------------------------------------------------------------------------
    Formularios
    --------------------------------------------------------------------------- */
-.l-field       { display: flex; flex-direction: column; gap: 7px; }
+.l-field       { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
 .l-field--wide { grid-column: 1 / -1; }
 .sv-label      { display: block; }
 .sv-input, .sv-select, .sv-textarea { width: 100%; padding: 10px 13px; }
@@ -116,6 +141,85 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 
 .sv-btn        { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 11px 22px; }
 .sv-btn--sm    { padding: 7px 14px; font-size: 11px; }
+
+/* Chips de filtro activo */
+.l-chips       { display: flex; flex-wrap: wrap; gap: 8px; }
+.sv-chip       { padding: 5px 6px 5px 11px; }
+.sv-chip__remove { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; padding: 0; }
+
+/* Spinner de estado de carga (botones y overlay) */
+.sv-spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-width: 2px;
+    border-style: solid;
+    border-radius: 50%;
+    animation: l-spin 0.7s linear infinite;
+}
+.sv-spinner--lg { width: 28px; height: 28px; border-width: 3px; }
+@keyframes l-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .sv-spinner { animation: none; }
+}
+
+/* Multi-select y select único (disclosure <details>/<summary>) */
+.sv-multiselect, .sv-listbox { display: block; width: 100%; min-width: 0; }
+.sv-multiselect__trigger { width: 100%; padding: 10px 13px; }
+.sv-multiselect__count { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; }
+.sv-multiselect__chevron { width: 6px; height: 6px; flex: 0 0 6px; transform: rotate(45deg); margin-top: -2px; }
+.sv-multiselect__panel, .sv-listbox__panel {
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    min-width: 220px;
+    z-index: 20;
+    max-height: 280px;
+    overflow-y: auto;
+    padding: 6px;
+}
+.sv-multiselect__option, .sv-listbox__option { padding: 8px 10px; }
+.sv-multiselect__empty  { padding: 8px 10px; display: block; }
+.sv-listbox__option     { display: flex; align-items: center; width: 100%; text-align: left; background: none; border: none; font: inherit; cursor: pointer; }
+
+/* Flatpickr (datepicker vendorizado): estructura. Colores en theme-*.css.
+   El input real queda oculto (display:none, lo pone flatpickr) y en su
+   lugar se muestra el altInput, con la misma clase .sv-input.
+   `display` (no solo opacity/visibility) tiene que alternar con `.open`:
+   si no, el calendario recién instanciado queda en flujo normal al final
+   del <body> -antes de la primera apertura, que es cuando flatpickr calcula
+   por primera vez el `top`/`left` absolutos- y su caja invisible sigue
+   contando para el alto de scroll de la página, dejando un hueco en blanco
+   debajo del footer hasta que se abre el datepicker por primera vez. */
+.flatpickr-calendar     { position: absolute; width: 280px; padding: 12px; font-size: 13px; z-index: 9990; opacity: 0; visibility: hidden; display: none; }
+.flatpickr-calendar.open { opacity: 1; visibility: visible; display: block; }
+.flatpickr-months       { display: flex; align-items: center; justify-content: space-between; padding-bottom: 8px; }
+.flatpickr-month        { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; height: 26px; }
+.flatpickr-current-month{ display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 13px; padding: 0; }
+.flatpickr-current-month input.cur-year { width: 46px; padding: 0; border: none; background: none; font: inherit; }
+.flatpickr-current-month .flatpickr-monthDropdown-months { border: none; font: inherit; padding: 0 2px; }
+.flatpickr-prev-month, .flatpickr-next-month { display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 6px; cursor: pointer; }
+.flatpickr-prev-month svg, .flatpickr-next-month svg { width: 12px; height: 12px; }
+.flatpickr-weekdays     { display: flex; margin-top: 6px; }
+.flatpickr-weekdaycontainer { display: flex; width: 100%; }
+span.flatpickr-weekday  { flex: 1; text-align: center; font-size: 11px; padding: 4px 0; }
+.flatpickr-days         { display: flex; }
+.dayContainer           { display: grid; grid-template-columns: repeat(7, 1fr); row-gap: 2px; width: 100%; }
+.flatpickr-day          { display: flex; align-items: center; justify-content: center; height: 30px; margin: 0; border-radius: 6px; cursor: pointer; }
+.flatpickr-innerContainer, .flatpickr-rContainer { width: 100%; }
+
+/* Tooltip accesible (hover / focus-within, sin JS) */
+.sv-tooltip          { position: relative; display: inline-flex; align-items: center; margin-left: 6px; }
+.sv-tooltip__trigger { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; padding: 0; border-radius: 50%; }
+.sv-tooltip__bubble  {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    width: 230px;
+    padding: 10px 12px;
+    z-index: 40;
+    pointer-events: none;
+}
 
 /* ---------------------------------------------------------------------------
    Tablas
@@ -127,26 +231,27 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 .sv-table th.sv-num,
 .sv-table td.sv-num { text-align: right; white-space: nowrap; }
 .sv-table thead th  { position: sticky; top: 0; z-index: 2; }
+/* Nombres de modelo pueden ser muy largos (paths tipo proveedor/familia);
+   se acortan con ellipsis en vez de forzar la tabla a desbordar. `max-width`
+   en una celda no se respeta con table-layout:auto (el navegador la crece
+   igual para ajustar el contenido); esta tabla necesita layout fijo para
+   que la columna quede realmente acotada. */
+#akd-tabla-modelo   { table-layout: fixed; }
+#akd-tabla-modelo th:first-child,
+.l-cell--modelo     { width: 285px; max-width: 285px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .l-table-actions    { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
 .l-inline-form      { display: inline; }
 
+/* Card de peticiones: orden por columna, copiar sesión, paginación */
+.l-sort-btn    { display: inline-flex; align-items: center; gap: 5px; background: none; border: none; padding: 0; cursor: pointer; font: inherit; }
+.l-sort-arrow  { width: 6px; height: 6px; display: inline-block; flex: 0 0 6px; }
+.l-copy-btn    { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; margin-left: 6px; background: none; border: none; cursor: pointer; flex: 0 0 22px; }
+.l-pagination  { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 22px; flex-wrap: wrap; }
+
 /* ---------------------------------------------------------------------------
-   Gráfica de barras
+   Gráfica Chart.js (dashboard principal)
    --------------------------------------------------------------------------- */
-.sv-chart        { position: relative; display: flex; align-items: flex-end; gap: 6px; height: 260px; padding: 8px 0 0; overflow-x: auto; }
-.l-chart-col     { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 8px; flex: 1 1 0; min-width: 26px; height: 100%; }
-.l-bar-track     { display: flex; align-items: flex-end; justify-content: center; width: 100%; height: 100%; }
-.sv-bar          { position: relative; display: block; width: 100%; max-width: 46px; min-height: 2px; }
-.sv-bar__prompt  { position: absolute; left: 0; right: 0; bottom: 0; }
-.sv-axis         { display: block; text-align: center; white-space: nowrap; }
-.l-chart-axis-x  { display: flex; gap: 6px; margin-top: 6px; }
-.sv-gridline     { position: absolute; left: 0; right: 0; }
-
-.l-legend        { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
-.l-legend__item  { display: inline-flex; align-items: center; gap: 7px; }
-.sv-legend__swatch { display: inline-block; width: 13px; height: 13px; flex: 0 0 13px; }
-
-.l-empty         { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 200px; text-align: center; }
+.l-chart-canvas-wrap { position: relative; height: 320px; }
 
 /* ---------------------------------------------------------------------------
    Mensajes
@@ -159,6 +264,8 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
    Scrollbar
    --------------------------------------------------------------------------- */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
+.sv-segment { scrollbar-width: thin; }
+.sv-segment::-webkit-scrollbar { height: 5px; }
 
 /* ---------------------------------------------------------------------------
    Responsive
@@ -169,10 +276,20 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 
 @media (max-width: 720px) {
     .l-container   { padding: 0 16px; }
-    .l-header      { height: auto; padding: 14px 0; flex-wrap: wrap; row-gap: 12px; }
+    .l-header      { height: auto; flex-wrap: wrap; row-gap: 12px; }
     .l-nav         { gap: 18px; width: 100%; overflow-x: auto; }
     h1, .sv-h1     { font-size: 34px; }
     h2, .sv-h2     { font-size: 26px; }
     .sv-metric     { font-size: 26px; }
     .sv-chart      { height: 200px; }
+
+    /* Card de peticiones: tabla -> lista de tarjetas, sin scroll horizontal */
+    .sv-table--responsive             { min-width: 0; }
+    .sv-table--responsive thead       { display: none; }
+    .sv-table--responsive,
+    .sv-table--responsive tbody,
+    .sv-table--responsive tr          { display: block; width: 100%; }
+    .sv-table--responsive tr          { padding: 12px 16px; margin-bottom: 12px; }
+    .sv-table--responsive td          { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 6px 0; text-align: right; white-space: normal; }
+    .sv-table--responsive td::before  { content: attr(data-label); text-align: left; white-space: nowrap; }
 }

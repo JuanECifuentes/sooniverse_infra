@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 615 136" width="100%" height="100%">
+  <defs>
+    <!-- Gradiente Cósmico Oficial Sooniverse -->
+    <linearGradient id="cosmicGradNavbar" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00FF87" />
+      <stop offset="50%" stop-color="#60EFFF" />
+      <stop offset="100%" stop-color="#8A2BE2" />
+    </linearGradient>
+
+    <!-- Gradiente del Planeta de Alta Visibilidad -->
+    <linearGradient id="planetGradNavbar" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563EB" />
+      <stop offset="45%" stop-color="#4C1D95" />
+      <stop offset="100%" stop-color="#1E1B4B" />
+    </linearGradient>
+
+    <!-- Filtros de Brillo Activo para Nodos -->
+    <filter id="neonGlowNavbar" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- ================= ISOTIPO: PLANETA SATURNO (Eje izquierdo intacto) ================= -->
+  <g transform="translate(120, 65)">
+    <!-- Anillos Traseros -->
+    <g transform="rotate(-18)">
+      <path d="M -68,0 A 68,19 0 0,1 68,0" fill="none" stroke="url(#cosmicGradNavbar)" stroke-width="2.5" opacity="0.35"/>
+      <path d="M -92,0 A 92,26 0 0,1 92,0" fill="none" stroke="url(#cosmicGradNavbar)" stroke-width="11" opacity="0.4"/>
+      <path d="M -92,0 A 92,26 0 0,1 92,0" fill="none" stroke="#60EFFF" stroke-width="2" opacity="0.6"/>
+      <path d="M -114,0 A 114,32 0 0,1 114,0" fill="none" stroke="url(#cosmicGradNavbar)" stroke-width="3.5" opacity="0.3"/>
+    </g>
+    
+    <!-- Cuerpo del Planeta -->
+    <circle cx="0" cy="0" r="46" fill="url(#planetGradNavbar)" stroke="#3B82F6" stroke-width="1.5" stroke-opacity="0.5"/>
+    <path d="M -40,-22 Q 0,-10 40,-22" fill="none" stroke="#60EFFF" stroke-width="1.5" stroke-opacity="0.4"/>
+    <path d="M -45,12 Q 0,26 45,12" fill="none" stroke="#00FF87" stroke-width="1.5" stroke-opacity="0.5"/>
+    <path d="M -46,0 Q 0,14 46,0" fill="none" stroke="#FFFFFF" stroke-width="1" stroke-opacity="0.2" stroke-dasharray="4 3"/>
+
+    <!-- Anillos Delanteros Protagonistas -->
+    <g transform="rotate(-18)">
+      <path d="M 68,0 A 68,19 0 0,1 -68,0" fill="none" stroke="url(#cosmicGradNavbar)" stroke-width="2.5" stroke-linecap="round"/>
+      <path d="M 92,0 A 92,26 0 0,1 -92,0" fill="none" stroke="url(#cosmicGradNavbar)" stroke-width="11" stroke-linecap="round"/>
+      <path d="M 92,0 A 92,26 0 0,1 -92,0" fill="none" stroke="#FFFFFF" stroke-width="2" opacity="0.85" stroke-linecap="round"/>
+      <path d="M 114,0 A 114,32 0 0,1 -114,0" fill="none" stroke="url(#cosmicGradNavbar)" stroke-width="3.5" stroke-linecap="round"/>
+    </g>
+
+    <!-- Nodos Orbitales -->
+    <circle cx="-80" cy="-45" r="9" fill="#00FF87" filter="url(#neonGlowNavbar)"/>
+    <circle cx="-80" cy="-45" r="4" fill="#FFFFFF"/>
+    <circle cx="104" cy="12" r="7.5" fill="#60EFFF" filter="url(#neonGlowNavbar)"/>
+    <circle cx="15" cy="58" r="8.5" fill="#8A2BE2" filter="url(#neonGlowNavbar)"/>
+    <circle cx="15" cy="58" r="3" fill="#60EFFF"/>
+  </g>
+
+  <!-- ================= TEXTO: SOONIVERSE (Con espacio de respiro a la derecha para evitar cortes) ================= -->
+  <g transform="translate(252, 86)">
+    <text x="0" y="0" font-family="'Inter', '-apple-system', sans-serif" font-size="58" font-weight="800" fill="#FFFFFF" letter-spacing="-2px">
+      Sooni<tspan fill="url(#cosmicGradNavbar)">verse</tspan>
+    </text>
+  </g>
+</svg>
