@@ -9,10 +9,9 @@
 --   de API Key. No se crea ninguna columna de texto libre de conversación.
 --
 -- CONVIVENCIA CON LITELLM:
---   LiteLLM Proxy gestiona su propio esquema en `public` mediante Prisma
---   ("LiteLLM_VerificationToken", "LiteLLM_SpendLogs", "LiteLLM_UserTable", ...).
+--   LiteLLM Proxy y Django gestionan sus tablas en el esquema `sooniverse`.
 --   Nunca se altera ni se borra nada de LiteLLM. Este archivo:
---     1) Crea el esquema aislado `sooniverse`.
+--     1) Crea el esquema `sooniverse`.
 --     2) Vincula sus tablas con las de LiteLLM por `token` (hash de la API key).
 --     3) Provee una función ETL que copia SOLO contadores desde
 --        LiteLLM_SpendLogs hacia sooniverse.token_usage_event.
@@ -20,7 +19,7 @@
 
 CREATE SCHEMA IF NOT EXISTS sooniverse;
 
-SET search_path TO sooniverse, public;
+SET search_path TO sooniverse;
 
 -- -----------------------------------------------------------------------------
 -- 1. REGISTRO DE API KEYS
@@ -206,7 +205,7 @@ DECLARE
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM information_schema.tables
-        WHERE table_schema = 'public' AND table_name = 'LiteLLM_SpendLogs'
+        WHERE table_schema = 'sooniverse' AND table_name = 'LiteLLM_SpendLogs'
     ) THEN
         RAISE NOTICE 'LiteLLM_SpendLogs no existe todavía; ETL omitido.';
         RETURN 0;
@@ -226,7 +225,7 @@ BEGIN
         COALESCE(sl."total_tokens", COALESCE(sl."prompt_tokens", 0) + COALESCE(sl."completion_tokens", 0)),
         COALESCE(sl."spend", 0),
         COALESCE(sl."startTime", NOW())
-    FROM public."LiteLLM_SpendLogs" sl
+    FROM sooniverse."LiteLLM_SpendLogs" sl
     LEFT JOIN sooniverse.api_key_registry reg ON reg.litellm_token_hash = sl."api_key"
     WHERE sl."startTime" >= NOW() - (p_since_hours || ' hours')::INTERVAL
     ON CONFLICT (litellm_request_id) DO NOTHING;

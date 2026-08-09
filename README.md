@@ -51,8 +51,7 @@ de diseño.
               │                                        ┌──────┴──────┐
               ▼                                        │ NAT Gateway  │
       PostgreSQL (RDS o externa)                        └─────────────┘
-      ├── public.LiteLLM_*        → Spend/Usage nativo de LiteLLM
-      └── sooniverse.*            → API Keys, métricas, ESTADO DE INFRAESTRUCTURA
+      └── sooniverse.*            → API Keys, métricas, tablas de LiteLLM y ESTADO DE INFRAESTRUCTURA
                                      (infra_deployment / infra_resource / infra_event)
 ```
 
@@ -75,7 +74,7 @@ Cliente (SDK OpenAI / Open WebUI)
    │  POST /v1/chat/completions   Authorization: Bearer sk-...
    ▼
 LiteLLM Proxy  :4000
-   ├─ 1. Valida la API Key contra public."LiteLLM_VerificationToken"
+   ├─ 1. Valida la API Key contra sooniverse."LiteLLM_VerificationToken"
    ├─ 2. Aplica cuotas (rpm_limit / tpm_limit / max_budget)
    ├─ 3. Enruta al worker según `routing_strategy` (latency-based por defecto)
    │      · descarta workers en cooldown (allowed_fails / cooldown_time)
@@ -84,7 +83,7 @@ LiteLLM Proxy  :4000
 Worker vLLM  10.0.x.y:8007/v1        (IP privada, nunca expuesta)
    │  respuesta + usage{prompt_tokens, completion_tokens, total_tokens}
    ▼
-LiteLLM escribe en public."LiteLLM_SpendLogs"
+LiteLLM escribe en sooniverse."LiteLLM_SpendLogs"
    │      (SIN prompts ni respuestas: store_prompts_in_spend_logs=false)
    ▼
 sooniverse.ingest_litellm_spendlogs()      → copia SOLO contadores
@@ -279,8 +278,7 @@ Guía operativa detallada: **[MANUAL_DESPLIEGUE.md](MANUAL_DESPLIEGUE.md)** · D
 
 ## 5. Esquema de base de datos
 
-Convive con las tablas nativas de LiteLLM (`public."LiteLLM_*"`, gestionadas por
-Prisma) sin alterarlas. Todo lo propio vive en el esquema aislado `sooniverse`:
+Todas las tablas de LiteLLM (`sooniverse."LiteLLM_*"`, gestionadas por Prisma), las tablas de Django y los objetos propios viven de forma consolidada en el esquema `sooniverse`:
 
 | Objeto | Propósito |
 |---|---|
