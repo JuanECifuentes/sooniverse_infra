@@ -1,8 +1,8 @@
 """Formularios del gestor de API Keys."""
 
-from django import forms
+from datetime import date
 
-from .models import TokenUsageRollup
+from django import forms
 
 
 class ApiKeyForm(forms.Form):
@@ -10,60 +10,44 @@ class ApiKeyForm(forms.Form):
 
     key_alias = forms.CharField(
         label="Alias", max_length=120,
-        widget=forms.TextInput(attrs={"placeholder": "ej. backend-produccion", "autocomplete": "off"}),
+        widget=forms.TextInput(attrs={
+            "class": "sv-input", "placeholder": "ej. backend-produccion", "autocomplete": "off",
+        }),
         help_text="Nombre legible para identificar la key en el panel.",
     )
     owner_email = forms.EmailField(
         label="Responsable", required=False,
-        widget=forms.EmailInput(attrs={"placeholder": "equipo@empresa.com"}),
+        widget=forms.EmailInput(attrs={"class": "sv-input", "placeholder": "equipo@empresa.com"}),
     )
     descripcion = forms.CharField(
         label="Descripción", required=False, max_length=500,
-        widget=forms.Textarea(attrs={"rows": 2, "placeholder": "Uso previsto de esta credencial"}),
+        widget=forms.Textarea(attrs={
+            "class": "sv-textarea", "rows": 2, "placeholder": "Uso previsto de esta credencial",
+        }),
     )
-    modelos = forms.CharField(
-        label="Modelos permitidos", required=False,
-        widget=forms.TextInput(attrs={"placeholder": "sooniverse-qwen3.5 (vacío = todos)"}),
-        help_text="Lista separada por comas. Vacío autoriza todos los modelos del pool.",
-    )
-    max_budget = forms.DecimalField(
-        label="Presupuesto máx. (USD)", required=False, min_value=0, decimal_places=4,
-        widget=forms.NumberInput(attrs={"step": "0.01", "placeholder": "sin límite"}),
+    modelos = forms.MultipleChoiceField(
+        label="Modelos permitidos", required=False, choices=[],
+        widget=forms.CheckboxSelectMultiple,
     )
     rpm_limit = forms.IntegerField(
         label="Límite RPM", required=False, min_value=1,
-        widget=forms.NumberInput(attrs={"placeholder": "sin límite"}),
+        widget=forms.NumberInput(attrs={"class": "sv-input", "placeholder": "sin límite"}),
     )
     tpm_limit = forms.IntegerField(
         label="Límite TPM", required=False, min_value=1,
-        widget=forms.NumberInput(attrs={"placeholder": "sin límite"}),
+        widget=forms.NumberInput(attrs={"class": "sv-input", "placeholder": "sin límite"}),
     )
-    duration = forms.CharField(
-        label="Vigencia", required=False, max_length=16,
-        widget=forms.TextInput(attrs={"placeholder": "30d, 24h, 60m (vacío = sin expiración)"}),
+    vigencia = forms.DateField(
+        label="Vigencia", required=False,
+        widget=forms.DateInput(attrs={"class": "sv-input", "type": "text", "data-flatpickr": ""}),
     )
 
-    def clean_modelos(self):
-        raw = self.cleaned_data.get("modelos", "") or ""
-        return [m.strip() for m in raw.split(",") if m.strip()]
-
-
-class FiltroMetricasForm(forms.Form):
-    """Filtro del panel: granularidad de agregación + API Key + modelo."""
-
-    granularity = forms.ChoiceField(
-        label="Agrupación", required=False,
-        choices=TokenUsageRollup.GRANULARITIES, initial=TokenUsageRollup.DAILY,
-    )
-    api_key = forms.ChoiceField(label="API Key", required=False, choices=[])
-    modelo = forms.ChoiceField(label="Modelo", required=False, choices=[])
-    dias = forms.IntegerField(label="Ventana (días)", required=False, min_value=1, max_value=1095)
-
-    def __init__(self, *args, api_keys=None, modelos=None, **kwargs):
+    def __init__(self, *args, modelos=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["api_key"].choices = [("", "Todas las API Keys")] + [
-            (str(k["id"]), k["key_alias"]) for k in (api_keys or [])
-        ]
-        self.fields["modelo"].choices = [("", "Todos los modelos")] + [
-            (m, m) for m in (modelos or [])
-        ]
+        self.fields["modelos"].choices = [(m, m) for m in (modelos or [])]
+
+    def clean_vigencia(self):
+        vigencia = self.cleaned_data.get("vigencia")
+        if vigencia and vigencia <= date.today():
+            raise forms.ValidationError("La fecha de vigencia debe ser posterior a hoy.")
+        return vigencia

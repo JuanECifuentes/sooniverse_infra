@@ -1,5 +1,5 @@
 {% extends "metrics/base.html" %}
-{% load humanize %}
+{% load humanize metrics_extras %}
 
 {% block titulo %}Gestor de API Keys{% endblock %}
 
@@ -38,7 +38,7 @@
         <h3>Crear API Key</h3>
     </div>
 
-    <form method="post" novalidate>
+    <form method="post" novalidate data-spinner-submit>
         {% csrf_token %}
 
         {% if form.non_field_errors %}
@@ -46,18 +46,76 @@
         {% endif %}
 
         <div class="l-grid l-grid--form">
-            {% for campo in form %}
-                <div class="l-field {% if campo.name == 'descripcion' %}l-field--wide{% endif %}">
-                    <label class="sv-label" for="{{ campo.id_for_label }}">{{ campo.label }}</label>
-                    {{ campo }}
-                    {% if campo.help_text %}<span class="sv-help">{{ campo.help_text }}</span>{% endif %}
-                    {% for error in campo.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
-                </div>
-            {% endfor %}
+            <div class="l-field">
+                <label class="sv-label" for="{{ form.key_alias.id_for_label }}">{{ form.key_alias.label }}</label>
+                {{ form.key_alias }}
+                {% if form.key_alias.help_text %}<span class="sv-help">{{ form.key_alias.help_text }}</span>{% endif %}
+                {% for error in form.key_alias.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form.owner_email.id_for_label }}">{{ form.owner_email.label }}</label>
+                {{ form.owner_email }}
+                {% for error in form.owner_email.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <span class="sv-label" id="label_modelos">
+                    {{ form.modelos.label }}
+                    {% include "metrics/_tooltip.html" with text="Vacío = autoriza todos los modelos del pool." %}
+                </span>
+                <details class="sv-disclosure sv-multiselect" aria-labelledby="label_modelos">
+                    <summary class="sv-multiselect__trigger">
+                        <span>Modelos</span>
+                        <span class="sv-multiselect__chevron" aria-hidden="true"></span>
+                    </summary>
+                    <div class="sv-multiselect__panel">
+                        {% for sub in form.modelos %}
+                            <label class="sv-multiselect__option">{{ sub.tag }} <span class="sv-mono">{{ sub.choice_label }}</span></label>
+                        {% empty %}
+                            <span class="sv-multiselect__empty">Sin modelos con datos.</span>
+                        {% endfor %}
+                    </div>
+                </details>
+                {% for error in form.modelos.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <span class="sv-label" id="label_rpm">
+                    {{ form.rpm_limit.label }}
+                    {% include "metrics/_tooltip.html" with text="Máximo de peticiones por minuto que puede hacer esta key. Vacío = sin límite." %}
+                </span>
+                {{ form.rpm_limit }}
+                {% for error in form.rpm_limit.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <span class="sv-label" id="label_tpm">
+                    {{ form.tpm_limit.label }}
+                    {% include "metrics/_tooltip.html" with text="Máximo de tokens por minuto que puede consumir esta key. Vacío = sin límite." %}
+                </span>
+                {{ form.tpm_limit }}
+                {% for error in form.tpm_limit.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <span class="sv-label" id="label_vigencia">
+                    {{ form.vigencia.label }}
+                    {% include "metrics/_tooltip.html" with text="Fecha en la que la key deja de funcionar. Vacío = sin expiración." %}
+                </span>
+                {{ form.vigencia }}
+                {% for error in form.vigencia.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field l-field--wide">
+                <label class="sv-label" for="{{ form.descripcion.id_for_label }}">{{ form.descripcion.label }}</label>
+                {{ form.descripcion }}
+                {% for error in form.descripcion.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
         </div>
 
         <div class="l-form-actions">
-            <button type="submit" class="sv-btn sv-btn--primary">Emitir API Key</button>
+            <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm" data-loading-text="Emitiendo…">Emitir API Key</button>
             <span class="sv-help">Se registra en <span class="sv-mono">{{ litellm_url }}</span></span>
         </div>
     </form>
@@ -71,8 +129,8 @@
             <h3>API Keys registradas</h3>
         </div>
         <div class="l-row">
-            <span class="sv-badge sv-badge--info">{{ consumo_global|intcomma }} tokens acumulados</span>
-            <span class="sv-badge sv-badge--secure">${{ gasto_global|floatformat:4 }} USD</span>
+            <span class="sv-badge sv-badge--info">{{ consumo_prompt_global|human_tokens }} tokens de entrada acumulados</span>
+            <span class="sv-badge sv-badge--info">{{ consumo_completion_global|human_tokens }} tokens de salida acumulados</span>
         </div>
     </div>
 
@@ -85,9 +143,8 @@
                     <th>Prefijo</th>
                     <th>Responsable</th>
                     <th class="sv-num">Peticiones</th>
-                    <th class="sv-num">Tokens</th>
-                    <th class="sv-num">USD</th>
-                    <th class="sv-num">Presupuesto</th>
+                    <th class="sv-num">Entrada</th>
+                    <th class="sv-num">Salida</th>
                     <th>Último uso</th>
                     <th class="sv-num">Acciones</th>
                 </tr>
@@ -109,17 +166,14 @@
                         <td class="sv-mono">{{ fila.key_prefix|default:"—" }}</td>
                         <td class="sv-mono">{{ fila.owner_email|default:"—" }}</td>
                         <td class="sv-num">{{ fila.peticiones|intcomma }}</td>
-                        <td class="sv-num sv-num--accent">{{ fila.consumo_total|default:0|intcomma }}</td>
-                        <td class="sv-num">${{ fila.gasto|default:0|floatformat:4 }}</td>
-                        <td class="sv-num">
-                            {% if fila.max_budget_usd %}${{ fila.max_budget_usd|floatformat:2 }}{% else %}—{% endif %}
-                        </td>
+                        <td class="sv-num sv-num--accent">{{ fila.consumo_prompt|default:0|human_tokens }}</td>
+                        <td class="sv-num sv-num--accent">{{ fila.consumo_completion|default:0|human_tokens }}</td>
                         <td class="sv-mono">
                             {% if fila.ultimo_uso %}{{ fila.ultimo_uso|date:"d/m/Y H:i" }}{% else %}nunca{% endif %}
                         </td>
                         <td class="sv-num">
                             <div class="l-table-actions">
-                                <form method="post" action="{% url 'metrics:api_key_toggle' fila.id %}" class="l-inline-form">
+                                <form method="post" action="{% url 'metrics:api_key_toggle' fila.id %}" class="l-inline-form" data-spinner-submit>
                                     {% csrf_token %}
                                     <input type="hidden" name="next" value="{{ request.get_full_path }}">
                                     {% if fila.is_active %}
@@ -134,7 +188,7 @@
                         </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="10" class="sv-help">Aún no hay API Keys registradas. Crea la primera arriba.</td></tr>
+                    <tr><td colspan="8" class="sv-help">Aún no hay API Keys registradas. Crea la primera arriba.</td></tr>
                 {% endfor %}
             </tbody>
         </table>

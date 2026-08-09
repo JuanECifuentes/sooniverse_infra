@@ -1,5 +1,5 @@
 {% extends "metrics/base.html" %}
-{% load humanize %}
+{% load humanize static metrics_extras %}
 
 {% block titulo %}{{ registro.key_alias }}{% endblock %}
 
@@ -21,13 +21,7 @@
     </div>
 
     <div class="l-page-head__actions">
-        <div class="sv-segment" role="tablist">
-            {% for valor, etiqueta in granularities %}
-                <a class="sv-segment__item {% if granularity_activa == valor %}sv-segment__item--active{% endif %}"
-                   href="?granularity={{ valor }}">{{ etiqueta }}</a>
-            {% endfor %}
-        </div>
-        <form method="post" action="{% url 'metrics:api_key_toggle' registro.id %}" class="l-inline-form">
+        <form method="post" action="{% url 'metrics:api_key_toggle' registro.id %}" class="l-inline-form" data-spinner-submit>
             {% csrf_token %}
             <input type="hidden" name="next" value="{{ request.get_full_path }}">
             {% if registro.is_active %}
@@ -42,115 +36,187 @@
     </div>
 </div>
 
-{# --------------------------------------------------------------------- KPIs #}
-<section class="l-grid l-grid--kpi l-mb-lg">
-    <article class="sv-card sv-card--metric">
-        <div class="l-kpi">
-            <span class="sv-eyebrow">Tokens ({{ metricas.granularity_label|lower }})</span>
-            <span class="sv-metric">{{ metricas.total_tokens|intcomma }}</span>
-            <span class="l-kpi__foot sv-mono sv-muted">{{ metricas.desde }} → {{ metricas.hasta }}</span>
-        </div>
-    </article>
-    <article class="sv-card sv-card--infra">
-        <div class="l-kpi">
-            <span class="sv-eyebrow">Entrada · Salida</span>
-            <span class="l-kpi__value">
-                <span class="sv-metric-sm">{{ metricas.prompt_tokens|intcomma }}</span>
-                <span class="sv-mono sv-muted">/</span>
-                <span class="sv-metric-sm">{{ metricas.completion_tokens|intcomma }}</span>
-            </span>
-            <span class="l-kpi__foot sv-mono sv-muted">{{ metricas.ratio_completion }}% generación</span>
-        </div>
-    </article>
-    <article class="sv-card sv-card--metric">
-        <div class="l-kpi">
-            <span class="sv-eyebrow">Peticiones</span>
-            <span class="sv-metric">{{ metricas.request_count|intcomma }}</span>
-            <span class="l-kpi__foot sv-mono sv-muted">{{ metricas.tokens_por_request|intcomma }} tokens/petición</span>
-        </div>
-    </article>
-    <article class="sv-card sv-card--secure">
-        <div class="l-kpi">
-            <span class="sv-eyebrow">Gasto</span>
-            <span class="sv-metric">${{ metricas.spend_usd|floatformat:4 }}</span>
-            <span class="l-kpi__foot sv-mono sv-muted">
-                {% if registro.max_budget_usd %}límite ${{ registro.max_budget_usd|floatformat:2 }}{% else %}sin límite{% endif %}
-            </span>
-        </div>
-    </article>
-</section>
+<div id="akd-live" class="sv-visually-hidden" aria-live="polite" role="status"></div>
 
-{# ------------------------------------------------------------------ GRÁFICA #}
-<section class="sv-card l-card--flush l-mb-lg">
-    <div class="l-card__head">
-        <div class="l-stack l-stack--tight">
-            <span class="sv-eyebrow">Serie {{ metricas.granularity_label|lower }}</span>
-            <h3>Consumo de esta credencial</h3>
-        </div>
+<div id="metrics-panel" data-api-url="{% url 'metrics:metrics_api' %}" data-api-key-id="{{ registro.id }}">
+    <div class="l-loading-overlay" id="akd-loading" hidden aria-hidden="true">
+        {% include "metrics/_spinner.html" with size="lg" %}
     </div>
-    <div class="l-card__body">
-        {% include "metrics/_chart.html" %}
+
+    <div class="sv-alert sv-alert--error l-mb-lg" id="akd-error-banner" hidden>
+        <span id="akd-error-message"></span>
+        <button type="button" class="sv-btn sv-btn--secondary sv-btn--sm" id="akd-retry">Reintentar</button>
     </div>
-</section>
 
-{# --------------------------------------------------------- CONFIG + MODELOS #}
-<section class="l-grid l-grid--halves l-mb-lg">
-    <article class="sv-card">
-        <div class="l-stack l-stack--tight l-mb-md">
-            <span class="sv-eyebrow">Configuración</span>
-            <h3>Cuotas y vigencia</h3>
-        </div>
-        <div class="l-stack l-stack--tight">
-            <div class="l-row l-row--between"><span class="sv-label">Responsable</span><span class="sv-mono">{{ registro.owner_email|default:"—" }}</span></div>
-            <div class="l-row l-row--between"><span class="sv-label">Límite RPM</span><span class="sv-mono">{{ registro.rpm_limit|default:"sin límite" }}</span></div>
-            <div class="l-row l-row--between"><span class="sv-label">Límite TPM</span><span class="sv-mono">{{ registro.tpm_limit|default:"sin límite" }}</span></div>
-            <div class="l-row l-row--between"><span class="sv-label">Creada</span><span class="sv-mono">{{ registro.created_at|date:"d/m/Y H:i" }}</span></div>
-            <div class="l-row l-row--between"><span class="sv-label">Expira</span><span class="sv-mono">{{ registro.expires_at|date:"d/m/Y H:i"|default:"nunca" }}</span></div>
-            {% if registro.deactivated_at %}
-                <div class="l-row l-row--between"><span class="sv-label">Desactivada</span><span class="sv-mono">{{ registro.deactivated_at|date:"d/m/Y H:i" }}</span></div>
-            {% endif %}
-        </div>
-        {% if registro.allowed_models %}
-            <div class="sv-divider"></div>
-            <span class="sv-eyebrow">Modelos autorizados</span>
-            <div class="l-row" style="margin-top:8px">
-                {% for m in registro.allowed_models %}<span class="sv-badge sv-badge--secure">{{ m }}</span>{% endfor %}
-            </div>
-        {% endif %}
-        {% if registro.descripcion %}
-            <div class="sv-divider"></div>
-            <p class="sv-body">{{ registro.descripcion }}</p>
-        {% endif %}
-    </article>
+    <div id="akd-content">
+        {# --------------------------------------------------------------------- KPIs #}
+        <section class="l-grid l-grid--kpi l-mb-lg">
+            <article class="sv-card sv-card--metric">
+                <div class="l-kpi">
+                    <span class="sv-eyebrow">Tokens totales</span>
+                    <span class="sv-metric" data-field="total_tokens">{{ metricas.total_tokens|human_tokens }}</span>
+                    <span class="l-kpi__foot sv-mono sv-muted" id="akd-rango">{{ metricas.desde }} → {{ metricas.hasta }}</span>
+                </div>
+            </article>
+            <article class="sv-card sv-card--infra">
+                <div class="l-kpi">
+                    <span class="sv-eyebrow">Entrada · Salida</span>
+                    <span class="l-kpi__value">
+                        <span class="sv-metric-sm" data-field="prompt_tokens">{{ metricas.prompt_tokens|human_tokens }}</span>
+                        <span class="sv-mono sv-muted">/</span>
+                        <span class="sv-metric-sm" data-field="completion_tokens">{{ metricas.completion_tokens|human_tokens }}</span>
+                    </span>
+                    <span class="l-kpi__foot sv-mono sv-muted"><span data-field="ratio_completion">{{ metricas.ratio_completion }}</span>% generación</span>
+                </div>
+            </article>
+            <article class="sv-card sv-card--metric">
+                <div class="l-kpi">
+                    <span class="sv-eyebrow">Peticiones</span>
+                    <span class="sv-metric" data-field="request_count">{{ metricas.request_count|intcomma }}</span>
+                    <span class="l-kpi__foot sv-mono sv-muted"><span data-field="tokens_por_request">{{ metricas.tokens_por_request|human_tokens }}</span> tokens/petición</span>
+                </div>
+            </article>
+            <article class="sv-card sv-card--secure">
+                <div class="l-kpi">
+                    <span class="sv-eyebrow">Tasa de error</span>
+                    <span class="l-kpi__value"><span class="sv-metric" data-field="tasa_error">{{ metricas.tasa_error }}</span><span class="sv-metric">%</span></span>
+                    <span class="l-kpi__foot sv-mono sv-muted">ventana actual</span>
+                </div>
+            </article>
+        </section>
 
-    <article class="sv-card l-card--flush">
-        <div class="l-card__head">
-            <div class="l-stack l-stack--tight">
-                <span class="sv-eyebrow">Desglose</span>
-                <h3>Por modelo</h3>
+        {# ------------------------------------------------------------------ FILTROS #}
+        <section class="l-grid l-grid--filters l-mb-lg">
+            <div class="l-field">
+                <span class="sv-label" id="akd-label-granularity">Agrupación</span>
+                <details class="sv-disclosure sv-multiselect sv-listbox" id="akd-granularity" aria-labelledby="akd-label-granularity">
+                    <summary class="sv-multiselect__trigger">
+                        <span data-listbox-label>{{ metricas.granularity_label }}</span>
+                        <span class="sv-multiselect__chevron" aria-hidden="true"></span>
+                    </summary>
+                    <div class="sv-multiselect__panel sv-listbox__panel" role="listbox" aria-labelledby="akd-label-granularity">
+                        {% for valor, etiqueta in granularities %}
+                            <button type="button" class="sv-multiselect__option sv-listbox__option {% if granularity_activa == valor %}sv-listbox__option--active{% endif %}"
+                                    data-value="{{ valor }}" role="option" aria-selected="{% if granularity_activa == valor %}true{% else %}false{% endif %}">
+                                <span>{{ etiqueta }}</span>
+                            </button>
+                        {% endfor %}
+                    </div>
+                </details>
             </div>
-        </div>
-        <div class="l-table-wrap">
-            <table class="sv-table">
-                <thead>
-                    <tr><th>Modelo</th><th class="sv-num">Peticiones</th><th class="sv-num">Tokens</th><th class="sv-num">USD</th></tr>
-                </thead>
-                <tbody>
-                    {% for fila in metricas.por_modelo %}
+
+            <div class="l-field">
+                <label class="sv-label" for="akd-desde">Desde</label>
+                <input type="text" class="sv-input" id="akd-desde" data-flatpickr
+                       value="{{ metricas.desde|date:'Y-m-d' }}" aria-describedby="akd-date-error">
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="akd-hasta">Hasta</label>
+                <input type="text" class="sv-input" id="akd-hasta" data-flatpickr
+                       value="{{ metricas.hasta|date:'Y-m-d' }}" aria-describedby="akd-date-error">
+            </div>
+        </section>
+        <p class="sv-error l-mb-lg" id="akd-date-error" hidden></p>
+
+        {# ------------------------------------------------------------------ GRÁFICA #}
+        <section class="sv-card l-card--flush l-mb-lg">
+            <div class="l-card__head">
+                <div class="l-stack l-stack--tight">
+                    <span class="sv-eyebrow" id="akd-granularity-label">Serie {{ metricas.granularity_label|lower }}</span>
+                    <h3>Consumo de esta credencial</h3>
+                </div>
+            </div>
+            <div class="l-card__body">
+                {{ metricas_payload|json_script:"metrics-initial-payload" }}
+                <div class="l-chart-canvas-wrap">
+                    <canvas id="metrics-chart-canvas" role="img" aria-describedby="akd-chart-table-caption"></canvas>
+                </div>
+                <table class="sv-table sv-visually-hidden" id="metrics-chart-table">
+                    <caption id="akd-chart-table-caption">
+                        Consumo de tokens por periodo (los mismos datos representados en la gráfica)
+                    </caption>
+                    <thead>
                         <tr>
-                            <td class="sv-mono">{{ fila.model_name }}</td>
-                            <td class="sv-num">{{ fila.request_count|intcomma }}</td>
-                            <td class="sv-num sv-num--accent">{{ fila.total_tokens|intcomma }}</td>
-                            <td class="sv-num">${{ fila.spend_usd|floatformat:4 }}</td>
+                            <th scope="col">Periodo</th>
+                            <th scope="col" class="sv-num">Prompt</th>
+                            <th scope="col" class="sv-num">Completion</th>
+                            <th scope="col" class="sv-num">Total</th>
                         </tr>
-                    {% empty %}
-                        <tr><td colspan="4" class="sv-help">Sin consumo registrado.</td></tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </article>
-</section>
+                    </thead>
+                    <tbody id="metrics-chart-table-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        {# --------------------------------------------------------- CONFIG + MODELOS #}
+        <section class="l-grid l-grid--halves l-mb-lg">
+            <article class="sv-card">
+                <div class="l-stack l-stack--tight l-mb-md">
+                    <span class="sv-eyebrow">Configuración</span>
+                    <h3>Cuotas y vigencia</h3>
+                </div>
+                <div class="l-stack l-stack--tight">
+                    <div class="l-row l-row--between"><span class="sv-label">Responsable</span><span class="sv-mono">{{ registro.owner_email|default:"—" }}</span></div>
+                    <div class="l-row l-row--between"><span class="sv-label">Límite RPM</span><span class="sv-mono">{{ registro.rpm_limit|default:"sin límite" }}</span></div>
+                    <div class="l-row l-row--between"><span class="sv-label">Límite TPM</span><span class="sv-mono">{{ registro.tpm_limit|default:"sin límite" }}</span></div>
+                    <div class="l-row l-row--between"><span class="sv-label">Creada</span><span class="sv-mono">{{ registro.created_at|date:"d/m/Y H:i" }}</span></div>
+                    <div class="l-row l-row--between"><span class="sv-label">Expira</span><span class="sv-mono">{{ registro.expires_at|date:"d/m/Y H:i"|default:"nunca" }}</span></div>
+                    {% if registro.deactivated_at %}
+                        <div class="l-row l-row--between"><span class="sv-label">Desactivada</span><span class="sv-mono">{{ registro.deactivated_at|date:"d/m/Y H:i" }}</span></div>
+                    {% endif %}
+                </div>
+                {% if registro.allowed_models %}
+                    <div class="sv-divider"></div>
+                    <span class="sv-eyebrow">Modelos autorizados</span>
+                    <div class="l-row" style="margin-top:8px">
+                        {% for m in registro.allowed_models|unique_ci %}<span class="sv-badge sv-badge--secure">{{ m }}</span>{% endfor %}
+                    </div>
+                {% endif %}
+                {% if registro.descripcion %}
+                    <div class="sv-divider"></div>
+                    <p class="sv-body">{{ registro.descripcion }}</p>
+                {% endif %}
+            </article>
+
+            <article class="sv-card l-card--flush">
+                <div class="l-card__head">
+                    <div class="l-stack l-stack--tight">
+                        <span class="sv-eyebrow">Desglose</span>
+                        <h3>Por modelo</h3>
+                    </div>
+                </div>
+                <div class="l-table-wrap">
+                    <table class="sv-table" id="akd-tabla-modelo">
+                        <caption class="sv-visually-hidden">Consumo por modelo de esta API Key en la ventana seleccionada</caption>
+                        <thead>
+                            <tr>
+                                <th scope="col">Modelo</th>
+                                <th scope="col" class="sv-num">Peticiones</th>
+                                <th scope="col" class="sv-num">Entrada</th>
+                                <th scope="col" class="sv-num">Salida</th>
+                                <th scope="col" class="sv-num">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody id="akd-tabla-modelo-body">
+                            {% for fila in metricas.por_modelo %}
+                                <tr>
+                                    <td class="sv-mono l-cell--modelo">{{ fila.model_name }}</td>
+                                    <td class="sv-num">{{ fila.request_count|intcomma }}</td>
+                                    <td class="sv-num">{{ fila.prompt_tokens|human_tokens }}</td>
+                                    <td class="sv-num">{{ fila.completion_tokens|human_tokens }}</td>
+                                    <td class="sv-num sv-num--accent">{{ fila.total_tokens|human_tokens }}</td>
+                                </tr>
+                            {% empty %}
+                                <tr><td colspan="5" class="sv-help">Sin consumo registrado.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </article>
+        </section>
+    </div>
+</div>
 
 {# ------------------------------------------------- EVENTOS Y AUDITORÍA #}
 <section class="l-grid l-grid--halves">
@@ -176,9 +242,9 @@
                         <tr>
                             <td class="sv-mono">{{ ev.event_ts|date:"d/m H:i:s" }}</td>
                             <td class="sv-mono">{{ ev.model_name }}</td>
-                            <td class="sv-num">{{ ev.prompt_tokens|intcomma }}</td>
-                            <td class="sv-num">{{ ev.completion_tokens|intcomma }}</td>
-                            <td class="sv-num sv-num--accent">{{ ev.total_tokens|intcomma }}</td>
+                            <td class="sv-num">{{ ev.prompt_tokens|human_tokens }}</td>
+                            <td class="sv-num">{{ ev.completion_tokens|human_tokens }}</td>
+                            <td class="sv-num sv-num--accent">{{ ev.total_tokens|human_tokens }}</td>
                             <td>
                                 {% if ev.status == 'success' %}
                                     <span class="sv-badge sv-badge--success">ok</span>
@@ -223,4 +289,10 @@
         </div>
     </article>
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'js/vendor/chart.umd.min.js' %}"></script>
+<script type="module" src="{% static 'js/metrics-charts.js' %}"></script>
+<script type="module" src="{% static 'js/apikey-detail.js' %}"></script>
 {% endblock %}
