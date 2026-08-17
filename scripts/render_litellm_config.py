@@ -64,26 +64,45 @@ def build_model_list(endpoints: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "api_key": "sooniverse-internal",
             "weight": ep.get("weight", 1),
         }
-        if ep.get("max_model_len"):
-            litellm_params["max_tokens"] = ep["max_model_len"]
+        # OJO: 'max_tokens' aquí (dentro de litellm_params) es un parámetro de
+        # GENERACIÓN que LiteLLM reenvía tal cual en cada petición -el
+        # presupuesto de tokens de SALIDA, no el context window del modelo-.
+        # La versión anterior lo fijaba en max_model_len (el mismo valor que
+        # --max-model-len de vLLM): con eso, cualquier prompt no vacío hacía
+        # que prompt_tokens + max_tokens superara el context window real y
+        # vLLM devolviera 400 ("maximum context length exceeded") en CADA
+        # mensaje del chat -causa raíz del fallo de comunicación reportado.
+        # El contexto del modelo va en 'model_info' (max_input_tokens/
+        # max_output_tokens más abajo), que es lo que 'enable_pre_call_checks'
+        # usa para descartar de antemano un deployment sin espacio, en vez de
+        # mandarle la petición y comerse el 400.
         if ep.get("rpm"):
             litellm_params["rpm"] = ep["rpm"]
         if ep.get("tpm"):
             litellm_params["tpm"] = ep["tpm"]
 
+        capacidades = ep.get("capacidades", {}) or {}
+        max_model_len = ep.get("max_model_len")
+        model_info: Dict[str, Any] = {
+            "id": f"{ep.get('workload_id', 'wl')}-{ip.replace('.', '-')}-{port}",
+            "sooniverse_worker_ip": ip,
+            "sooniverse_workload": ep.get("workload_id"),
+            # Capacidades EFECTIVAS si sync_endpoints.py ya sondeó el modelo
+            # (sooniverse.model_capability), o las declaradas en
+            # config_global.yaml en el primer despliegue (antes del primer
+            # sondeo). Informativo para cualquier cliente que lea /v1/models.
+            "sooniverse_capabilities": capacidades,
+            "supports_vision": bool(capacidades.get("vision")),
+            "supports_function_calling": bool(capacidades.get("tool_calling")),
+        }
+        if max_model_len:
+            model_info["max_input_tokens"] = max_model_len
+            model_info["max_output_tokens"] = min(4096, max_model_len // 4)
+
         model_list.append({
             "model_name": ep.get("model_public_name") or ep.get("workload_id") or "sooniverse-llm",
             "litellm_params": litellm_params,
-            "model_info": {
-                "id": f"{ep.get('workload_id', 'wl')}-{ip.replace('.', '-')}-{port}",
-                "sooniverse_worker_ip": ip,
-                "sooniverse_workload": ep.get("workload_id"),
-                # Capacidades declaradas en config_global.yaml (ver
-                # scripts/test_model_capabilities.py para la verificación real
-                # contra el modelo desplegado). Informativo para cualquier
-                # cliente que lea /v1/models y quiera adaptar su UI.
-                "sooniverse_capabilities": ep.get("capacidades", {}),
-            },
+            "model_info": model_info,
         })
 
     return model_list

@@ -39,6 +39,7 @@ EXPECTED_TABLES = (
     "infra_deployment",
     "infra_resource",
     "infra_event",
+    "model_capability",
 )
 
 
@@ -175,12 +176,16 @@ def verify_schema(conn) -> bool:
         print(f"   [{marker}] sooniverse.{table}")
 
     with conn.cursor() as cur:
+        # LiteLLM vive en su PROPIO esquema 'litellm', no en 'sooniverse' (ver
+        # el comentario "CONVIVENCIA CON LITELLM" en database/001_init_schema.sql
+        # para el porqué: su motor de migraciones Prisma no convive bien
+        # compartiendo esquema con tablas/vistas ajenas).
         cur.execute(
             "SELECT 1 FROM information_schema.tables "
-            "WHERE table_schema = 'sooniverse' AND table_name = 'LiteLLM_SpendLogs'"
+            "WHERE table_schema = 'litellm' AND table_name = 'LiteLLM_SpendLogs'"
         )
         litellm_ready = cur.fetchone() is not None
-    print(f"   [{'OK  ' if litellm_ready else 'WAIT'}] LiteLLM_SpendLogs "
+    print(f"   [{'OK  ' if litellm_ready else 'WAIT'}] litellm.LiteLLM_SpendLogs "
           f"({'detectada' if litellm_ready else 'pendiente del primer arranque de LiteLLM'})")
 
     return ok

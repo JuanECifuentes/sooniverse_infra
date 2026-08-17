@@ -86,6 +86,15 @@ gateway:
   open_webui:
     habilitado: true
     signup_habilitado: false               # Bloquea auto-registro público
+    # Tareas automáticas que dependen de response_format=json_object (título,
+    # tags, autocompletado, follow-up, consultas de RAG/búsqueda) y el
+    # intérprete de código (depende de tool calling real). Cada una:
+    #   segun_capacidades (default) -> las activa scripts/test_model_capabilities.py
+    #     según lo que el modelo desplegado soporte de verdad (fail-closed:
+    #     un sondeo inconcluso las deja apagadas). Ver sooniverse.model_capability.
+    #   activado | desactivado -> fuerza el valor sin importar el sondeo.
+    tareas_automaticas: "segun_capacidades"
+    code_interpreter: "segun_capacidades"
   django_metrics:
     habilitado: true
     puerto: 8000
