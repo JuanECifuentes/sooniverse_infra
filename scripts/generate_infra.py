@@ -107,6 +107,9 @@ class ConfigValidator:
     ALLOWED_GESTION_RED = {"auto", "existente"}
     ALLOWED_NAT_MODOS = {"single", "per-az", "none"}
     ALLOWED_TLS_MODOS = {"self-signed", "letsencrypt", "acm"}
+    # 'segun_capacidades' (default): la verdad observada en sooniverse.model_capability
+    # decide. 'activado'/'desactivado': escape manual del operador.
+    ALLOWED_OPEN_WEBUI_OVERRIDES = {"segun_capacidades", "activado", "desactivado"}
 
     @classmethod
     def validate(cls, config: Dict[str, Any]) -> None:
@@ -286,6 +289,17 @@ class ConfigValidator:
                 raise ConfigValidationError(
                     "'gateway.tls.dominio' es obligatorio cuando 'gateway.tls.habilitado: true' "
                     "(se usa como CN del certificado y server_name de nginx)."
+                )
+
+        owui = gw.get("open_webui") or {}
+        if not isinstance(owui, dict):
+            raise ConfigValidationError("'gateway.open_webui' debe ser un mapa.")
+        for campo in ("tareas_automaticas", "code_interpreter"):
+            valor = owui.get(campo, "segun_capacidades")
+            if valor not in cls.ALLOWED_OPEN_WEBUI_OVERRIDES:
+                raise ConfigValidationError(
+                    f"'gateway.open_webui.{campo}' inválido: '{valor}'. "
+                    f"Permitidos: {cls.ALLOWED_OPEN_WEBUI_OVERRIDES}"
                 )
 
     @classmethod
@@ -491,6 +505,24 @@ cd {remote_root}
 echo "===> [GATEWAY] Cliente ${{CLIENTE_ID}} (${{ENTORNO}})"
 
 # ---------------------------------------------------------------------------
+# 0. Persistir CLIENTE_ID/ENTORNO en .env (idempotente).
+#    SkyPilot solo exporta 'envs:' (esta variable incluida) para ESTE script
+#    (setup/run) en el momento de 'sky launch'; una invocación posterior de
+#    'docker compose' vía 'sky exec' (p.ej. scripts/sync_openwebui_models.py
+#    al recrear open-webui/correr el bootstrap tras la fase 'capabilities')
+#    NO hereda ese entorno de shell -confirmado en despliegue real: 'sky exec
+#    ... echo $CLIENTE_ID' devuelve vacío-. Sin esto, cualquier servicio que
+#    lea ${{CLIENTE_ID:-default}}/${{ENTORNO:-prod}} en una corrida posterior
+#    caería silenciosamente a esos defaults aunque el cliente real sea otro
+#    -exactamente lo que le pasaba a 'openwebui-bootstrap': consultaba
+#    sooniverse.model_capability con client_id='default' en vez de 'acme' y
+#    nunca encontraba la fila real, aplicando el fallback fail-closed (todo
+#    apagado) en vez de la verdad sondeada.
+# ---------------------------------------------------------------------------
+sed -i '/^CLIENTE_ID=/d;/^ENTORNO=/d' .env
+{{ echo "CLIENTE_ID=${{CLIENTE_ID}}"; echo "ENTORNO=${{ENTORNO}}"; }} >> .env
+
+# ---------------------------------------------------------------------------
 # 1. Inicialización opcional de la base de datos (flag AUTO_INIT_DB del contrato)
 # ---------------------------------------------------------------------------
 if [ "${{AUTO_INIT_DB}}" = "true" ]; then
@@ -619,6 +651,7 @@ class TopologyBuilder:
 
         file_mounts = {
             f"{REMOTE_ROOT}/docker_images/gateway": "./docker_images/gateway",
+            f"{REMOTE_ROOT}/docker_images/openwebui": "./docker_images/openwebui",
             f"{REMOTE_ROOT}/database": "./database",
             f"{REMOTE_ROOT}/scripts": "./scripts",
             f"{REMOTE_ROOT}/django_metrics": "./django_metrics",
@@ -1107,7 +1140,7 @@ def generate_manifests(config: Dict[str, Any], out_dir: Path, builder: Optional[
     if builder.gateway.get("habilitado", True):
         from render_gateway_stack import render as render_gateway_stack
 
-        render_gateway_stack(config)
+        render_gateway_stack(config, capabilities_dir=out_dir)
 
         gw_path = out_dir / GATEWAY_MANIFEST
         dump_yaml(builder.build_gateway(), gw_path)
@@ -1166,7 +1199,7 @@ def _gateway_public_ip(cluster: str) -> Optional[str]:
         return None
 
 
-PHASE_ORDER = ["network", "gateway", "workers", "endpoints", "verify"]
+PHASE_ORDER = ["network", "gateway", "workers", "endpoints", "capabilities", "verify"]
 
 # Compatibilidad con los valores antiguos de --only (antes de la Fase 3).
 _ONLY_LEGACY_ALIASES = {"all": set(PHASE_ORDER), "gateway": {"gateway"}, "workers": {"workers"}}
@@ -1255,6 +1288,14 @@ def deploy(
       workers  -> regenera el bastion con esa IP y lanza los workers en la
                   subred privada.
       endpoints-> sync_endpoints.py --apply (descubre IPs, recarga LiteLLM).
+      capabilities -> scripts/test_model_capabilities.py --write-db (sondea el
+                  modelo YA desplegado, persiste la verdad observada en
+                  sooniverse.model_capability con política fail-closed) y
+                  luego scripts/sync_openwebui_models.py (aplica esa verdad a
+                  Open WebUI: modelos + flags de tareas automáticas). Best-effort
+                  y NUNCA aborta el despliegue: un mismatch peligroso solo se
+                  reporta como [WARNING] -la infra debe quedar usable aunque un
+                  modelo mienta sobre sus capacidades declaradas.
       verify   -> scripts/verify_deployment.py (best-effort, no aborta 'all').
     Cada fase es reanudable: los `ensure_*` de AwsNetworkManager y el propio
     `sky launch` son idempotentes, así que repetir una fase ya aplicada es
@@ -1429,6 +1470,37 @@ def deploy(
             print(f"[WARNING] La sincronización automática falló (código {exc.returncode}).")
             print("          Reintenta manualmente: python scripts/sync_endpoints.py --apply")
 
+    # --- FASE: capabilities (best-effort; no aborta el resto del pipeline) -----
+    if "capabilities" in phases and dry_run:
+        print("\n--- [CAPABILITIES] --dry-run: se ejecutaría test_model_capabilities.py --write-db ---")
+    elif "capabilities" in phases:
+        print("\n--- [CAPABILITIES] Sondeo de capacidades reales + sincronización con Open WebUI ---")
+        caps_script = REPO_ROOT / "scripts" / "test_model_capabilities.py"
+        caps_json = out_dir / ".sooniverse_capabilities.json"
+        cmd = [
+            sys.executable, str(caps_script),
+            "--config", str(config_path),
+            "--write-db",
+            "--json", str(caps_json),
+        ]
+        print(f"[EXEC] {' '.join(cmd)}")
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            print(f"[WARNING] test_model_capabilities.py reportó un mismatch peligroso "
+                  f"(código {result.returncode}); revisa la tabla impresa arriba y "
+                  "sooniverse.model_capability. No se aborta el despliegue.")
+
+        sync_owui_script = REPO_ROOT / "scripts" / "sync_openwebui_models.py"
+        if sync_owui_script.exists():
+            sync_cmd = [sys.executable, str(sync_owui_script), "--config", str(config_path), "--apply"]
+            print(f"[EXEC] {' '.join(sync_cmd)}")
+            sync_result = subprocess.run(sync_cmd)
+            if sync_result.returncode != 0:
+                print(f"[WARNING] sync_openwebui_models.py falló (código {sync_result.returncode}); "
+                      "reintenta manualmente: python scripts/sync_openwebui_models.py --apply")
+        else:
+            print("[SKIP] scripts/sync_openwebui_models.py no existe todavía.")
+
     # --- FASE: verify (best-effort; no aborta el resto del pipeline) -----------
     if "verify" in phases and dry_run:
         print("\n--- [VERIFY] --dry-run: se ejecutaría verify_deployment.py ---")
@@ -1486,7 +1558,8 @@ def main() -> int:
     parser.add_argument("--run", action="store_true",
                         help="Aprovisiona la topología completa en AWS tras generar los manifiestos")
     parser.add_argument(
-        "--only", choices=["all", "network", "gateway", "workers", "endpoints", "verify"], default="all",
+        "--only", choices=["all", "network", "gateway", "workers", "endpoints", "capabilities", "verify"],
+        default="all",
         help="Limita el aprovisionamiento a una fase de la topología",
     )
     parser.add_argument(

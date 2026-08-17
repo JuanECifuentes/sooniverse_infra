@@ -1,0 +1,34 @@
+/* ==============================================================================
+ * SOONIVERSE :: Overlay de identidad visual — Open WebUI
+ * ==============================================================================
+ * Tokens del Manual de imagen (ver .claude/skills/sooniverse-ui-identity).
+ * Servido como estático en /sooniverse.css (SPAStaticFiles de Open WebUI sirve
+ * cualquier archivo de FRONTEND_BUILD_DIR). AÚN NO enlazado desde index.html:
+ * activarlo requiere un patch sobre el HTML servido, que es alcance de la
+ * iteración de re-tematizado visual completo, no de esta (solo funcional).
+ *
+ * Cuando se enlace: solo redefine custom properties y overrides puntuales con
+ * estos tokens. Nunca edites el CSS de Tailwind generado por el build.
+ */
+
+:root {
+  --sv-surface-0: #0d0d0e;
+  --sv-surface-1: #141415;
+  --sv-surface-2: #1a1a1c;
+  --sv-surface-3: #212124;
+
+  --sv-border-subtle: rgba(255, 255, 255, 0.08);
+  --sv-border-strong: rgba(255, 255, 255, 0.16);
+
+  --sv-text-primary: #ececec;
+  --sv-text-secondary: #a8a8ac;
+  --sv-text-muted: #6f6f76;
+
+  --sv-accent: #7c86ff;
+  --sv-accent-hover: #919aff;
+  --sv-accent-pressed: #615fff;
+
+  --sv-positive: #3fb968;
+  --sv-warning: #d99a3d;
+  --sv-negative: #e0616f;
+}

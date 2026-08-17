@@ -9,15 +9,29 @@
 --   de API Key. No se crea ninguna columna de texto libre de conversación.
 --
 -- CONVIVENCIA CON LITELLM:
---   LiteLLM Proxy y Django gestionan sus tablas en el esquema `sooniverse`.
---   Nunca se altera ni se borra nada de LiteLLM. Este archivo:
---     1) Crea el esquema `sooniverse`.
---     2) Vincula sus tablas con las de LiteLLM por `token` (hash de la API key).
---     3) Provee una función ETL que copia SOLO contadores desde
---        LiteLLM_SpendLogs hacia sooniverse.token_usage_event.
+--   LiteLLM Proxy vive en su PROPIO esquema `litellm` (NO en `sooniverse`),
+--   aunque comparta la misma base de datos física con Django y Open WebUI.
+--   Motivo (descubierto en pruebas de despliegue reales, no teórico): el
+--   motor de migraciones de LiteLLM (Prisma) no se limita a crear sus propias
+--   tablas -al reconciliar su esquema calcula un diff de TODO lo que encuentra
+--   en el search_path y puede intentar DROPear objetos ajenos que no reconoce
+--   (se observó un intento real de `DROP TABLE api_key_registry`, bloqueado
+--   solo porque nuestras vistas dependían de ella, dejando a LiteLLM sin
+--   ninguna de sus tablas creadas y el proxy completamente no funcional).
+--   Django (Alembic-less, tablas propias vía `manage.py migrate`) y Open WebUI
+--   (Alembic) sí conviven bien en `sooniverse` porque ninguno de los dos hace
+--   ese tipo de diff agresivo contra todo el esquema.
+--   Este archivo:
+--     1) Crea el esquema `sooniverse` (Django, Open WebUI, tablas propias).
+--     2) Crea el esquema `litellm` (uso exclusivo del proxy LiteLLM).
+--     3) Vincula sus tablas con las de LiteLLM por `token` (hash de la API key).
+--     4) Provee una función ETL que copia SOLO contadores desde
+--        litellm."LiteLLM_SpendLogs" hacia sooniverse.token_usage_event
+--        (lectura entre esquemas, misma base de datos; nunca escribe ahí).
 -- =============================================================================
 
 CREATE SCHEMA IF NOT EXISTS sooniverse;
+CREATE SCHEMA IF NOT EXISTS litellm;
 
 SET search_path TO sooniverse;
 
@@ -205,7 +219,7 @@ DECLARE
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM information_schema.tables
-        WHERE table_schema = 'sooniverse' AND table_name = 'LiteLLM_SpendLogs'
+        WHERE table_schema = 'litellm' AND table_name = 'LiteLLM_SpendLogs'
     ) THEN
         RAISE NOTICE 'LiteLLM_SpendLogs no existe todavía; ETL omitido.';
         RETURN 0;
@@ -225,7 +239,7 @@ BEGIN
         COALESCE(sl."total_tokens", COALESCE(sl."prompt_tokens", 0) + COALESCE(sl."completion_tokens", 0)),
         COALESCE(sl."spend", 0),
         COALESCE(sl."startTime", NOW())
-    FROM sooniverse."LiteLLM_SpendLogs" sl
+    FROM litellm."LiteLLM_SpendLogs" sl
     LEFT JOIN sooniverse.api_key_registry reg ON reg.litellm_token_hash = sl."api_key"
     WHERE sl."startTime" >= NOW() - (p_since_hours || ' hours')::INTERVAL
     ON CONFLICT (litellm_request_id) DO NOTHING;

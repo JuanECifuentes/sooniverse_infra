@@ -86,6 +86,16 @@ python scripts/generate_infra.py --run --only network            # una sola fase
 - **Duración:** 10-30s (descubrimiento + health checks + `sky rsync`/`sky exec` + reload de un contenedor).
 - **Puede fallar:** si el pool queda vacío (ningún worker respondió `/health`), el warning es visible pero **no aborta el despliegue** — es exactamente el comportamiento buscado: un worker caído no debe tumbar el resto.
 
+## Fase 6.5 — `capabilities`
+
+- **Función:** dentro de `deploy()` (entre `endpoints` y `verify`): invoca `scripts/test_model_capabilities.py --config <config> --write-db --json <out_dir>/.sooniverse_capabilities.json` como subproceso, y a continuación `scripts/sync_openwebui_models.py --config <config> --apply`. **Best-effort**: ninguno de los dos aborta el despliegue si falla; un código de salida distinto de cero solo genera un `[WARNING]`.
+- **Por qué después de `endpoints` y no antes:** necesita el Gateway ya sirviendo tráfico y LiteLLM ya recargado con el pool de workers (fase `endpoints`) — sondear un modelo que todavía no está en `litellm_config.yaml` daría solo resultados inconclusos.
+- **Qué hace `test_model_capabilities.py --write-db`:** sondea cada modelo público declarado (`workloads[].nombre_publico`) a través del Gateway con peticiones mínimas reales — visión (imagen 1x1), tool calling (`tool_choice: auto`), `response_format: json_object` (lo que rompía las tareas automáticas de Open WebUI) y streaming. Los sondeos inconclusos (timeout, worker aún arrancando) se reintentan automáticamente (hasta 3 intentos, backoff 5/15/30s) antes de darlos por definitivos — fail-closed: un inconcluso persistente NUNCA cuenta como "soportado". El resultado se persiste en `sooniverse.model_capability` (`docs/03_ESTADO_Y_BD.md`) y también se escribe en `.sooniverse_capabilities.json` (usado por `render_gateway_stack.py` para los flags globales de Open WebUI).
+- **Qué hace `sync_openwebui_models.py --apply`:** re-renderiza `docker_images/gateway/docker-compose.yml` (ahora con `.sooniverse_capabilities.json` disponible), lo empuja al Gateway, recrea el contenedor `open-webui` (los `ENABLE_*` son variables de entorno del servicio, así que `docker compose up -d` sí detecta el cambio y recrea, a diferencia del caso de `litellm_config.yaml` documentado en la fase `endpoints`), y corre el servicio one-shot `openwebui-bootstrap` (`docker_images/openwebui/overlay/sooniverse/bootstrap_models.py`) que upsertea, vía la API HTTP pública de Open WebUI, una fila `model` por modelo con `meta.capabilities` derivado de `sooniverse.model_capability`.
+- **Duración:** 30s-3min (4 sondeos × hasta 3 reintentos por modelo, más la recreación del contenedor).
+- **Puede fallar (sin abortar el despliegue):** un mismatch peligroso (`capacidades.vision: true` en el contrato pero el modelo lo rechaza) se imprime en la tabla y devuelve código 1, pero la infra queda `active`/`degraded` igual — corrige `config_global.yaml` y re-despliega, o re-corre `python scripts/test_model_capabilities.py --write-db` suelto tras arreglar el worker.
+- **Por qué `GATEWAY_RUN_SCRIPT` persiste `CLIENTE_ID`/`ENTORNO` en `.env` (hallazgo de un despliegue de prueba real):** SkyPilot solo exporta las `envs:` del contrato (`CLIENTE_ID`, `ENTORNO`, ...) al script `setup:`/`run:` que corre durante `sky launch`; una invocación posterior de `docker compose` vía `sky exec` (exactamente lo que hace `sync_openwebui_models.py` en cada corrida de esta fase) **no hereda ese entorno de shell** — confirmado con `sky exec <gw> 'echo $CLIENTE_ID'` devolviendo vacío. Sin escribir esas dos variables en `.env` (idempotente, primer paso de `GATEWAY_RUN_SCRIPT`), `openwebui-bootstrap` consultaría `sooniverse.model_capability` con `client_id='default'` en vez del cliente real, sin encontrar la fila, y aplicaría el fallback fail-closed (todo apagado) en silencio en cada resincronización posterior al primer despliegue.
+
 ## Fase 7 — `verify`
 
 - **Función:** `deploy()` invoca `scripts/verify_deployment.py --config <config>` como subproceso, **best-effort**: un código de salida distinto de cero solo genera un `[WARNING]`, no aborta el reporte final.
@@ -120,6 +130,10 @@ operador          generate_infra.py         PostgreSQL            AwsNetworkMana
    │                     │──sync_endpoints.py --apply──────────────────────────────────────────────────────────────▶│
    │                     │                                                                       │◀──discover IPs────│
    │                     │                                                                       │◀──push+reload litellm
+   │                     │──test_model_capabilities.py --write-db (fail-closed, best-effort)──────────────────────▶│
+   │                     │◀──sooniverse.model_capability actualizada──────────│                    │                 │
+   │                     │──sync_openwebui_models.py --apply (best-effort)────────────────────────────────────────▶│
+   │                     │                                                                       │◀──recrea open-webui + bootstrap modelos
    │                     │──verify_deployment.py (best-effort)                                   │                   │
    │◀──URLs + deployment_id──│                       │                       │                    │                 │
 ```
