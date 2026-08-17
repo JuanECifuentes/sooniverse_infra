@@ -348,6 +348,40 @@ def check_worker_health(ip: str, port: int, gateway_cluster: str) -> bool:
     return "SOONIVERSE_HEALTH_OK" in "\n".join(remote_lines)
 
 
+def _effective_capabilities_by_model(config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Verdad OBSERVADA por scripts/test_model_capabilities.py (--write-db),
+    leída de sooniverse.model_capability. Best-effort: si la BD no está
+    accesible o el modelo aún no fue sondeado (primer despliegue), el llamador
+    cae a lo DECLARADO en config_global.yaml -ver build_endpoints()."""
+    try:
+        from db_setup import DbSetupError, connect, resolve_db_config  # type: ignore[import-not-found]
+    except ImportError:
+        return {}
+
+    try:
+        conn = connect(resolve_db_config(REPO_ROOT / ".env"))
+    except DbSetupError:
+        return {}
+
+    cliente = config["cliente"]
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT model_public_name, effective_vision, effective_tool_calling
+                FROM sooniverse.model_capability
+                WHERE client_id = %s AND environment = %s
+                """,
+                (cliente["id"], cliente["entorno"]),
+            )
+            rows = cur.fetchall()
+        return {r[0]: {"vision": bool(r[1]), "tool_calling": bool(r[2])} for r in rows}
+    except Exception:  # noqa: BLE001 - enriquecimiento best-effort, nunca bloqueante
+        return {}
+    finally:
+        conn.close()
+
+
 def build_endpoints(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Construye el pool completo de deployments a partir del contrato + SkyPilot.
 
@@ -359,10 +393,16 @@ def build_endpoints(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     env = worker_env(config)
     region = config["red_y_aislamiento"]["region"]
     endpoints: List[Dict[str, Any]] = []
+    effective_caps = _effective_capabilities_by_model(config)
 
     for wl in config["workloads"]:
         cluster = names[wl["id"]]
         frac = wl.get("asignacion_fraccional", {})
+        model_public_name = wl.get("nombre_publico", wl["id"])
+        # Preferir la verdad sondeada (sooniverse.model_capability) sobre lo
+        # declarado; solo antes del primer sondeo (recién desplegado) no hay
+        # fila todavía y se usa 'capacidades' del contrato como arranque.
+        capacidades = effective_caps.get(model_public_name) or wl.get("capacidades", {})
         for found in discover_worker_ips(cluster, env, region):
             ip = found["ip"]
             healthy = check_worker_health(ip, wl["puerto"], names["__gateway__"])
@@ -372,7 +412,7 @@ def build_endpoints(config: Dict[str, Any]) -> List[Dict[str, Any]]:
             endpoints.append({
                 "workload_id": wl["id"],
                 "cluster": cluster,
-                "model_public_name": wl.get("nombre_publico", wl["id"]),
+                "model_public_name": model_public_name,
                 "hf_repo": wl.get("hf_repo", "unknown"),
                 "accelerator": wl.get("accelerator"),
                 "ip": ip,
@@ -381,7 +421,7 @@ def build_endpoints(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "weight": wl.get("peso_balanceo", 1),
                 "max_model_len": frac.get("max_model_len"),
                 "healthy": healthy,
-                "capacidades": wl.get("capacidades", {}),
+                "capacidades": capacidades,
             })
 
     return endpoints

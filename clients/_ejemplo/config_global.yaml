@@ -85,6 +85,10 @@ gateway:
   open_webui:
     habilitado: true
     signup_habilitado: false
+    # segun_capacidades (default) | activado | desactivado -- ver el comentario
+    # equivalente en el config_global.yaml raíz.
+    tareas_automaticas: "segun_capacidades"
+    code_interpreter: "segun_capacidades"
   django_metrics:
     habilitado: true
     puerto: 8000
