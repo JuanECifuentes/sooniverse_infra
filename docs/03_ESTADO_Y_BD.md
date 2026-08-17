@@ -4,6 +4,8 @@
 
 Definido en `database/002_infra_state.sql` (aplicado después de `001_init_schema.sql`, en el mismo esquema `sooniverse`).
 
+**Nota de esquema (encontrada en despliegue de prueba real, no teórica):** `sooniverse` aloja las tablas propias de este proyecto, las de Django y las de Open WebUI — pero **no** las de LiteLLM. LiteLLM Proxy vive en su propio esquema `litellm` (ambos esquemas, misma base de datos física). Motivo: el motor de migraciones de LiteLLM (Prisma) calcula un diff contra TODO lo que encuentra en el esquema activo y puede intentar borrar objetos que no reconoce como suyos; compartiendo `sooniverse` se observó un intento real de `DROP TABLE api_key_registry` (bloqueado solo porque las vistas de uso dependían de ella), que dejaba a LiteLLM sin ninguna de sus tablas creadas y al proxy completamente no funcional. Ver el comentario "CONVIVENCIA CON LITELLM" en `database/001_init_schema.sql` y §7 más abajo.
+
 ### `sooniverse.infra_deployment`
 
 | Columna | Tipo | Notas |
@@ -39,6 +41,18 @@ Bitácora de auditoría: una fila por cada operación (`phase`, `action`, `statu
 ### `sooniverse.worker_node` (ampliada, no creada por 002)
 
 `002_infra_state.sql` le añade con `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`: `deployment_id`, `subnet_id`, `security_group_id`, `last_health_check`, `health_status`. La tabla en sí (con `cluster_name`, `private_ip`, `port`, `is_healthy`, etc.) la crea `001_init_schema.sql` y la mantiene `scripts/sync_endpoints.py::register_in_db()`.
+
+### `sooniverse.model_capability` (`003_model_capabilities.sql`)
+
+La verdad OBSERVADA por `scripts/test_model_capabilities.py --write-db` sobre cada modelo público desplegado, separada en tres capas por fila (`UNIQUE (client_id, environment, model_public_name)`):
+
+| Capa | Columnas | Origen |
+|---|---|---|
+| Declarado | `declared_vision`, `declared_tool_calling`, `tool_call_parser` | `config_global.yaml: workloads[].capacidades` |
+| Sondeado | `probed_vision`, `probed_tool_calling`, `probed_json_object`, `probed_streaming` | Petición HTTP mínima real contra el Gateway público. `NULL` = inconcluso (nunca se confunde con `false`) |
+| Efectivo | `effective_vision`, `effective_tool_calling`, `effective_json_object` | Columnas `GENERATED ALWAYS AS` — fail-closed: declarado Y sondeo=`TRUE` (`effective_json_object` no tiene declaración en el contrato, así que exige directamente sondeo=`TRUE`) |
+
+Ningún consumidor (`docker_images/openwebui/overlay/sooniverse/bootstrap_models.py`, `scripts/render_litellm_config.py`, `scripts/render_gateway_stack.py`, `scripts/sync_endpoints.py`) debe leer `declared_*`/`probed_*` directamente — siempre las columnas `effective_*`, para que la política fail-closed viva en un solo sitio (el motor de PostgreSQL, no repetida en cada script). Vista de inspección manual: `sooniverse.v_model_capability_effective`. Ver `docs/00_ARQUITECTURA.md` §4.7 para el razonamiento completo y `docs/01_FLUJO_DESPLIEGUE.md` (Fase 6.5) para cuándo se escribe.
 
 ### Vistas
 
@@ -97,3 +111,13 @@ Es deliberadamente un procedimiento manual y no un script: reconstruir estado de
 | `requires-destroy` | `vpc_cidr`, `azs`, `nat_gateway.modo` | No aplicable en caliente: `_open_state_store()` lanza `RequiresDestroyError` y aborta antes de tocar AWS |
 
 Ver `docs/01_FLUJO_DESPLIEGUE.md` (Fase 1, "state") para dónde se invoca, y `tests/test_plan_changes.py` para el catálogo completo de casos.
+
+## 7. Tablas de Open WebUI en el mismo esquema `sooniverse`
+
+Desde esta iteración, Open WebUI (`docker_images/openwebui/`) persiste en PostgreSQL vía `DATABASE_URL`/`DATABASE_SCHEMA=sooniverse` en vez de SQLite (ver `docs/00_ARQUITECTURA.md` §4.7 y el servicio `open-webui` en `docker_images/gateway/docker-compose.yml`). Sus migraciones (Alembic, gestionadas por su propio código, nunca por `db_setup.py`) crean dentro de `sooniverse` sus propias tablas: `model`, `user`, `chat`, `config`, `tag`, `file`, `folder`, `group`, `function`, `tool`, `prompt`, `memory`, `channel`, `message`, `feedback`, `knowledge`, `note`, `alembic_version`.
+
+Verificado que ninguna colisiona con los objetos de `database/*.sql` (`api_key_registry`, `token_usage_*`, `api_key_audit`, `worker_node`, `infra_*`, `model_capability`) ni con las tablas internas de Django (`auth_*`, `django_*`, con `search_path=sooniverse`, `sooniverse_panel/settings.py`). Es la razón por la que la tabla de este proyecto se llama `model_capability` y no `model`: ese nombre ya lo usa Open WebUI.
+
+`db_setup.py` **nunca** toca las tablas de Open WebUI (no están en `database/*.sql`, así que quedan fuera de `apply_schema_dir()`/`EXPECTED_TABLES`) — su ciclo de vida de esquema es responsabilidad exclusiva del propio contenedor `open-webui` al arrancar.
+
+**LiteLLM es la excepción deliberada: NO comparte `sooniverse`.** Vive en su propio esquema `litellm` (`database/001_init_schema.sql`, `CREATE SCHEMA IF NOT EXISTS litellm;`, y `DATABASE_URL=...?schema=litellm` en `docker_images/gateway/docker-compose.yml`, generado por `scripts/render_gateway_stack.py`). A diferencia de Alembic (Open WebUI) y de las migraciones nativas de Django, el motor de migraciones de LiteLLM (Prisma) calcula un diff contra **todo** lo que encuentra en el esquema activo del `search_path`, no solo contra sus propias tablas — compartiendo `sooniverse` se reprodujo en un despliegue real un intento de `DROP TABLE api_key_registry` (bloqueado por PostgreSQL solo porque `v_usage_daily`/`v_usage_weekly`/`v_usage_monthly`/`v_apikey_summary` dependían de ella), que dejaba a LiteLLM sin ninguna tabla propia (`LiteLLM_SpendLogs`, `LiteLLM_VerificationToken`, etc.) y al proxy completo respondiendo con errores en cada petición. La función `sooniverse.ingest_litellm_spendlogs()` sigue leyendo esas tablas, ahora con el esquema cualificado explícitamente (`FROM litellm."LiteLLM_SpendLogs"`) — una lectura entre esquemas de la misma base de datos, nunca escribe ahí.

@@ -48,6 +48,8 @@ Es exactamente el inverso del orden de creación en `docs/02_RED_AWS.md`. `AwsNe
 
 **NUNCA se borra:**
 - La base de datos PostgreSQL ni el esquema `sooniverse` — el histórico de métricas, API Keys y auditoría sobrevive a la destrucción de la infraestructura. `destroy_infra.py` no tiene ningún código que toque `DROP SCHEMA`/`DROP TABLE`.
+- **Desde esta iteración, esto incluye usuarios y chats de Open WebUI**: al vivir en `sooniverse.*` (Postgres) en vez de en un volumen Docker local (ver `docs/00_ARQUITECTURA.md` §4.7 y `docs/03_ESTADO_Y_BD.md` §7), cuentas, conversaciones, modelos configurados y capacidades sondeadas (`sooniverse.model_capability`) **sobreviven** a un `destroy_infra.py --yes` y a la recreación del Gateway. Es un cambio de comportamiento real respecto a la versión anterior (SQLite efímero en `webui_data`, que sí se perdía con la instancia).
+- **Lo que SÍ sigue muriendo con la instancia**: el volumen Docker `webui_data` (`docker_images/gateway/docker-compose.yml`) — ficheros subidos por los usuarios y el vector store local (Chroma) de RAG, que no son relacionales y nunca se migraron a Postgres (ver `docker_images/openwebui/README.md`).
 - Recursos de otro `deployment_id` (incluso si comparten región/cuenta).
 - Recursos sin nuestros tags (`sooniverse:managed=true`).
 - La VPC por defecto de la cuenta (`DefaultVpcGuardError`, `scripts/aws_network.py:87` — guarda explícita en `ensure_vpc()`).

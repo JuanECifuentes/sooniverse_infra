@@ -54,7 +54,14 @@ services:
     container_name: sooniverse-litellm
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
     environment:
-      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD}@${DB_HOST:-postgres}:${DB_PORT:-5432}/${DB_NAME:-sooniverse}?schema=sooniverse
+      # Esquema PROPIO ('litellm', no 'sooniverse'): su motor de migraciones
+      # (Prisma) calcula un diff contra TODO lo que encuentra en el esquema y
+      # puede intentar borrar objetos ajenos que no reconoce -confirmado en
+      # despliegue real: un intento de DROP TABLE sobre 'api_key_registry'
+      # bloqueado solo porque nuestras vistas dependían de ella, dejando a
+      # LiteLLM sin ninguna tabla propia creada. Ver el comentario
+      # "CONVIVENCIA CON LITELLM" en database/001_init_schema.sql.
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD}@${DB_HOST:-postgres}:${DB_PORT:-5432}/${DB_NAME:-sooniverse}?schema=litellm
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}
       LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-sooniverse-salt-change-me}
       REDIS_HOST: redis
@@ -84,7 +91,10 @@ services:
     restart: unless-stopped
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    build:
+      context: ../openwebui
+      dockerfile: Dockerfile
+    image: sooniverse/open-webui:0.11.0
     container_name: sooniverse-webui
     environment:
       # Todo el tráfico de chat pasa por el balanceador, nunca directo al worker.
@@ -97,14 +107,80 @@ services:
       WEBUI_SECRET_KEY: ${SECRET_KEY:-sooniverse-webui-secret}
       DEFAULT_USER_ROLE: "pending"
       WEBUI_URL: ${GATEWAY_PUBLIC_URL:-}
+      # Persistencia relacional en el MISMO esquema que LiteLLM y Django (ver
+      # docs/03_ESTADO_Y_BD.md). 'webui_data' se mantiene: ficheros subidos y
+      # el vector store local (Chroma) no son relacionales y siguen en disco.
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD}@${DB_HOST:-postgres}:${DB_PORT:-5432}/${DB_NAME:-sooniverse}?options=-csearch_path%3Dsooniverse
+      DATABASE_SCHEMA: sooniverse
+      DB_NAME: ${DB_NAME:-sooniverse}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      # Tareas automáticas (título/tags/autocompletado/follow-up/consultas de
+      # RAG y búsqueda) dependen de response_format=json_object; encenderlas
+      # sin que el modelo lo soporte es el 400 documentado contra vLLM (ver
+      # scripts/test_model_capabilities.py::probe_json_object). Derivadas de
+      # la verdad observada en sooniverse.model_capability -o del override
+      # gateway.open_webui.tareas_automaticas si el operador lo fuerza-.
+      ENABLE_TITLE_GENERATION: "true"
+      ENABLE_TAGS_GENERATION: "true"
+      ENABLE_AUTOCOMPLETE_GENERATION: "true"
+      ENABLE_FOLLOW_UP_GENERATION: "true"
+      ENABLE_RETRIEVAL_QUERY_GENERATION: "true"
+      ENABLE_SEARCH_QUERY_GENERATION: "true"
+      # Ídem para el intérprete de código, que depende de tool calling real.
+      ENABLE_CODE_INTERPRETER: "false"
+      # Sin backend propio en esta infra: apagados fijos, no dependen de capacidades.
+      ENABLE_IMAGE_GENERATION: "false"
+      ENABLE_WEB_SEARCH: "false"
+      ENABLE_EVALUATION_ARENA_MODELS: "false"
     volumes:
       - webui_data:/app/backend/data
     expose:
       - "8080"
     depends_on:
       - litellm
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request;urllib.request.urlopen('http://localhost:8080/')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
     networks: [gateway_net]
     restart: unless-stopped
+
+  openwebui-bootstrap:
+    build:
+      context: ../openwebui
+      dockerfile: Dockerfile
+    image: sooniverse/open-webui:0.11.0
+    container_name: sooniverse-webui-bootstrap
+    entrypoint: ["python3", "-m", "sooniverse.bootstrap_models"]
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD}@${DB_HOST:-postgres}:${DB_PORT:-5432}/${DB_NAME:-sooniverse}?options=-csearch_path%3Dsooniverse
+      DATABASE_SCHEMA: sooniverse
+      DB_NAME: ${DB_NAME:-sooniverse}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}
+      CLIENTE_ID: ${CLIENTE_ID:-default}
+      ENTORNO: ${ENTORNO:-prod}
+      OPENWEBUI_BASE_URL: http://open-webui:8080
+      # Cuenta técnica de bootstrap (ver .env.example): la PRIMERA en firmar
+      # en una instancia nueva, asciende a admin automáticamente incluso con
+      # ENABLE_SIGNUP=false (backend/open_webui/routers/auths.py).
+      OPENWEBUI_BOOTSTRAP_EMAIL: ${OPENWEBUI_BOOTSTRAP_EMAIL:-bootstrap@sooniverse.internal}
+      OPENWEBUI_BOOTSTRAP_PASSWORD: ${OPENWEBUI_BOOTSTRAP_PASSWORD}
+    depends_on:
+      open-webui:
+        condition: service_healthy
+    networks: [gateway_net]
+    restart: "no"
+    profiles: ["bootstrap"]
 
   metrics:
     build:

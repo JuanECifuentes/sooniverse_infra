@@ -100,6 +100,38 @@ Si solo se confiara en la BD: un operador podría borrar manualmente una fila y 
 
 Cada puerto publicado al host (4000, 8080, 8000) es una superficie de ataque adicional sin las protecciones de nginx (rate limiting futuro, TLS terminado en un solo sitio, un único punto de auditoría de acceso). Con `gateway.exponer_puertos_directos: false` (default), litellm/open-webui/metrics usan `expose:` (solo red interna Docker) y únicamente nginx publica 80/443. Ver `scripts/render_gateway_stack.py` y `docs/06_RUNBOOK.md` para el caso de depuración donde sí conviene alternar el flag.
 
+### 4.7 ¿Por qué las capacidades de un modelo se resuelven por BD (`sooniverse.model_capability`) y no quedándose en `config_global.yaml`?
+
+`config_global.yaml` declara qué capacidades **debería** tener un checkpoint (`workloads[].capacidades`), pero es una promesa del operador, no una medición. El bug real que motivó este mecanismo: Open WebUI mandaba `tool_choice="auto"` (o `response_format: json_object` en sus tareas automáticas de título/tags) a un vLLM que nunca arrancó con las banderas necesarias, y el chat completo se caía con un 400 en cada mensaje.
+
+La infraestructura admite **múltiples modelos** (`workloads[]` es una lista) y cada uno puede tener capacidades reales distintas del mismo tipo de tarea (`llm-texto`). Una constante global en config (p.ej. "esta instalación soporta visión: sí/no") no puede representar eso; hace falta una verdad **por modelo público** (`model_public_name`), y esa verdad solo se conoce sondeando el modelo ya desplegado (`scripts/test_model_capabilities.py`, ver `docs/01_FLUJO_DESPLIEGUE.md` fase `capabilities`).
+
+Se eligió PostgreSQL (`sooniverse.model_capability`, `database/003_model_capabilities.sql`) en vez de, por ejemplo, un archivo JSON junto a los manifiestos, porque:
+- Es la misma fuente de verdad que ya usan LiteLLM y Django (`docs/03_ESTADO_Y_BD.md`) — no se añade un segundo mecanismo de estado a reconciliar.
+- Las columnas `effective_*` son `GENERATED ALWAYS AS` (declarado Y sondeo=TRUE): la política fail-closed vive en el motor, no repetida en cada uno de los tres consumidores (`docker_images/openwebui/overlay/sooniverse/bootstrap_models.py`, `scripts/render_litellm_config.py`, `scripts/render_gateway_stack.py`).
+- Sobrevive a la recreación del Gateway (a diferencia de un archivo en disco de la instancia): un `sky launch` nuevo no pierde el historial de sondeos.
+
+La cadena completa, de sondeo a interfaz:
+
+```
+scripts/test_model_capabilities.py --write-db
+        │  (sondea vision/tool_calling/json_object/streaming vía el Gateway público,
+        │   con reintento fail-closed sobre resultados inconclusos)
+        ▼
+sooniverse.model_capability (columnas effective_* GENERATED, fail-closed)
+        │
+        ├─► scripts/sync_endpoints.py::build_endpoints()  → litellm_config.yaml
+        │     (model_info.supports_vision/supports_function_calling/max_input_tokens)
+        │
+        └─► scripts/sync_openwebui_models.py
+              ├─ scripts/render_gateway_stack.py  → ENABLE_TITLE_GENERATION/
+              │    ENABLE_CODE_INTERPRETER/... del contenedor open-webui (flags
+              │    globales de la instancia, unión de capacidades efectivas)
+              └─ docker_images/openwebui/overlay/sooniverse/bootstrap_models.py
+                   → filas `model` de Open WebUI (meta.capabilities por modelo,
+                     vía la API HTTP pública de Open WebUI, nunca su ORM interno)
+```
+
 ## 5. Componentes y dónde viven
 
 | Componente | Archivo(s) | Rol |
@@ -108,9 +140,12 @@ Cada puerto publicado al host (4000, 8080, 8000) es una superficie de ataque adi
 | Validación del contrato | `scripts/generate_infra.py::ConfigValidator` | Falla rápido antes de tocar AWS/BD |
 | Red AWS | `scripts/aws_network.py::AwsNetworkManager` | VPC/subredes/NAT/IGW/route tables/SGs |
 | Estado persistente | `scripts/infra_state.py::PostgresInfraStateStore` | Mecanismo de propiedad, auditoría |
-| Orquestación | `scripts/generate_infra.py::deploy()` | Máquina de fases: network→gateway→workers→endpoints→verify |
+| Orquestación | `scripts/generate_infra.py::deploy()` | Máquina de fases: network→gateway→workers→endpoints→capabilities→verify |
 | Descubrimiento/sync | `scripts/sync_endpoints.py` | IPs privadas de workers → `litellm_config.yaml` |
 | Render del stack Gateway | `scripts/render_gateway_stack.py` | nginx + docker-compose desde el contrato |
+| Interfaz de chat | `docker_images/openwebui/` | Open WebUI vendorizado (imagen derivada, tag fijo, Postgres/esquema `sooniverse`, overlay visual, patches) |
+| Sondeo de capacidades reales | `scripts/test_model_capabilities.py` | Sondea vision/tool_calling/json_object/streaming contra el modelo desplegado; persiste en `sooniverse.model_capability` (fail-closed) |
+| Sincronización Open WebUI ↔ capacidades | `scripts/sync_openwebui_models.py`, `docker_images/openwebui/overlay/sooniverse/bootstrap_models.py` | Aplica la verdad observada a los flags del contenedor y a los modelos de la interfaz |
 | Destrucción | `scripts/destroy_infra.py` | Orden inverso, huérfanos |
 | Verificación | `scripts/verify_deployment.py` | 11 comprobaciones post-despliegue |
 | Inventario multi-cliente | `scripts/list_deployments.py` | Todos los clientes/entornos |
