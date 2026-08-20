@@ -57,9 +57,18 @@ if (panel && window.Chart) {
     }
     cuerpo.innerHTML = curva.map((n) => {
       const esRodilla = n.concurrencia === rodilla;
+      const rodillaHtml = esRodilla
+        ? ` <span class="sv-badge sv-badge--info">
+              rodilla
+              <span class="sv-tooltip sv-tooltip--top-start">
+                <button type="button" class="sv-tooltip__trigger" aria-label="Más información sobre el punto de rodilla">i</button>
+                <span class="sv-tooltip__bubble" role="tooltip">Punto de operación óptimo: nivel de concurrencia donde se maximiza el rendimiento antes de que la latencia comience a degradarse rápidamente.</span>
+              </span>
+            </span>`
+        : "";
       return `<tr>
         <td data-label="Concurrencia" class="sv-num">
-          ${fmtInt(n.concurrencia)}${esRodilla ? ' <span class="sv-badge sv-badge--info">rodilla</span>' : ""}
+          ${fmtInt(n.concurrencia)}${rodillaHtml}
         </td>
         <td data-label="Peticiones" class="sv-num">${fmtInt(n.peticiones)}</td>
         <td data-label="Tokens/s" class="sv-num">${fmtInt(Math.round(n.tokens_salida_por_seg))}</td>

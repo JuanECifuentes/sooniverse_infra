@@ -66,7 +66,7 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
    al viewport para seguir visible sin depender del scroll ni de la altura
    del panel. */
 .l-loading-overlay     { position: absolute; inset: 0; z-index: 30; }
-.l-loading-overlay .sv-spinner { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+.l-loading-overlay .sv-spinner { position: fixed; inset: 0; width: fit-content; height: fit-content; margin: auto; display: block; }
 
 /* Overlay de página completa (spinner.js): bloquea toda la interfaz
    mientras un <form data-spinner-submit> navega. */
@@ -109,9 +109,12 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
    Tarjetas
    --------------------------------------------------------------------------- */
 .sv-card, .sv-panel { padding: 20px 22px; }
-.l-card--flush      { padding: 0; overflow: hidden; }
+.sv-card--compact   { padding: 0; }
+.l-card--flush      { padding: 0; }
 .l-card__head       { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 22px; flex-wrap: wrap; }
+.l-card__head--compact { padding: 14px 20px 8px; }
 .l-card__body       { padding: 0 22px 22px; }
+.l-card__body--compact { padding: 0 20px 16px; }
 .l-card__body--flush{ padding: 0; }
 
 .l-kpi        { display: flex; flex-direction: column; gap: 6px; }
@@ -168,7 +171,7 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 }
 
 /* Multi-select y select único (disclosure <details>/<summary>) */
-.sv-multiselect, .sv-listbox { display: block; width: 100%; min-width: 0; }
+.sv-multiselect, .sv-listbox, .sv-timepicker { display: block; width: 100%; min-width: 0; }
 .sv-multiselect__trigger { width: 100%; padding: 10px 13px; }
 .sv-multiselect__count { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; }
 .sv-multiselect__chevron { width: 6px; height: 6px; flex: 0 0 6px; transform: rotate(45deg); margin-top: -2px; }
@@ -185,6 +188,103 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 .sv-multiselect__option, .sv-listbox__option { padding: 8px 10px; }
 .sv-multiselect__empty  { padding: 8px 10px; display: block; }
 .sv-listbox__option     { display: flex; align-items: center; width: 100%; text-align: left; background: none; border: none; font: inherit; cursor: pointer; }
+
+/* Selector de franja horaria (disclosure <details>/<summary>) */
+.sv-timepicker { position: relative; }
+.sv-timepicker__label { font-family: var(--font-mono); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sv-timepicker__panel {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    width: 290px;
+    z-index: 25;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.sv-timepicker__section-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+}
+.sv-timepicker__presets {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.sv-segment--xs {
+    gap: 2px;
+    padding: 2px;
+}
+.sv-segment--xs .sv-segment__item {
+    padding: 4px 8px;
+    font-size: 10px;
+    letter-spacing: 0.4px;
+}
+.sv-timepicker__matrix-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.sv-timepicker__matrix-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.sv-timepicker__hours {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 3px;
+}
+.sv-timepicker__hour-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 26px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    background: transparent;
+    padding: 0;
+}
+.sv-timepicker__inputs {
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    padding-top: 8px;
+}
+.sv-timepicker__input-col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+.sv-timepicker__inputs-sep {
+    padding-bottom: 6px;
+    font-size: 13px;
+}
+.sv-time-select {
+    width: 100%;
+    padding: 6px 8px;
+    font-size: 12px;
+    font-family: var(--font-mono);
+}
+.sv-btn--xs {
+    padding: 2px 7px;
+    font-size: 10px;
+    border-radius: 4px;
+}
+.sv-label--xs {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-family: var(--font-mono);
+}
 
 /* Flatpickr (datepicker vendorizado): estructura. Colores en theme-*.css.
    El input real queda oculto (display:none, lo pone flatpickr) y en su
@@ -221,15 +321,72 @@ span.flatpickr-weekday  { flex: 1; text-align: center; font-size: 11px; padding:
     left: 50%;
     width: 230px;
     padding: 10px 12px;
-    z-index: 40;
+    z-index: 999;
     pointer-events: none;
+    white-space: normal;
+    text-align: left;
+}
+.sv-tooltip--bottom-end .sv-tooltip__bubble,
+.sv-tooltip--bottom .sv-tooltip__bubble {
+    bottom: auto;
+    top: calc(100% + 8px);
+    left: auto;
+    right: 0;
+    z-index: 999;
+}
+.sv-tooltip--bottom-start .sv-tooltip__bubble {
+    bottom: auto;
+    top: calc(100% + 8px);
+    left: 0;
+    right: auto;
+    z-index: 999;
+}
+.sv-tooltip--top-start .sv-tooltip__bubble {
+    bottom: calc(100% + 8px);
+    top: auto;
+    left: 0;
+    right: auto;
+    z-index: 999;
+}
+
+/* Card acordeón / disclosure */
+.sv-card--accordion {
+    padding: 0;
+    overflow: visible;
+}
+.sv-card__summary {
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    width: 100%;
+}
+.sv-card__summary::-webkit-details-marker { display: none; }
+.sv-accordion__chevron {
+    width: 8px;
+    height: 8px;
+    border: solid var(--text-secondary);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+    transition: transform var(--dur-fast) var(--ease-out);
+    margin-left: 4px;
+    flex-shrink: 0;
+}
+.sv-card--accordion[open] .sv-accordion__chevron {
+    transform: rotate(-135deg);
+}
+.sv-card--accordion > .l-card__body {
+    padding: 0 22px 20px;
 }
 
 /* ---------------------------------------------------------------------------
    Tablas
    --------------------------------------------------------------------------- */
 .l-table-wrap  { width: 100%; overflow-x: auto; }
+.l-table-wrap--visible { overflow: visible; }
 .sv-table      { width: 100%; border-collapse: collapse; min-width: 720px; }
+.sv-table--fit { min-width: 0; width: 100%; }
+.sv-table--fit th,
+.sv-table--fit td { padding: 10px 8px; }
 .sv-table th,
 .sv-table td   { padding: 12px 16px; text-align: left; vertical-align: middle; }
 .sv-table th.sv-num,

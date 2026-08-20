@@ -113,15 +113,12 @@ class TopesDeCoste(SimpleTestCase):
     """Las guardas que impiden que un filtro dispare la consulta más cara del
     panel sobre un rango absurdo."""
 
-    def test_hourly_tiene_tope_de_dias(self):
-        self.assertEqual(ft.HOURLY_MAX_DIAS, 14)
-
     def test_p95_tiene_tope_de_dias(self):
         self.assertEqual(ft.P95_MAX_DIAS, 90)
 
-    def test_hourly_no_esta_en_las_granularidades_del_rollup(self):
-        """`hourly` la sirve usage_hourly, no token_usage_rollup: validarla
-        contra el modelo equivocado la rechazaría siempre."""
-        from metrics.models import TokenUsageRollup
-        self.assertNotIn(ft.HOURLY, dict(TokenUsageRollup.GRANULARITIES))
-        self.assertIn(ft.HOURLY, dict(ft.GRANULARIDADES_PANEL))
+    def test_granularidades_panel_incluye_diario_semanal_mensual(self):
+        granularidades = dict(ft.GRANULARIDADES_PANEL)
+        self.assertIn(ft.DAILY, granularidades)
+        self.assertIn(ft.WEEKLY, granularidades)
+        self.assertIn(ft.MONTHLY, granularidades)
+        self.assertNotIn("hourly", granularidades)

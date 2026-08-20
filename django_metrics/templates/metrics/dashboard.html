@@ -125,18 +125,64 @@
             </details>
         </div>
 
-        {% comment %} Dos number inputs y no un slider doble: un slider de rango es un
-           componente nuevo, con problemas de accesibilidad conocidos, a cambio
-           de ninguna ganancia real sobre 24 valores enteros. {% endcomment %}
         <div class="l-field">
             <span class="sv-label" id="label_franja">Franja horaria</span>
-            <div class="l-row" role="group" aria-labelledby="label_franja">
-                <input type="number" class="sv-input" id="id_hora_desde" min="0" max="23" step="1"
-                       value="0" aria-label="Hora desde" aria-describedby="metrics-hora-error">
-                <span class="sv-muted" aria-hidden="true">–</span>
-                <input type="number" class="sv-input" id="id_hora_hasta" min="0" max="23" step="1"
-                       value="23" aria-label="Hora hasta" aria-describedby="metrics-hora-error">
-            </div>
+            <details class="sv-disclosure sv-timepicker" id="metrics-franja" aria-labelledby="label_franja">
+                <summary class="sv-multiselect__trigger" id="franja-trigger" aria-haspopup="dialog">
+                    <span id="franja-label" class="sv-timepicker__label">00:00 – 23:00</span>
+                    <span class="sv-multiselect__chevron" aria-hidden="true"></span>
+                </summary>
+                <div class="sv-timepicker__panel" role="region" aria-label="Selector de franja horaria">
+                    <input type="hidden" id="id_hora_desde" value="0" aria-describedby="metrics-hora-error">
+                    <input type="hidden" id="id_hora_hasta" value="23" aria-describedby="metrics-hora-error">
+
+                    <div class="sv-timepicker__presets">
+                        <span class="sv-timepicker__section-title">Atajos</span>
+                        <div class="sv-segment sv-segment--xs" id="franja-presets" role="group" aria-label="Atajos de franja">
+                            <button type="button" class="sv-segment__item sv-segment__item--active" data-franja-preset="24h">24 h</button>
+                            <button type="button" class="sv-segment__item" data-franja-preset="laboral">Laboral (8–18)</button>
+                            <button type="button" class="sv-segment__item" data-franja-preset="manana">Mañana (6–14)</button>
+                            <button type="button" class="sv-segment__item" data-franja-preset="tarde">Tarde (14–20)</button>
+                            <button type="button" class="sv-segment__item" data-franja-preset="noche">Noche (20–23)</button>
+                        </div>
+                    </div>
+
+                    <div class="sv-timepicker__matrix-wrap">
+                        <div class="sv-timepicker__matrix-header">
+                            <span class="sv-timepicker__section-title">Selección visual (24h)</span>
+                            <button type="button" class="sv-btn sv-btn--ghost sv-btn--xs" id="franja-reset-btn">Restablecer</button>
+                        </div>
+                        <div class="sv-timepicker__hours" id="franja-hours-grid" role="group" aria-label="Horas">
+                            {% for h in horas %}
+                                <button type="button" class="sv-timepicker__hour-btn in-range" data-hour="{{ h }}"
+                                        aria-label="{{ h|stringformat:'02d' }}:00">
+                                    {{ h|stringformat:"02d" }}h
+                                </button>
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <div class="sv-timepicker__inputs">
+                        <div class="sv-timepicker__input-col">
+                            <label class="sv-label sv-label--xs" for="franja-select-desde">Desde</label>
+                            <select class="sv-select sv-time-select" id="franja-select-desde">
+                                {% for h in horas %}
+                                    <option value="{{ h }}">{{ h|stringformat:"02d" }}:00</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <span class="sv-timepicker__inputs-sep" aria-hidden="true">–</span>
+                        <div class="sv-timepicker__input-col">
+                            <label class="sv-label sv-label--xs" for="franja-select-hasta">Hasta</label>
+                            <select class="sv-select sv-time-select" id="franja-select-hasta">
+                                {% for h in horas %}
+                                    <option value="{{ h }}" {% if h == 23 %}selected{% endif %}>{{ h|stringformat:"02d" }}:00</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </details>
         </div>
 
         <div class="l-field">
@@ -334,6 +380,11 @@
             </article>
         </section>
 
+        {# -------------------------------------------------------- TIEMPOS MUERTOS #}
+        <section class="l-mb-md">
+            {% include "metrics/_card_tiempos_muertos.html" %}
+        </section>
+
         {# ------------------------------------------------------------- DESGLOSES #}
         <section class="l-grid l-grid--halves">
             <article class="sv-card l-card--flush">
@@ -413,10 +464,6 @@
                     </table>
                 </div>
             </article>
-
-            {% comment %} Tercera tarjeta del grid `halves` (auto-fit minmax(340px,1fr)):
-               pasa a 3 columnas en pantallas anchas sin tocar el CSS. {% endcomment %}
-            {% include "metrics/_card_tiempos_muertos.html" %}
         </section>
 
         {# --------------------------------------------------------- PETICIONES #}
