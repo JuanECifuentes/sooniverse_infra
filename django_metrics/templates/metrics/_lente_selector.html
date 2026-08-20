@@ -1,0 +1,13 @@
+{% comment %}
+Selector de lente de la tarjeta de gráfica. Reutiliza el componente .sv-segment
+de los rangos rápidos, pero con aria-pressed: aquí sí es un grupo de estado
+(qué vista está activa), no un disparador de acción.
+{% endcomment %}
+<div class="sv-segment" id="metrics-lente" role="group" aria-label="Vista de la gráfica">
+    <button type="button" class="sv-segment__item sv-segment__item--active"
+            data-lente="serie" aria-pressed="true">Serie</button>
+    <button type="button" class="sv-segment__item"
+            data-lente="heatmap" aria-pressed="false">Mapa semanal</button>
+    <button type="button" class="sv-segment__item"
+            data-lente="perfil" aria-pressed="false">Perfil horario</button>
+</div>

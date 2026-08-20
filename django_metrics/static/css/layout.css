@@ -98,6 +98,10 @@ html, body { margin: 0; padding: 0; min-height: 100%; }
 .l-spacer          { flex: 1 1 auto; }
 
 .l-mt-lg { margin-top: 32px; }
+/* `l-mt-sm` ya se usaba en dashboard.html sin estar definida (no-op silencioso);
+   se declara aquí para que el espaciado sea el que el marcado pretendía. */
+.l-mt-sm { margin-top: 8px; }
+.l-mb-sm { margin-bottom: 8px; }
 .l-mb-md { margin-bottom: 18px; }
 .l-mb-lg { margin-bottom: 32px; }
 
@@ -293,3 +297,58 @@ span.flatpickr-weekday  { flex: 1; text-align: center; font-size: 11px; padding:
     .sv-table--responsive td          { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 6px 0; text-align: right; white-space: normal; }
     .sv-table--responsive td::before  { content: attr(data-label); text-align: left; white-space: nowrap; }
 }
+
+/* =============================================================================
+   RITMO DE USO Y CAPACIDAD (solo estructura; el color vive en el tema)
+   ============================================================================= */
+
+/* Mismo alto que .l-chart-canvas-wrap para que cambiar de lente no reflote la
+   página. El canvas de matriz necesita un contenedor de alto fijo igual que
+   cualquier otra gráfica de Chart.js. */
+.l-heatmap-wrap { position: relative; height: 280px; }
+
+.l-heatmap__legend {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 10px;
+}
+.l-heatmap__step   { display: inline-flex; align-items: center; gap: 5px; }
+.l-heatmap__swatch { width: 16px; height: 12px; flex: 0 0 16px; }
+
+/* Medidor de margen */
+.l-meter        { position: relative; height: 10px; width: 100%; }
+.l-meter__fill  { position: absolute; inset: 0 auto 0 0; }
+.l-meter__mark  { position: absolute; top: -3px; bottom: -3px; width: 1px; }
+.l-meter__foot  { display: flex; justify-content: space-between; margin-top: 6px; }
+
+/* Curva de degradación de la página de capacidad */
+.l-capacidad-curva { position: relative; height: 340px; }
+
+/* Ficha clave/valor del hardware medido */
+.sv-ficha       { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 0; }
+.sv-ficha dt    { margin: 0; }
+.sv-ficha dd    { margin: 0; text-align: right; }
+
+/* Barra de deltas del periodo anterior */
+.l-comparativa {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 16px;
+    padding-top: 10px;
+    margin-top: 12px;
+}
+
+@media (max-width: 720px) {
+    /* 24 columnas comprimidas en 320 px son ilegibles: mejor scroll horizontal
+       dentro de la tarjeta que una rejilla que no se puede leer. */
+    .l-heatmap-scroll { overflow-x: auto; }
+    .l-heatmap-wrap   { min-width: 620px; }
+    .l-capacidad-curva { height: 260px; }
+}
+
+/* Casilla suelta fuera de un multiselect (opciones del dashboard). Reutiliza el
+   estilo de casilla del multiselect, definido en theme-sooniverse.css. */
+.sv-check { display: flex; align-items: center; gap: 8px; padding: 3px 0; cursor: pointer; }

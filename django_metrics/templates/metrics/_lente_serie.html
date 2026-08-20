@@ -1,0 +1,22 @@
+{% comment %}
+Lente "Serie": la gráfica de barras apiladas de siempre, extraída tal cual del
+dashboard para que las tres lentes compartan estructura. No cambia nada de su
+comportamiento; la sigue pintando metrics-charts.js.
+{% endcomment %}
+<div class="l-chart-canvas-wrap">
+    <canvas id="metrics-chart-canvas" role="img" aria-describedby="metrics-chart-table-caption"></canvas>
+</div>
+<table class="sv-table sv-visually-hidden" id="metrics-chart-table">
+    <caption id="metrics-chart-table-caption">
+        Consumo de tokens por periodo (los mismos datos representados en la gráfica)
+    </caption>
+    <thead>
+        <tr>
+            <th scope="col">Periodo</th>
+            <th scope="col" class="sv-num">Prompt</th>
+            <th scope="col" class="sv-num">Completion</th>
+            <th scope="col" class="sv-num">Total</th>
+        </tr>
+    </thead>
+    <tbody id="metrics-chart-table-body"></tbody>
+</table>

@@ -27,7 +27,17 @@ echo "[metrics] Aplicando migraciones internas de Django..."
 python manage.py migrate --noinput || echo "[metrics] WARNING: migrate falló; el panel puede operar en modo lectura."
 
 echo "[metrics] Recolectando estáticos..."
-python manage.py collectstatic --noinput --clear >/dev/null 2>&1 || true
+# El '>/dev/null 2>&1 || true' anterior ocultó durante mucho tiempo un fallo
+# real: un sourceMappingURL de un .js vendorizado apuntaba a un .map que no se
+# distribuye, collectstatic abortaba y NUNCA se escribía staticfiles.json. El
+# panel seguía funcionando porque WhiteNoise cae a rutas sin hash, así que ni el
+# cache-busting ni la precompresión se estaban aplicando y nadie se enteró.
+# Ahora el error se ve; no se aborta el arranque porque el panel sigue siendo
+# usable con estáticos sin hash, pero tiene que quedar en los logs.
+if ! python manage.py collectstatic --noinput --clear; then
+    echo "[metrics] WARNING: collectstatic falló. El panel servirá los estáticos SIN hash"
+    echo "[metrics]          (sin cache-busting ni precompresión). Revisa el error de arriba."
+fi
 
 # Superusuario opcional e idempotente para acceder al panel.
 if [ -n "${DJANGO_SUPERUSER_PASSWORD:-}" ]; then

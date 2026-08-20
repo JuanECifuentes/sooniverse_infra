@@ -15,6 +15,15 @@ Uso:
     python scripts/db_setup.py --refresh             # aplica + corre ETL y rollups
     python scripts/db_setup.py --sql-dir database    # equivalente al default, explícito
     python scripts/db_setup.py --sql database/001_init_schema.sql   # un solo archivo (legado)
+
+Mantenimiento (operaciones puntuales, no parte del despliegue):
+    python scripts/db_setup.py --recompute-rollups 3650
+        Recalcula TODOS los rollups con la zona horaria de reporte actual. Necesario
+        una única vez tras instalar 004 (los buckets antiguos se cortaron en UTC) y
+        cada vez que cambie TIME_ZONE en el .env.
+    python scripts/db_setup.py --backfill 3650
+        Reingesta el histórico de litellm."LiteLLM_SpendLogs" por lotes para rellenar
+        latency_ms / ttft_ms / status / worker_endpoint en filas ya ingeridas.
 """
 
 import argparse
@@ -29,6 +38,12 @@ DEFAULT_SQL_DIR = REPO_ROOT / "database"
 
 REQUIRED_KEYS = ("DB_NAME", "DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT")
 
+# Zona horaria con la que se cortan los buckets de agregación. NO va en
+# REQUIRED_KEYS: es opcional y tiene un default sensato. Debe coincidir con
+# django_metrics/sooniverse_panel/settings.py::TIME_ZONE, o el panel mostraría
+# los días desplazados respecto a como se agregaron.
+DEFAULT_TIMEZONE = "America/Bogota"
+
 # Objetos que deben existir tras una ingesta correcta del esquema.
 EXPECTED_TABLES = (
     "api_key_registry",
@@ -40,6 +55,9 @@ EXPECTED_TABLES = (
     "infra_resource",
     "infra_event",
     "model_capability",
+    "app_setting",
+    "usage_hourly",
+    "capacity_benchmark",
 )
 
 
@@ -88,6 +106,35 @@ def resolve_db_config(env_path: Path) -> Dict[str, str]:
         )
 
     return config
+
+
+def resolve_timezone(env_path: Path) -> str:
+    """Zona horaria de reporte, con la misma precedencia que `resolve_db_config`
+    (el archivo manda sobre el entorno del proceso)."""
+    from_file = parse_env_file(env_path) if env_path.exists() else {}
+    return from_file.get("TIME_ZONE") or os.environ.get("TIME_ZONE") or DEFAULT_TIMEZONE
+
+
+def sync_reporting_timezone(conn, timezone: str) -> None:
+    """Persiste la zona en `sooniverse.app_setting` para que el corte de buckets
+    sea el mismo lo dispare quien lo dispare (Django, este script o un cron con
+    psql). Ver el bloque 1 de database/004_usage_analytics.sql."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM sooniverse.app_setting WHERE key = 'reporting_timezone'")
+        row = cur.fetchone()
+        anterior = row[0] if row else None
+
+        cur.execute(
+            "INSERT INTO sooniverse.app_setting (key, value) VALUES ('reporting_timezone', %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            (timezone,),
+        )
+    conn.commit()
+
+    if anterior and anterior != timezone:
+        print(f"[WARNING] La zona de reporte cambió ({anterior} -> {timezone}). Los buckets "
+              f"históricos siguen cortados con la anterior; realinéalos con:\n"
+              f"          python scripts/db_setup.py --recompute-rollups 3650")
 
 
 def connect(config: Dict[str, str]):
@@ -191,15 +238,55 @@ def verify_schema(conn) -> bool:
     return ok
 
 
-def refresh_metrics(conn, since_hours: int = 48, since_days: int = 90) -> None:
-    """Corre el ETL desde LiteLLM y recalcula las agregaciones daily/weekly/monthly."""
+def refresh_metrics(conn, since_hours: int = 48, since_days: int = 90,
+                    timezone: Optional[str] = None) -> None:
+    """Corre el ETL desde LiteLLM y recalcula agregaciones diarias/semanales/
+    mensuales y horarias. La zona se pasa explícita para no depender del
+    `TimeZone` de la sesión (ver database/004_usage_analytics.sql)."""
+    # La ventana horaria se acota a 30 días: es la que alimenta el mapa de calor
+    # y recalcular percentiles sobre eventos crudos de 90 días en cada refresco
+    # periódico no compensa.
+    hourly_days = min(since_days, 30)
+
     with conn.cursor() as cur:
         cur.execute("SELECT sooniverse.ingest_litellm_spendlogs(%s)", (since_hours,))
         ingested = cur.fetchone()[0]
-        cur.execute("SELECT sooniverse.refresh_usage_rollups(%s)", (since_days,))
+        cur.execute("SELECT sooniverse.refresh_usage_rollups(%s, %s)", (since_days, timezone))
         rolled = cur.fetchone()[0]
+        cur.execute("SELECT sooniverse.refresh_usage_hourly(%s, %s)", (hourly_days, timezone))
+        hourly = cur.fetchone()[0]
     conn.commit()
-    print(f"[OK] ETL: {ingested} eventos nuevos | Rollups recalculados: {rolled} filas")
+    print(f"[OK] ETL: {ingested} eventos nuevos | Rollups: {rolled} filas | "
+          f"Horario: {hourly} buckets")
+
+
+def recompute_rollups(conn, since_days: int, timezone: Optional[str] = None) -> None:
+    """Recalcula TODO el histórico con la zona actual. Operación puntual: los
+    buckets creados antes de 004 se cortaron en UTC mientras el panel renderiza
+    en hora local, así que hasta esta pasada los días de la frontera están
+    desplazados."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT sooniverse.refresh_usage_rollups(%s, %s)", (since_days, timezone))
+        rolled = cur.fetchone()[0]
+        cur.execute("SELECT sooniverse.refresh_usage_hourly(%s, %s)", (since_days, timezone))
+        hourly = cur.fetchone()[0]
+    conn.commit()
+    print(f"[OK] Recalculado con zona '{timezone or 'la de app_setting'}': "
+          f"{rolled} filas de rollup | {hourly} buckets horarios")
+
+
+def backfill_events(conn, since_days: int) -> None:
+    """Reingesta el histórico de SpendLogs por lotes para rellenar los campos que
+    el ETL antiguo nunca escribió (latencia, TTFT, estado, worker)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT sooniverse.backfill_litellm_spendlogs(%s)", (since_days,))
+        total = cur.fetchone()[0]
+        for notice in getattr(conn, "notices", [])[-20:]:
+            print(f"   [PG] {notice.strip()}")
+    conn.commit()
+    print(f"[OK] Backfill: {total} fila(s) insertada(s) o enriquecida(s).")
+    print("[INFO] El backfill reescribe filas antiguas. Recomendado a continuación:")
+    print("       VACUUM (ANALYZE) sooniverse.token_usage_event;")
 
 
 def main() -> int:
@@ -215,6 +302,16 @@ def main() -> int:
     )
     parser.add_argument("--check", action="store_true", help="Solo verificar conexión y estado del esquema")
     parser.add_argument("--refresh", action="store_true", help="Tras aplicar, corre ETL de LiteLLM y rollups")
+    parser.add_argument(
+        "--recompute-rollups", nargs="?", type=int, const=3650, default=None, metavar="DIAS",
+        help="Recalcula los rollups y la agregación horaria de los últimos DIAS días (def. 3650) "
+             "con la zona de reporte actual. Operación puntual, no parte del despliegue.",
+    )
+    parser.add_argument(
+        "--backfill", nargs="?", type=int, const=3650, default=None, metavar="DIAS",
+        help="Reingesta por lotes el histórico de SpendLogs para rellenar latencia/estado/worker "
+             "en filas ya ingeridas.",
+    )
     parser.add_argument("--quiet", action="store_true", help="Reduce la salida a errores")
     args = parser.parse_args()
 
@@ -222,15 +319,24 @@ def main() -> int:
 
     try:
         config = resolve_db_config(env_path)
+        timezone = resolve_timezone(env_path)
         if not args.quiet:
             print(f"[SOONIVERSE DB] Objetivo: {config['DB_USER']}@{config['DB_HOST']}:"
-                  f"{config['DB_PORT']}/{config['DB_NAME']}")
+                  f"{config['DB_PORT']}/{config['DB_NAME']} | zona de reporte: {timezone}")
 
         conn = connect(config)
         try:
             if args.check:
                 healthy = verify_schema(conn)
                 return 0 if healthy else 2
+
+            # Mantenimiento: opera sobre un esquema ya aplicado, no lo reaplica.
+            if args.recompute_rollups is not None or args.backfill is not None:
+                if args.backfill is not None:
+                    backfill_events(conn, args.backfill)
+                if args.recompute_rollups is not None:
+                    recompute_rollups(conn, args.recompute_rollups, timezone)
+                return 0
 
             if args.sql:
                 apply_schema(conn, Path(args.sql))
@@ -239,10 +345,11 @@ def main() -> int:
                 if not args.quiet:
                     print(f"[OK] {len(applied)} archivo(s) aplicado(s): {', '.join(applied)}")
 
+            sync_reporting_timezone(conn, timezone)
             verify_schema(conn)
 
             if args.refresh:
-                refresh_metrics(conn)
+                refresh_metrics(conn, timezone=timezone)
         finally:
             conn.close()
 

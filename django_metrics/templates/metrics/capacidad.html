@@ -1,0 +1,193 @@
+{% extends "metrics/base.html" %}
+{% load static humanize metrics_extras %}
+
+{% block titulo %}Capacidad{% endblock %}
+
+{% block contenido %}
+<div id="capacidad-live" class="sv-visually-hidden" aria-live="polite" role="status"></div>
+
+<section class="l-page-head l-mb-lg">
+    <div class="l-stack l-stack--tight">
+        <span class="sv-eyebrow">Infraestructura</span>
+        <h1>Capacidad y margen</h1>
+        <p class="sv-help">
+            Techo medido por la fase <span class="sv-mono">capacidad</span> del despliegue
+            (<span class="sv-mono">scripts/benchmark_capacity.py</span>): una rampa acotada de
+            concurrencia que para en cuanto la latencia degrada, no busca el punto de rotura.
+        </p>
+    </div>
+
+    {% if corridas %}
+        <div class="l-field">
+            <label class="sv-label" for="capacidad-corrida">Corrida</label>
+            <select class="sv-input" id="capacidad-corrida">
+                {% for c in corridas %}
+                    <option value="{{ c.run_id }}">{{ c.etiqueta }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    {% endif %}
+</section>
+
+<div id="capacidad-panel"
+     data-api-url="{% url 'metrics:capacidad_api' %}"
+     data-csrf="{{ csrf_token }}"
+     data-desde="{{ desde_activa|date:'Y-m-d' }}"
+     data-hasta="{{ hasta_activa|date:'Y-m-d' }}">
+
+{{ capacidad_payload|json_script:"capacidad-payload" }}
+
+{% if not corrida %}
+    <div class="sv-alert sv-alert--info l-mb-lg">
+        <span>
+            Todavía no hay ninguna medición de capacidad para
+            <span class="sv-mono">{{ CLIENTE_ID }}-{{ ENTORNO }}</span>. Ejecuta
+            <span class="sv-mono">python scripts/generate_infra.py --run --only capacidad</span>
+            o espera al próximo despliegue completo.
+        </span>
+    </div>
+{% endif %}
+
+{# --------------------------------------------------------------------- KPIs #}
+<section class="l-grid l-grid--kpi l-mb-lg">
+    <article class="sv-card sv-card--metric">
+        <div class="l-kpi">
+            <span class="sv-eyebrow">Techo sostenido</span>
+            <span class="l-kpi__value">
+                <span class="sv-metric" data-cap="techo_rpm">{{ margen.techo_rpm|default:"—" }}</span>
+            </span>
+            <span class="l-kpi__foot sv-mono sv-muted">peticiones / minuto</span>
+        </div>
+    </article>
+
+    <article class="sv-card sv-card--metric">
+        <div class="l-kpi">
+            <span class="sv-eyebrow">Tokens de salida</span>
+            <span class="l-kpi__value">
+                <span class="sv-metric" data-cap="techo_tokens">{{ margen.techo_tokens_min|default:"—" }}</span>
+            </span>
+            <span class="l-kpi__foot sv-mono sv-muted">tokens / minuto</span>
+        </div>
+    </article>
+
+    <article class="sv-card sv-card--infra">
+        <div class="l-kpi">
+            <span class="sv-eyebrow">Concurrencia sin degradar</span>
+            <span class="l-kpi__value">
+                <span class="sv-metric" data-cap="rodilla">{{ margen.techo_concurrencia|default:"—" }}</span>
+            </span>
+            <span class="l-kpi__foot sv-mono sv-muted">
+                ≈ <span data-cap="usuarios">{{ corrida.usuarios_estimados|default:"—" }}</span> usuarios
+                {% include "metrics/_tooltip.html" with text="Traducción de slots concurrentes a personas: una persona chateando mantiene una petición activa solo una fracción del tiempo. El factor exacto se guarda en las notas de la corrida." %}
+            </span>
+        </div>
+    </article>
+
+    <article class="sv-card sv-card--secure">
+        <div class="l-kpi">
+            <span class="sv-eyebrow">Pico observado</span>
+            <span class="l-kpi__value">
+                <span class="sv-metric" data-cap="pico">{{ margen.pico_rpm }}</span>
+            </span>
+            <span class="l-kpi__foot sv-mono sv-muted">
+                peticiones / minuto
+                {% include "metrics/_tooltip.html" with text="Tráfico real, excluyendo el del propio benchmark: si no, el pico observado sería siempre el test de estrés y el semáforo estaría en rojo permanente." %}
+            </span>
+        </div>
+    </article>
+</section>
+
+{# ------------------------------------------------- CURVA + MARGEN Y PROYECCIÓN #}
+<section class="l-grid l-grid--split l-mb-lg">
+    <article class="sv-card l-card--flush">
+        <div class="l-card__head">
+            <div class="l-stack l-stack--tight">
+                <span class="sv-eyebrow">Rampa de concurrencia</span>
+                <h3>Curva de degradación</h3>
+            </div>
+        </div>
+        <div class="l-card__body">
+            <div class="l-capacidad-curva">
+                <canvas id="capacidad-curva-canvas" role="img"
+                        aria-describedby="capacidad-curva-caption"></canvas>
+            </div>
+            <p class="sv-help l-mt-sm" id="capacidad-curva-nota"></p>
+        </div>
+    </article>
+
+    <article class="sv-card">
+        <div class="l-stack l-stack--tight l-mb-md">
+            <span class="sv-eyebrow">Margen</span>
+            <h3>¿Se está quedando corta?</h3>
+        </div>
+
+        <div id="capacidad-medidor">
+            {% include "metrics/_medidor_margen.html" %}
+        </div>
+
+        <div class="sv-divider"></div>
+
+        <div class="l-stack l-stack--tight">
+            <span class="sv-eyebrow">Proyección</span>
+            {% if proyeccion.confiable %}
+                <p class="sv-metric-sm" data-cap="semanas">
+                    ≈ {{ proyeccion.semanas_al_techo }} semanas al techo
+                </p>
+            {% else %}
+                <p class="sv-strong" data-cap="semanas">Sin tendencia clara</p>
+            {% endif %}
+            {% comment %} Un número de semanas sin el intervalo que lo respalda invita a
+               tomar decisiones de gasto sobre ruido estadístico. {% endcomment %}
+            <p class="sv-help" data-cap="proyeccion-nota">{{ proyeccion.explicacion }}</p>
+        </div>
+    </article>
+</section>
+
+{# ------------------------------------------------------ FICHA + TABLA DE CURVA #}
+<section class="l-grid l-grid--halves">
+    <article class="sv-card">
+        <div class="l-stack l-stack--tight l-mb-md">
+            <span class="sv-eyebrow">Condiciones de la medición</span>
+            <h3>Bajo qué configuración se midió</h3>
+        </div>
+        {% include "metrics/_ficha_hardware.html" %}
+    </article>
+
+    <article class="sv-card l-card--flush">
+        <div class="l-card__head">
+            <div class="l-stack l-stack--tight">
+                <span class="sv-eyebrow">Detalle</span>
+                <h3>Resultados por nivel</h3>
+            </div>
+        </div>
+        <div class="l-card__body l-table-wrap">
+            {# Visible, no oculta: son 5-12 filas y el operador las quiere leer. #}
+            <table class="sv-table sv-table--responsive">
+                <caption class="sv-visually-hidden" id="capacidad-curva-caption">
+                    Resultados por nivel de concurrencia: peticiones, throughput, latencia p95
+                    y tasa de error. Los mismos datos representados en la curva de degradación.
+                </caption>
+                <thead>
+                    <tr>
+                        <th scope="col" class="sv-num">Conc.</th>
+                        <th scope="col" class="sv-num">Pet.</th>
+                        <th scope="col" class="sv-num">Tok/s</th>
+                        <th scope="col" class="sv-num">p95</th>
+                        <th scope="col" class="sv-num">TTFT p95</th>
+                        <th scope="col" class="sv-num">Error</th>
+                    </tr>
+                </thead>
+                <tbody id="capacidad-curva-body">
+                    <tr><td colspan="6" class="sv-help">Sin corridas registradas.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </article>
+</section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'js/vendor/chart.umd.min.js' %}"></script>
+<script type="module" src="{% static 'js/capacidad.js' %}"></script>
+{% endblock %}
