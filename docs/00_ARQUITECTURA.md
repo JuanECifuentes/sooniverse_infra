@@ -132,6 +132,23 @@ sooniverse.model_capability (columnas effective_* GENERATED, fail-closed)
                      vía la API HTTP pública de Open WebUI, nunca su ORM interno)
 ```
 
+### 4.8 ¿Por qué la agregación horaria vive en su propia tabla (`usage_hourly`) y no como una granularidad más de `token_usage_rollup`?
+
+La pregunta de negocio que motivó esta tabla —"¿en qué momento del fin de semana está sin uso la máquina?"— es **incontestable** con el rollup existente: `token_usage_rollup.bucket_start` es de tipo `DATE`, así que la agregación más fina que puede representar es un día completo. No hay forma de saber si un sábado tuvo tráfico a las 10:00 o a las 23:00.
+
+La opción aparentemente barata (añadir `'hourly'` al `CHECK` de `granularity` y ensanchar `bucket_start` a `TIMESTAMPTZ`) rompe cuatro cosas a la vez:
+
+- El `CHECK (granularity IN ('daily','weekly','monthly'))` y el índice único `(granularity, bucket_start, api_key_key, model_name)`.
+- El modelo Django `TokenUsageRollup.bucket_start = DateField` (`django_metrics/metrics/models.py`), y con él todo el panel que ya lee esa tabla.
+- Todas las filas existentes, que habría que migrar.
+- La semántica de las vistas `v_usage_daily`/`v_usage_weekly`/`v_usage_monthly`, que asumen un día por fila.
+
+Y, aun pagando ese precio, el rollup **no tendría sitio** para lo que la analítica horaria necesita de verdad: percentiles de latencia y las dimensiones locales precalculadas. `sooniverse.usage_hourly` guarda, junto a los contadores, `bucket_local_date` / `bucket_local_hour` / `bucket_local_isodow` ya cortados en la zona de reporte, de modo que el mapa de calor agrupa por columnas indexadas en vez de recalcular un `EXTRACT(... AT TIME ZONE ...)` en cada consulta.
+
+**Regla que todo consumidor debe respetar: los percentiles NO se recombinan.** `latency_p95_ms` es el p95 *de esa hora concreta*. Promediar (o sacar el máximo de) los p95 de los trece lunes de un trimestre **no da** el p95 del lunes: un percentil no es una media, y no existe ninguna operación aritmética que reconstruya el percentil del conjunto a partir de los percentiles de sus partes. Para un percentil sobre cualquier ventana mayor de una hora hay que volver a los eventos crudos, y la única vía soportada para hacerlo es la función `sooniverse.latency_percentiles(desde, hasta, api_keys[], modelos[], incluir_cache)`.
+
+Lo que sí es recombinable, y por eso se guarda explícitamente, es el par `latency_sum_ms` / `latency_count`: permite una media ponderada honesta entre buckets sin tocar `token_usage_event`. La vista `sooniverse.v_usage_heatmap` usa exactamente ese par para su columna `latency_media_ms`, y expone `p95_peor_hora` con un nombre deliberadamente incómodo (es el **máximo** de los p95 horarios, no el p95 agregado) para que nadie lo confunda con lo segundo.
+
 ## 5. Componentes y dónde viven
 
 | Componente | Archivo(s) | Rol |
@@ -140,7 +157,13 @@ sooniverse.model_capability (columnas effective_* GENERATED, fail-closed)
 | Validación del contrato | `scripts/generate_infra.py::ConfigValidator` | Falla rápido antes de tocar AWS/BD |
 | Red AWS | `scripts/aws_network.py::AwsNetworkManager` | VPC/subredes/NAT/IGW/route tables/SGs |
 | Estado persistente | `scripts/infra_state.py::PostgresInfraStateStore` | Mecanismo de propiedad, auditoría |
-| Orquestación | `scripts/generate_infra.py::deploy()` | Máquina de fases: network→gateway→workers→endpoints→capabilities→verify |
+| Orquestación | `scripts/generate_infra.py::deploy()` | Máquina de fases: network→gateway→workers→endpoints→capabilities→capacidad→verify |
+| Esquema de analítica de uso | `database/004_usage_analytics.sql` | ETL enriquecido (latencia/TTFT/estado/worker), `usage_hourly`, `app_setting`, corte de buckets en hora local |
+| Esquema del benchmark | `database/005_capacity_benchmark.sql` | `sooniverse.capacity_benchmark`: techo medido + snapshot de la config bajo la que se midió |
+| Benchmark de capacidad | `scripts/benchmark_capacity.py` | Rampa acotada de concurrencia desde el propio Gateway; responde "¿cuánto aguanta la infra antes de degradar?" |
+| Analítica de ritmo de uso | `django_metrics/metrics/analytics.py` | Mapa de calor semanal, perfil horario y detección de ventanas ociosas |
+| Margen y proyección | `django_metrics/metrics/capacidad.py` | Cruza el techo medido con el pico observado; proyección con puerta de confianza (r²) |
+| Filtros temporales del panel | `django_metrics/metrics/filtros.py` | Único punto donde se resuelve la zona horaria del panel; evita que vuelva a colarse un corte en UTC |
 | Descubrimiento/sync | `scripts/sync_endpoints.py` | IPs privadas de workers → `litellm_config.yaml` |
 | Render del stack Gateway | `scripts/render_gateway_stack.py` | nginx + docker-compose desde el contrato |
 | Interfaz de chat | `docker_images/openwebui/` | Open WebUI vendorizado (imagen derivada, tag fijo, Postgres/esquema `sooniverse`, overlay visual, patches) |

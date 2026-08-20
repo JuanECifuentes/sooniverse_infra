@@ -1,7 +1,13 @@
 /**
  * Filtrado asíncrono del panel de métricas. Sin dependencias, sin build step.
  * Dueño único del estado de filtros; el DOM se deriva de `state`.
+ *
+ * Otros módulos (metrics-lente.js, metrics-heatmap.js) NUNCA mutan `state`:
+ * emiten "metrics:filtro-sugerido" y este archivo decide. Así el estado sigue
+ * teniendo un solo dueño aunque haya varios productores de intención.
  */
+
+import { escapeHtml, fmtInt, fmtPct, fmtTok, fmtUsd } from "./format.js";
 
 const panel = document.getElementById("metrics-panel");
 if (panel) {
@@ -39,14 +45,27 @@ if (panel) {
     peticionesNext: document.getElementById("peticiones-next"),
     peticionesPageLabel: document.getElementById("peticiones-page-label"),
     sortButtons: document.querySelectorAll(".l-sort-btn"),
+    // -- filtros de ritmo de uso --
+    horaDesde: document.getElementById("id_hora_desde"),
+    horaHasta: document.getElementById("id_hora_hasta"),
+    horaError: document.getElementById("metrics-hora-error"),
+    estado: document.getElementById("metrics-estado"),
+    incluirBenchmark: document.getElementById("id_incluir_benchmark"),
+    comparar: document.getElementById("id_comparar"),
+    atajosDow: document.getElementById("dow-atajos"),
+    // -- tiempos muertos --
+    ocioVentanas: document.getElementById("ocio-ventanas-body"),
+    ocioCoste: document.getElementById("ocio-coste-col"),
+    cardOcio: document.getElementById("card-tiempos-muertos"),
+    // -- comparativa --
+    comparativaBox: document.getElementById("metrics-comparativa"),
   };
 
   const multiselects = {
     modelo: document.querySelector('[data-filter-group="modelo"]'),
     api_key: document.querySelector('[data-filter-group="api_key"]'),
+    dow: document.querySelector('[data-filter-group="dow"]'),
   };
-
-  const fmtInt = (n) => Number(n || 0).toLocaleString("es-ES");
 
   // Los presets fijan la fecha programáticamente; si flatpickr ya tomó el
   // control del input (ver datepicker.js), asignar `.value` directo no
@@ -57,32 +76,15 @@ if (panel) {
     else el.value = value;
   }
 
-  // Contadores de tokens (no peticiones/costes): igual que human_tokens del
-  // servidor. >=1.000.000 -> "2,5M"; >=100.000 -> "125K"; si no, separador de miles.
-  function fmtCompacto(n, divisor, sufijo) {
-    let texto = (n / divisor).toFixed(1);
-    if (texto.endsWith(".0")) texto = texto.slice(0, -2);
-    return `${texto.replace(".", ",")}${sufijo}`;
-  }
-  function fmtTok(n) {
-    n = Number(n || 0);
-    if (Math.abs(n) >= 1_000_000) return fmtCompacto(n, 1_000_000, "M");
-    if (Math.abs(n) >= 100_000) return fmtCompacto(n, 1_000, "K");
-    return fmtInt(n);
-  }
-
-  function escapeHtml(str) {
-    return String(str).replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[c]));
-  }
-
   function readCheckedValues(group) {
+    if (!multiselects[group]) return [];
     return [...multiselects[group].querySelectorAll("input[type=checkbox]:checked")].map((cb) => cb.value);
   }
 
   function findCheckbox(group, value) {
-    return [...multiselects[group].querySelectorAll("input[type=checkbox]")].find((cb) => cb.value === value);
+    if (!multiselects[group]) return null;
+    return [...multiselects[group].querySelectorAll("input[type=checkbox]")]
+      .find((cb) => cb.value === String(value));
   }
 
   function labelFor(group, value) {
@@ -95,8 +97,14 @@ if (panel) {
     granularity: els.granularity.querySelector(".sv-listbox__option--active")?.dataset.value || "daily",
     modelo: readCheckedValues("modelo"),
     api_key: readCheckedValues("api_key"),
+    dow: readCheckedValues("dow"),
     desde: els.desde.value,
     hasta: els.hasta.value,
+    hora_desde: 0,
+    hora_hasta: 23,
+    estado: "todas",
+    incluir_benchmark: false,
+    comparar: false,
     page: 1,
     sort: "fecha",
     dir: "desc",
@@ -112,10 +120,24 @@ if (panel) {
     if (s.hasta) p.set("hasta", s.hasta);
     s.modelo.forEach((m) => p.append("modelo", m));
     s.api_key.forEach((k) => p.append("api_key", k));
+    s.dow.forEach((d) => p.append("dow", d));
+    p.set("hora_desde", s.hora_desde);
+    p.set("hora_hasta", s.hora_hasta);
+    p.set("estado", s.estado);
+    if (s.incluir_benchmark) p.set("incluir_benchmark", "1");
+    if (s.comparar) p.set("comparar", "1");
     p.set("page", s.page);
     p.set("sort", s.sort);
     p.set("dir", s.dir);
     return p;
+  }
+
+  /** Parámetros que comparten metrics_api y lente_api: sin paginación ni orden,
+   *  que son justo los que más se reenvían y no afectan a las lentes. */
+  function buildParamsLente(s) {
+    const p = buildParams(s);
+    ["page", "sort", "dir", "granularity", "comparar"].forEach((k) => p.delete(k));
+    return p.toString();
   }
 
   function announce(msg) {
@@ -128,11 +150,28 @@ if (panel) {
     });
   }
 
+  const HORA = (h) => `${String(h).padStart(2, "0")}h`;
+
   function updateChips() {
     const items = [
       ...state.modelo.map((v) => ({ group: "modelo", value: v, label: labelFor("modelo", v) })),
       ...state.api_key.map((v) => ({ group: "api_key", value: v, label: labelFor("api_key", v) })),
+      ...state.dow.map((v) => ({ group: "dow", value: v, label: labelFor("dow", v) })),
     ];
+    if (state.hora_desde !== 0 || state.hora_hasta !== 23) {
+      items.push({ group: "franja", value: "franja",
+                   label: `${HORA(state.hora_desde)}–${HORA(state.hora_hasta)}` });
+    }
+    if (state.estado !== "todas") {
+      items.push({ group: "estado", value: "estado", label: "Solo errores" });
+    }
+    // Regla de honestidad: un filtro activo que no se ve en pantalla es un
+    // usuario engañado. La exclusión del benchmark es el default, así que TIENE
+    // que aparecer como chip, igual que cualquier otro filtro.
+    if (!state.incluir_benchmark) {
+      items.push({ group: "benchmark", value: "benchmark", label: "Benchmark excluido" });
+    }
+
     els.chips.innerHTML = items
       .map(
         (it) => `<span class="sv-chip">${escapeHtml(it.label)}
@@ -143,7 +182,8 @@ if (panel) {
       .join("");
 
     document.querySelectorAll("[data-count-for]").forEach((el) => {
-      const count = state[el.dataset.countFor].length;
+      const valor = state[el.dataset.countFor];
+      const count = Array.isArray(valor) ? valor.length : 0;
       el.hidden = count === 0;
       el.textContent = count || "";
     });
@@ -156,8 +196,13 @@ if (panel) {
   }
   const isoDate = (d) => d.toISOString().slice(0, 10);
 
+  const PRESETS = ["24h", "7d", "30d", "90d", "mes_actual"];
+
   function computePreset(preset) {
     const today = new Date();
+    // 24h fija además granularidad horaria: con la diaria devolvería un solo
+    // punto y la gráfica parecería rota.
+    if (preset === "24h") return { desde: isoDate(addDays(today, -1)), hasta: isoDate(today), granularity: "hourly" };
     if (preset === "7d") return { desde: isoDate(addDays(today, -7)), hasta: isoDate(today) };
     if (preset === "30d") return { desde: isoDate(addDays(today, -30)), hasta: isoDate(today) };
     if (preset === "90d") return { desde: isoDate(addDays(today, -90)), hasta: isoDate(today) };
@@ -170,7 +215,7 @@ if (panel) {
 
   function matchPreset(desde, hasta) {
     if (hasta !== isoDate(new Date())) return null;
-    for (const p of ["7d", "30d", "90d", "mes_actual"]) {
+    for (const p of PRESETS) {
       if (computePreset(p).desde === desde) return p;
     }
     return null;
@@ -224,8 +269,62 @@ if (panel) {
       .join("");
   }
 
+  function renderTiemposMuertos(tm) {
+    if (!tm || !els.cardOcio) return;
+    setField("pct_ocioso", fmtPct(tm.pct_ocioso));
+    setField("horas_ociosas", `${fmtInt(tm.horas_ociosas)} / ${fmtInt(tm.horas_totales)} h`);
+    setField("coste_ocioso", fmtUsd(tm.coste_ocioso_usd));
+
+    // Con coste/hora sin configurar (METRICS_COSTE_HORA_USD=0) se oculta la
+    // columna entera en vez de llenarla de $0,0000, que no informa de nada.
+    document.querySelectorAll("[data-coste-ocioso]").forEach((el) => {
+      el.hidden = !tm.mostrar_coste;
+    });
+
+    if (!els.ocioVentanas) return;
+    if (!tm.ventanas.length) {
+      els.ocioVentanas.innerHTML =
+        '<tr><td colspan="3" class="sv-help">Sin franjas ociosas en el rango.</td></tr>';
+      return;
+    }
+    els.ocioVentanas.innerHTML = tm.ventanas.map((v) => `
+      <tr>
+        <td data-label="Franja">${escapeHtml(v.etiqueta)}</td>
+        <td data-label="Horas" class="sv-num">${fmtInt(v.horas)}</td>
+        <td data-label="Coste" class="sv-num" data-coste-ocioso ${tm.mostrar_coste ? "" : "hidden"}>
+          ${fmtUsd(v.coste_usd)}</td>
+      </tr>`).join("");
+  }
+
+  function renderComparativa(comp) {
+    if (!els.comparativaBox) return;
+    if (!comp) {
+      els.comparativaBox.hidden = true;
+      return;
+    }
+    els.comparativaBox.hidden = false;
+    const delta = (v) => {
+      if (v === null || v === undefined) return '<span class="sv-muted">—</span>';
+      const signo = v > 0 ? "+" : "";
+      const tono = v > 0 ? "up" : (v < 0 ? "down" : "flat");
+      return `<span class="sv-delta" data-tono="${tono}">${signo}${fmtPct(v).replace(" %", "")} %</span>`;
+    };
+    els.comparativaBox.innerHTML = `
+      <span class="sv-muted sv-text-xs">vs ${escapeHtml(comp.desde)} → ${escapeHtml(comp.hasta)}:</span>
+      <span>Tokens ${delta(comp.delta_pct.total_tokens)}</span>
+      <span>Peticiones ${delta(comp.delta_pct.request_count)}</span>
+      <span>Tok/petición ${delta(comp.delta_pct.tokens_por_request)}</span>`;
+  }
+
   function render(data) {
     panel.dispatchEvent(new CustomEvent("metrics:data", { detail: data }));
+
+    // Las lentes (mapa de calor, perfil) usan su propio endpoint y necesitan
+    // los mismos filtros pero sin paginación ni orden.
+    panel.dispatchEvent(new CustomEvent("metrics:params", { detail: buildParamsLente(state) }));
+
+    renderTiemposMuertos(data.tiempos_muertos);
+    renderComparativa(data.comparativa);
 
     const isEmpty = data.summary.request_count === 0 && data.series.labels.length === 0;
     els.emptyBanner.hidden = !isEmpty;
@@ -303,6 +402,15 @@ if (panel) {
     }
     els.dateError.hidden = true;
     els.hasta.removeAttribute("aria-invalid");
+
+    if (els.horaError) {
+      const franjaInvalida = state.hora_desde > state.hora_hasta;
+      els.horaError.hidden = !franjaInvalida;
+      if (franjaInvalida) {
+        els.horaError.textContent = 'La hora "desde" no puede ser posterior a "hasta".';
+        return;
+      }
+    }
 
     updateChips();
     updatePresetHighlight();
@@ -386,13 +494,31 @@ if (panel) {
     });
   });
 
+  function limpiarFranja() {
+    state.hora_desde = 0;
+    state.hora_hasta = 23;
+    if (els.horaDesde) els.horaDesde.value = 0;
+    if (els.horaHasta) els.horaHasta.value = 23;
+  }
+
   els.chips.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-remove-group]");
     if (!btn) return;
     const { removeGroup: group, removeValue: value } = btn.dataset;
-    const cb = findCheckbox(group, value);
-    if (cb) cb.checked = false;
-    state[group] = state[group].filter((v) => v !== value);
+
+    if (group === "franja") {
+      limpiarFranja();
+    } else if (group === "estado") {
+      state.estado = "todas";
+      seleccionarListbox(els.estado, "todas");
+    } else if (group === "benchmark") {
+      state.incluir_benchmark = true;
+      if (els.incluirBenchmark) els.incluirBenchmark.checked = true;
+    } else {
+      const cb = findCheckbox(group, value);
+      if (cb) cb.checked = false;
+      state[group] = state[group].filter((v) => String(v) !== String(value));
+    }
     state.page = 1;
     applyFilters();
   });
@@ -404,8 +530,91 @@ if (panel) {
     if (!range) return;
     state.desde = range.desde;
     state.hasta = range.hasta;
+    if (range.granularity) state.granularity = range.granularity;
     setDateValue(els.desde, range.desde);
     setDateValue(els.hasta, range.hasta);
+    state.page = 1;
+    applyFilters();
+  });
+
+  // -- filtros de ritmo de uso -------------------------------------------------
+  function seleccionarListbox(contenedor, valor) {
+    if (!contenedor) return;
+    contenedor.querySelectorAll("[data-value]").forEach((btn) => {
+      const activo = btn.dataset.value === valor;
+      btn.classList.toggle("sv-listbox__option--active", activo);
+      btn.setAttribute("aria-selected", activo ? "true" : "false");
+      if (activo) {
+        const label = contenedor.querySelector("[data-listbox-label]");
+        if (label) label.textContent = btn.textContent.trim();
+      }
+    });
+  }
+
+  [els.horaDesde, els.horaHasta].forEach((input) => {
+    if (!input) return;
+    input.addEventListener("change", () => {
+      state.hora_desde = Math.max(0, Math.min(23, Number(els.horaDesde.value || 0)));
+      state.hora_hasta = Math.max(0, Math.min(23, Number(els.horaHasta.value ?? 23)));
+      els.horaDesde.value = state.hora_desde;
+      els.horaHasta.value = state.hora_hasta;
+      state.page = 1;
+      applyFilters();
+    });
+  });
+
+  if (els.estado) {
+    els.estado.querySelector(".sv-listbox__panel").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-value]");
+      if (!btn) return;
+      state.estado = btn.dataset.value;
+      seleccionarListbox(els.estado, state.estado);
+      els.estado.removeAttribute("open");
+      state.page = 1;
+      applyFilters();
+    });
+  }
+
+  [["incluirBenchmark", "incluir_benchmark"], ["comparar", "comparar"]].forEach(([el, clave]) => {
+    if (!els[el]) return;
+    els[el].addEventListener("change", () => {
+      state[clave] = els[el].checked;
+      state.page = 1;
+      applyFilters();
+    });
+  });
+
+  if (els.atajosDow) {
+    els.atajosDow.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-dow-preset]");
+      if (!btn) return;
+      const mapa = {
+        laborables: ["1", "2", "3", "4", "5"],
+        finde: ["6", "7"],
+        todos: [],
+      };
+      const seleccion = mapa[btn.dataset.dowPreset] || [];
+      multiselects.dow.querySelectorAll("input[type=checkbox]").forEach((cb) => {
+        cb.checked = seleccion.includes(cb.value);
+      });
+      state.dow = seleccion;
+      state.page = 1;
+      applyFilters();
+    });
+  }
+
+  // El mapa de calor propone un filtro (clic en celda); el estado sigue siendo
+  // de este archivo, que es quien lo aplica.
+  panel.addEventListener("metrics:filtro-sugerido", (e) => {
+    const { dow, hora_desde, hora_hasta } = e.detail;
+    state.dow = (dow || []).map(String);
+    multiselects.dow?.querySelectorAll("input[type=checkbox]").forEach((cb) => {
+      cb.checked = state.dow.includes(cb.value);
+    });
+    state.hora_desde = hora_desde ?? 0;
+    state.hora_hasta = hora_hasta ?? 23;
+    if (els.horaDesde) els.horaDesde.value = state.hora_desde;
+    if (els.horaHasta) els.horaHasta.value = state.hora_hasta;
     state.page = 1;
     applyFilters();
   });
@@ -465,4 +674,19 @@ if (panel) {
   updateChips();
   updatePresetHighlight();
   updateGranularityHighlight();
+
+  // Respaldo directo para metrics-lente.js: el orden de los <script
+  // type="module"> NO garantiza que su listener de "metrics:params" ya esté
+  // armado cuando este módulo ejecuta su código de nivel superior (este
+  // archivo se carga ANTES que metrics-lente.js). Sin esto, el evento de abajo
+  // se dispara al vacío y un usuario que entra a la página y hace clic en una
+  // lente antes de tocar cualquier filtro no vería nunca la primera petición
+  // -bug real, encontrado probando en el navegador, no solo en tests-.
+  panel.getParamsLente = () => buildParamsLente(state);
+
+  // El primer pintado lo hace el servidor con json_script; las lentes no
+  // reciben ese bootstrap, así que necesitan los parámetros iniciales para
+  // poder cargarse en cuanto el usuario abra una. Se dispara también por si
+  // algún oyente sí llegó a tiempo (no hace daño duplicar la señal).
+  panel.dispatchEvent(new CustomEvent("metrics:params", { detail: buildParamsLente(state) }));
 }

@@ -63,3 +63,38 @@ def test_workload_without_capacidades_defaults_to_current_behavior():
 
     assert envs["ENABLE_VISION"] == "1"
     assert envs["ENABLE_TOOL_CALLING"] == "0"
+
+
+# -- concurrencia del planificador de vLLM ------------------------------------
+def test_concurrencia_del_contrato_llega_a_los_envs():
+    cfg = load_base_config()
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    assert envs["MAX_NUM_SEQS"] == "16"
+    assert envs["MAX_NUM_BATCHED_TOKENS"] == "8192"
+
+
+def test_concurrencia_override_se_propaga():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["concurrencia"] = {"max_num_seqs": 32, "max_num_batched_tokens": 16384}
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    assert envs["MAX_NUM_SEQS"] == "32"
+    assert envs["MAX_NUM_BATCHED_TOKENS"] == "16384"
+
+
+def test_workload_sin_seccion_concurrencia_usa_los_defaults():
+    """Un contrato anterior a esta sección no debe quedarse con el viejo
+    max_num_seqs=2 del entrypoint, que era el techo real del sistema."""
+    cfg = clone(load_base_config())
+    del cfg["workloads"][0]["concurrencia"]
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    assert envs["MAX_NUM_SEQS"] == "16"
+    assert envs["MAX_NUM_BATCHED_TOKENS"] == "8192"
+
+
+def test_run_script_exporta_la_concurrencia():
+    """Sin estos export, los envs de SkyPilot no llegan a 'docker compose' y
+    vLLM arrancaría con los defaults del entrypoint."""
+    cfg = load_base_config()
+    run = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["run"]
+    assert 'export MAX_NUM_SEQS="${MAX_NUM_SEQS}"' in run
+    assert 'export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS}"' in run

@@ -19,7 +19,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from . import services
+from . import analytics, capacidad as cap_mod, filtros as ft, services
 from .forms import ApiKeyForm
 from .litellm_client import LiteLLMError
 from .models import ApiKeyRegistry, TokenUsageRollup
@@ -81,6 +81,70 @@ def _rango_por_defecto():
     return hasta - timedelta(days=settings.METRICS_DEFAULT_WINDOW_DAYS), hasta
 
 
+def _bool_post(request, clave: str) -> bool:
+    return request.POST.get(clave) in ("1", "true", "on", "yes")
+
+
+def _parse_filtros(request):
+    """Valida los filtros comunes a `metrics_api` y `lente_api`.
+
+    Devuelve `(FiltrosTemporales, None)` o `(None, JsonResponse 400)`. Está
+    extraído a propósito: con la validación duplicada en dos endpoints, ambas
+    divergirían en la primera corrección de bug.
+    """
+    desde_raw, hasta_raw = request.POST.get("desde"), request.POST.get("hasta")
+    desde, hasta = _date_or_none(desde_raw), _date_or_none(hasta_raw)
+    if desde_raw and not desde:
+        return None, JsonResponse(
+            {"error": f"Fecha 'desde' inválida: '{desde_raw}'. Usa AAAA-MM-DD."}, status=400)
+    if hasta_raw and not hasta:
+        return None, JsonResponse(
+            {"error": f"Fecha 'hasta' inválida: '{hasta_raw}'. Usa AAAA-MM-DD."}, status=400)
+    if desde and hasta and desde > hasta:
+        return None, JsonResponse({"error": "'desde' no puede ser posterior a 'hasta'."}, status=400)
+    if not desde and not hasta:
+        desde, hasta = _rango_por_defecto()
+    desde = desde or hasta
+    hasta = hasta or desde
+
+    dias_raw = request.POST.getlist("dow")
+    dias = []
+    for valor in dias_raw:
+        d = _int_or_none(valor)
+        if d is None or not (1 <= d <= 7):
+            return None, JsonResponse(
+                {"error": f"Día de la semana inválido: '{valor}'. Usa 1 (lunes) a 7 (domingo)."},
+                status=400)
+        dias.append(d)
+
+    hora_desde = _int_or_none(request.POST.get("hora_desde"))
+    hora_hasta = _int_or_none(request.POST.get("hora_hasta"))
+    hora_desde = 0 if hora_desde is None else hora_desde
+    hora_hasta = 23 if hora_hasta is None else hora_hasta
+    if not (0 <= hora_desde <= 23) or not (0 <= hora_hasta <= 23):
+        return None, JsonResponse({"error": "La franja horaria debe estar entre 0 y 23."}, status=400)
+    if hora_desde > hora_hasta:
+        return None, JsonResponse(
+            {"error": "'hora_desde' no puede ser posterior a 'hora_hasta'."}, status=400)
+
+    estado = request.POST.get("estado") or ft.ESTADO_TODAS
+    if estado not in dict(ft.ESTADOS):
+        return None, JsonResponse(
+            {"error": "'estado' inválido. Usa 'todas' o 'errores'."}, status=400)
+
+    return ft.FiltrosTemporales(
+        desde=desde,
+        hasta=hasta,
+        api_key_ids=tuple(_ints_or_none(request.POST.getlist("api_key")) or ()),
+        modelos=tuple(request.POST.getlist("modelo")),
+        dias_semana=tuple(sorted(set(dias))),
+        hora_desde=hora_desde,
+        hora_hasta=hora_hasta,
+        estado=estado,
+        incluir_benchmark=_bool_post(request, "incluir_benchmark"),
+    ), None
+
+
 # =============================================================================
 # MÓDULO DE MÉTRICAS
 # =============================================================================
@@ -103,14 +167,19 @@ def dashboard(request):
     metricas = services.obtener_metricas(granularity=granularity, desde=desde, hasta=hasta)
     peticiones = services.obtener_peticiones(desde=desde, hasta=hasta)
 
-    payload = _metricas_payload(metricas, [])
+    f = ft.FiltrosTemporales(desde=desde, hasta=hasta)
+    ocio = analytics.ventanas_ociosas(f)
+
+    payload = _metricas_payload(metricas, [], ocio=ocio.as_dict(), filtros_eco=f.eco())
     payload["requests"] = _peticiones_payload(peticiones)
 
     contexto = {
         "seccion": "metricas",
         "metricas": metricas,
         "peticiones": peticiones,
-        "granularities": TokenUsageRollup.GRANULARITIES,
+        # Incluye 'hourly', que no está en TokenUsageRollup.GRANULARITIES porque
+        # esa granularidad la sirve otra tabla (usage_hourly).
+        "granularities": ft.GRANULARIDADES_PANEL,
         "granularity_activa": granularity,
         "modelos_activos": [],
         "api_key_ids_activos": [],
@@ -118,6 +187,10 @@ def dashboard(request):
         "hasta_activa": hasta,
         "api_keys": api_keys,
         "modelos": modelos,
+        "dias_semana": ft.DIAS_SEMANA,
+        "estados": ft.ESTADOS,
+        "horas": list(range(24)),
+        "ocio": ocio,
         "pool": services.estado_pool(),
         "metricas_payload": payload,
     }
@@ -173,11 +246,15 @@ def serie_json(request):
     })
 
 
-def _metricas_payload(metricas, api_key_ids):
+def _metricas_payload(metricas, api_key_ids, *, ocio=None, filtros_eco=None, comparativa=None):
     """Serializa un ResumenMetricas al contrato JSON que consume el panel
     (metrics-filters.js/metrics-charts.js). Usado tanto por `metrics_api` como
-    por el bootstrap inicial que renderiza `dashboard` para el primer pintado."""
-    return {
+    por el bootstrap inicial que renderiza `dashboard` para el primer pintado.
+
+    Los parámetros añadidos son keyword-only con default None: `api_key_detalle`
+    sigue llamando con dos argumentos posicionales.
+    """
+    payload = {
         "granularity": metricas.granularity,
         "granularity_label": metricas.granularity_label,
         "desde": metricas.desde.isoformat(),
@@ -200,6 +277,9 @@ def _metricas_payload(metricas, api_key_ids):
             "completion_tokens": [p.completion_tokens for p in metricas.serie],
             "request_count": [p.request_count for p in metricas.serie],
             "altura_pct": [p.altura_pct for p in metricas.serie],
+            # Instante ISO de cada bucket, para el tooltip y para poder mapear
+            # una celda del mapa de calor a un momento concreto.
+            "periodos": [p.periodo.isoformat() for p in metricas.serie],
         },
         "por_modelo": [
             {**m, "spend_usd": float(m.get("spend_usd") or 0)} for m in metricas.por_modelo
@@ -209,6 +289,14 @@ def _metricas_payload(metricas, api_key_ids):
         ] if metricas.por_api_key else [],
         "mostrar_desglose_api_key": not (api_key_ids and len(api_key_ids) == 1),
     }
+    # Claves nuevas, todas aditivas: ninguna existente cambia de nombre ni forma.
+    if ocio is not None:
+        payload["tiempos_muertos"] = ocio
+    if filtros_eco is not None:
+        payload["filtros_eco"] = filtros_eco
+    if comparativa is not None:
+        payload["comparativa"] = comparativa
+    return payload
 
 
 @staff_member_required
@@ -222,26 +310,28 @@ def metrics_api(request):
     navegación — así nunca queda reflejado ni cacheado en la URL de la página.
     """
     granularity = request.POST.get("granularity") or TokenUsageRollup.DAILY
-    if granularity not in dict(TokenUsageRollup.GRANULARITIES):
+    # Se valida contra las granularidades del PANEL, no contra las del modelo:
+    # 'hourly' no vive en token_usage_rollup sino en la tabla usage_hourly.
+    if granularity not in dict(ft.GRANULARIDADES_PANEL):
         return JsonResponse(
             {"error": f"Agrupación inválida: '{granularity}'. Usa uno de: "
-                      f"{', '.join(v for v, _ in TokenUsageRollup.GRANULARITIES)}."},
+                      f"{', '.join(v for v, _ in ft.GRANULARIDADES_PANEL)}."},
             status=400,
         )
 
-    desde_raw, hasta_raw = request.POST.get("desde"), request.POST.get("hasta")
-    desde, hasta = _date_or_none(desde_raw), _date_or_none(hasta_raw)
-    if desde_raw and not desde:
-        return JsonResponse({"error": f"Fecha 'desde' inválida: '{desde_raw}'. Usa AAAA-MM-DD."}, status=400)
-    if hasta_raw and not hasta:
-        return JsonResponse({"error": f"Fecha 'hasta' inválida: '{hasta_raw}'. Usa AAAA-MM-DD."}, status=400)
-    if desde and hasta and desde > hasta:
-        return JsonResponse({"error": "'desde' no puede ser posterior a 'hasta'."}, status=400)
-    if not desde and not hasta:
-        desde, hasta = _rango_por_defecto()
+    f, error = _parse_filtros(request)
+    if error:
+        return error
 
-    api_key_ids = _ints_or_none(request.POST.getlist("api_key"))
-    modelos_filtro = request.POST.getlist("modelo") or None
+    if granularity == ft.HOURLY and f.dias > ft.HOURLY_MAX_DIAS:
+        return JsonResponse(
+            {"error": f"La agrupación 'Por hora' admite como máximo {ft.HOURLY_MAX_DIAS} días "
+                      f"(pediste {f.dias}). Reduce el rango o cambia a 'Diario'."},
+            status=400,
+        )
+
+    api_key_ids = list(f.api_key_ids) or None
+    modelos_filtro = list(f.modelos) or None
 
     page = _int_or_none(request.POST.get("page")) or 1
     page_size = _int_or_none(request.POST.get("page_size")) or 30
@@ -262,17 +352,148 @@ def metrics_api(request):
         return JsonResponse({"error": "'dir' inválido. Usa 'asc' o 'desc'."}, status=400)
 
     metricas = services.obtener_metricas(
-        granularity=granularity, api_key_ids=api_key_ids, modelos=modelos_filtro,
-        desde=desde, hasta=hasta,
+        granularity=granularity if granularity != ft.HOURLY else TokenUsageRollup.DAILY,
+        api_key_ids=api_key_ids, modelos=modelos_filtro,
+        desde=f.desde, hasta=f.hasta, incluir_benchmark=f.incluir_benchmark,
     )
     peticiones = services.obtener_peticiones(
-        api_key_ids=api_key_ids, modelos=modelos_filtro, desde=desde, hasta=hasta,
+        api_key_ids=api_key_ids, modelos=modelos_filtro, desde=f.desde, hasta=f.hasta,
         page=page, page_size=page_size, sort_by=sort_by, sort_dir=sort_dir,
+        incluir_benchmark=f.incluir_benchmark,
+        solo_errores=(f.estado == ft.ESTADO_ERRORES),
     )
 
-    payload = _metricas_payload(metricas, api_key_ids)
+    # Los tiempos muertos SÍ viajan en el camino caliente (a diferencia del mapa
+    # de calor): están siempre visibles, la consulta es barata y son ~600 bytes.
+    ocio = analytics.ventanas_ociosas(f).as_dict()
+
+    comparativa = None
+    if _bool_post(request, "comparar"):
+        comparativa = _comparativa(f, granularity)
+
+    payload = _metricas_payload(metricas, api_key_ids, ocio=ocio,
+                                filtros_eco=f.eco(), comparativa=comparativa)
     payload["requests"] = _peticiones_payload(peticiones)
     return JsonResponse(payload)
+
+
+def _delta_pct(actual, anterior):
+    if not anterior:
+        return None
+    return round((actual - anterior) / anterior * 100, 1)
+
+
+def _comparativa(f, granularity):
+    """Deltas contra el periodo inmediatamente anterior del mismo tamaño.
+
+    Solo números, sin serie fantasma en la gráfica: duplicar datasets duplica la
+    tinta y un '+12,4 %' en monoespaciada responde igual de bien.
+    """
+    prev = f.periodo_anterior()
+    m = services.obtener_metricas(
+        granularity=granularity if granularity != ft.HOURLY else TokenUsageRollup.DAILY,
+        api_key_ids=list(prev.api_key_ids) or None,
+        modelos=list(prev.modelos) or None,
+        desde=prev.desde, hasta=prev.hasta, incluir_benchmark=prev.incluir_benchmark,
+    )
+    actual = services.obtener_metricas(
+        granularity=granularity if granularity != ft.HOURLY else TokenUsageRollup.DAILY,
+        api_key_ids=list(f.api_key_ids) or None, modelos=list(f.modelos) or None,
+        desde=f.desde, hasta=f.hasta, incluir_benchmark=f.incluir_benchmark,
+    )
+    return {
+        "desde": prev.desde.isoformat(),
+        "hasta": prev.hasta.isoformat(),
+        "delta_pct": {
+            "total_tokens": _delta_pct(actual.total_tokens, m.total_tokens),
+            "request_count": _delta_pct(actual.request_count, m.request_count),
+            "tokens_por_request": _delta_pct(actual.tokens_por_request, m.tokens_por_request),
+            "tasa_error": _delta_pct(actual.tasa_error, m.tasa_error),
+        },
+    }
+
+
+@staff_member_required
+@require_POST
+def lente_api(request):
+    """Mapa de calor y perfil horario.
+
+    Endpoint APARTE de `metrics_api` por dos razones concretas:
+      a) `metrics_api` ya lanza cinco consultas, y el mapa en modo p95 escanea
+         token_usage_event crudo con percentile_cont -la consulta más cara del
+         panel-. Pagarla en cada cambio de filtro para un usuario que está en la
+         lente "Serie" (la de por defecto) sería una regresión del caso común.
+      b) Estas lentes NO dependen de page/page_size/sort/dir, que son justo los
+         parámetros que más se reenvían: cada clic de paginación dispara
+         applyFilters() y recalcularía 168 celdas para nada.
+    """
+    f, error = _parse_filtros(request)
+    if error:
+        return error
+
+    lente = request.POST.get("lente") or "heatmap"
+    if lente not in ("heatmap", "perfil"):
+        return JsonResponse({"error": "'lente' inválida. Usa 'heatmap' o 'perfil'."}, status=400)
+
+    metrica = request.POST.get("metrica") or "peticiones"
+    if metrica not in analytics.METRICAS_HEATMAP:
+        return JsonResponse(
+            {"error": f"'metrica' inválida: '{metrica}'. Usa uno de: "
+                      f"{', '.join(analytics.METRICAS_HEATMAP)}."},
+            status=400,
+        )
+    if metrica == "p95" and f.dias > ft.P95_MAX_DIAS:
+        return JsonResponse(
+            {"error": f"La latencia p95 solo se puede calcular sobre rangos de hasta "
+                      f"{ft.P95_MAX_DIAS} días (pediste {f.dias})."},
+            status=400,
+        )
+
+    if lente == "heatmap":
+        datos = analytics.heatmap_semanal(f, metrica).as_dict()
+    else:
+        perfil = analytics.perfil_horario(f)
+        corrida = cap_mod.ultima_corrida(settings.CLIENTE_ID, settings.ENTORNO)
+        if corrida and corrida.rpm_sostenido:
+            perfil.techo_pet_hora = round(float(corrida.rpm_sostenido) * 60, 2)
+        datos = perfil.as_dict()
+
+    return JsonResponse({"lente": lente, "datos": datos, "filtros_eco": f.eco()})
+
+
+@staff_member_required
+def capacidad(request):
+    """Techo medido de la infraestructura, margen y proyección.
+
+    Igual que `dashboard`, ignora la querystring a propósito: pinta la última
+    corrida y la ventana por defecto. El filtrado en vivo va por `capacidad_api`.
+    """
+    desde, hasta = _rango_por_defecto()
+    f = ft.FiltrosTemporales(desde=desde, hasta=hasta)
+    payload = cap_mod.payload_capacidad(settings.CLIENTE_ID, settings.ENTORNO, f)
+    return render(request, "metrics/capacidad.html", {
+        "seccion": "capacidad",
+        "desde_activa": desde,
+        "hasta_activa": hasta,
+        "capacidad_payload": payload,
+        "corrida": payload["corrida"],
+        "margen": payload["margen"],
+        "proyeccion": payload["proyeccion"],
+        "corridas": payload["corridas"],
+    })
+
+
+@staff_member_required
+@require_POST
+def capacidad_api(request):
+    """Recalcula la ficha de capacidad al cambiar de corrida o de rango."""
+    f, error = _parse_filtros(request)
+    if error:
+        return error
+    run_id = request.POST.get("corrida") or None
+    return JsonResponse(
+        cap_mod.payload_capacidad(settings.CLIENTE_ID, settings.ENTORNO, f, run_id=run_id)
+    )
 
 
 @staff_member_required
@@ -284,7 +505,8 @@ def refrescar(request):
         messages.success(
             request,
             f"Métricas actualizadas: {resultado['eventos_ingeridos']} evento(s) nuevo(s), "
-            f"{resultado['filas_agregadas']} fila(s) agregada(s).",
+            f"{resultado['filas_agregadas']} fila(s) agregada(s), "
+            f"{resultado['buckets_horarios']} bucket(s) horario(s).",
         )
     except Exception as exc:  # noqa: BLE001 - se reporta al operador en la UI
         logger.exception("Fallo al refrescar métricas")

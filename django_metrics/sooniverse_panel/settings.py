@@ -137,9 +137,20 @@ _script_name = _env("FORCE_SCRIPT_NAME", "")
 STATIC_URL = f"{_script_name}/static/" if _script_name else "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"]
+# En producción (DEBUG=False, que es como corre el contenedor) se usa la
+# subclase propia con hash + precompresión: el JS del panel usa ES modules y sus
+# imports relativos también tienen que reescribirse a los nombres con hash (ver
+# storage.py). Con DEBUG=True, `runserver` sirve desde los directorios fuente y
+# no sabe resolver un nombre con hash, así que ahí se usa el almacenamiento
+# plano; si no, cada archivo estático daría 404 en desarrollo.
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
-    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
+    "staticfiles": {
+        "BACKEND": (
+            "django.contrib.staticfiles.storage.StaticFilesStorage" if DEBUG
+            else "sooniverse_panel.storage.SooniverseStaticFilesStorage"
+        )
+    },
 }
 
 LOGIN_URL = "/admin/login/"
@@ -155,6 +166,16 @@ LITELLM_TIMEOUT = int(_env("LITELLM_TIMEOUT", "30"))
 # Contexto de tenancy heredado del contrato de infraestructura
 CLIENTE_ID = _env("CLIENTE_ID", "default")
 ENTORNO = _env("ENTORNO", "prod")
+
+# -----------------------------------------------------------------------------
+# Analítica de ritmo de uso y capacidad
+# -----------------------------------------------------------------------------
+# Coste por hora de la infraestructura de inferencia (la GPU, no el gasto en
+# tokens). Es lo que permite responder "¿cuánto me cuesta la máquina parada?"
+# en la tarjeta de tiempos muertos. Con 0, la tarjeta oculta la columna de coste
+# en vez de mostrar $0,0000 en todas las filas.
+# Referencia us-east-1: g6.xlarge ~0.80 + t3.large ~0.08 + NAT/EIP ~0.05.
+METRICS_COSTE_HORA_USD = float(_env("METRICS_COSTE_HORA_USD", "0") or 0)
 
 # Refresco automático de métricas (segundos). 0 desactiva el job.
 METRICS_REFRESH_INTERVAL = int(_env("METRICS_REFRESH_INTERVAL", "300"))

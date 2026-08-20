@@ -1,0 +1,43 @@
+{% comment %}
+Ficha de la configuración bajo la que se midió el techo.
+
+No es decorativa: el mismo modelo en la misma GPU con max_num_seqs=2 y con 16 da
+números de capacidad completamente distintos. Un techo sin su configuración no
+es interpretable ni comparable entre corridas.
+{% endcomment %}
+{% if corrida %}
+    <dl class="sv-ficha" id="capacidad-ficha">
+        <dt>Modelo</dt>          <dd>{{ corrida.model_public_name }}</dd>
+        <dt>Workload</dt>        <dd>{{ corrida.workload_id }}</dd>
+        <dt>Hardware</dt>        <dd>{{ corrida.hardware }}</dd>
+        <dt>Réplicas</dt>        <dd>{{ corrida.replicas|default:"—" }}</dd>
+        <dt>max_num_seqs</dt>    <dd>{{ corrida.max_num_seqs|default:"—" }}</dd>
+        <dt>batched_tokens</dt>  <dd>{{ corrida.max_num_batched_tokens|default:"—" }}</dd>
+        <dt>max_model_len</dt>   <dd>{{ corrida.max_model_len|default:"—" }}</dd>
+        <dt>Balanceo</dt>        <dd>{{ corrida.lb_strategy|default:"—" }}</dd>
+        <dt>p95 base</dt>        <dd>{{ corrida.p95_base_ms|default:"—" }} ms</dd>
+        <dt>p95 en rodilla</dt>  <dd>{{ corrida.p95_rodilla_ms|default:"—" }} ms</dd>
+        <dt>Error</dt>           <dd>{{ corrida.tasa_error_pct }} %</dd>
+        <dt>Motivo de parada</dt><dd>{{ corrida.motivo_label }}</dd>
+        <dt>Medido desde</dt>    <dd>{{ corrida.origen }}</dd>
+        <dt>Fecha</dt>           <dd>{{ corrida.finished_at|slice:":16" }}</dd>
+    </dl>
+
+    {% if corrida.motivo_parada == "nivel_maximo" %}
+        {% comment %} Decirlo importa: si la rampa acabó sin doler, el techo real puede ser
+           MAYOR que el medido, y dimensionar con este número infraestima. {% endcomment %}
+        <p class="sv-help l-mt-sm">
+            La rampa terminó sin degradar la respuesta: el techo real puede ser
+            <strong>mayor</strong> que el medido. Amplía
+            <span class="sv-mono">capacidad.niveles_concurrencia</span> para encontrarlo.
+        </p>
+    {% endif %}
+
+    <p class="sv-help l-mt-sm">
+        Medido desde el propio Gateway (<span class="sv-mono">127.0.0.1 → nginx → litellm →
+        worker</span>), que es el camino del cliente real. Los números de una corrida con
+        <span class="sv-mono">origen: operador</span> no son comparables con estos.
+    </p>
+{% else %}
+    <p class="sv-help">Sin corridas registradas todavía.</p>
+{% endif %}
