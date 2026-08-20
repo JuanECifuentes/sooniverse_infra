@@ -174,7 +174,7 @@ def margen_capacidad(f: ft.FiltrosTemporales, corrida: Optional[CapacityBenchmar
     m.etiqueta = f"{m.uso_pct:.0f} % del techo · {holgura}"
 
     if m.techo_es_tope_probado:
-        m.etiqueta += " (el techo real puede ser mayor: la rampa no llegó a degradar)"
+        m.etiqueta += " (el techo real puede ser mayor: la prueba no encontró degradación)"
     return m
 
 

@@ -30,6 +30,13 @@ if (panel && panel.dataset.apiKeyId) {
     retryBtn: document.getElementById("akd-retry"),
     live: document.getElementById("akd-live"),
     tablaModelo: document.getElementById("akd-tabla-modelo-body"),
+    // -- contadores de tokens (tabla paginada) --
+    tablaTokens: document.getElementById("akd-tabla-tokens-body"),
+    tokensTotal: document.querySelector('[data-field="akd-tokens-total"]'),
+    tokensPrev: document.getElementById("akd-tokens-prev"),
+    tokensNext: document.getElementById("akd-tokens-next"),
+    tokensPageLabel: document.getElementById("akd-tokens-page-label"),
+    tokensLoading: document.getElementById("akd-tokens-loading"),
   };
 
   function getCsrfToken() {
@@ -41,6 +48,8 @@ if (panel && panel.dataset.apiKeyId) {
     granularity: els.granularity.querySelector(".sv-listbox__option--active")?.dataset.value || "daily",
     desde: els.desde.value,
     hasta: els.hasta.value,
+    page: 1,
+    page_size: 30,
   };
   let requestCounter = 0;
   let activeController = null;
@@ -80,6 +89,38 @@ if (panel && panel.dataset.apiKeyId) {
       .join("");
   }
 
+  function renderTokens(requests) {
+    if (els.tokensTotal) els.tokensTotal.textContent = fmtInt(requests.total);
+    if (els.tokensPageLabel) els.tokensPageLabel.textContent = `Página ${requests.page} de ${requests.total_pages}`;
+    if (els.tokensPrev) els.tokensPrev.disabled = !requests.has_prev;
+    if (els.tokensNext) els.tokensNext.disabled = !requests.has_next;
+
+    if (!els.tablaTokens) return;
+    if (!requests.items.length) {
+      els.tablaTokens.innerHTML =
+        '<tr><td colspan="6" class="sv-help">Sin eventos registrados.</td></tr>';
+      return;
+    }
+    els.tablaTokens.innerHTML = requests.items
+      .map((r) => {
+        const fecha = new Date(r.ts);
+        const corta = fecha.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" }) +
+          " " + fecha.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const statusBadge = r.status === "success"
+          ? '<span class="sv-badge sv-badge--success">ok</span>'
+          : `<span class="sv-badge sv-badge--danger">${escapeHtml(r.status)}</span>`;
+        return `<tr>
+          <td data-label="Fecha" class="sv-mono">${corta}</td>
+          <td data-label="Modelo" class="sv-mono">${escapeHtml(r.model)}</td>
+          <td data-label="In" class="sv-num">${fmtTok(r.input)}</td>
+          <td data-label="Out" class="sv-num">${fmtTok(r.output)}</td>
+          <td data-label="Total" class="sv-num sv-num--accent">${fmtTok(r.total)}</td>
+          <td data-label="Estado">${statusBadge}</td>
+        </tr>`;
+      })
+      .join("");
+  }
+
   function render(data) {
     panel.dispatchEvent(new CustomEvent("metrics:data", { detail: data }));
 
@@ -93,6 +134,7 @@ if (panel && panel.dataset.apiKeyId) {
     els.rango.textContent = `${data.desde} → ${data.hasta}`;
     els.granularityLabel.textContent = `Serie ${data.granularity_label.toLowerCase()}`;
     renderTablaModelo(data.por_modelo);
+    if (data.requests) renderTokens(data.requests);
   }
 
   async function cargar() {
@@ -112,6 +154,9 @@ if (panel && panel.dataset.apiKeyId) {
     activeController = controller;
     const myRequestId = ++requestCounter;
 
+    // Overlay del token table: inmediato para feedback de paginación
+    if (els.tokensLoading) els.tokensLoading.hidden = false;
+
     let overlayShown = false;
     const showTimer = setTimeout(() => {
       overlayShown = true;
@@ -122,7 +167,12 @@ if (panel && panel.dataset.apiKeyId) {
     }, 150);
     const startedAt = performance.now();
 
-    const params = new URLSearchParams({ granularity: state.granularity, api_key: API_KEY_ID });
+    const params = new URLSearchParams({
+      granularity: state.granularity,
+      api_key: API_KEY_ID,
+      page: state.page,
+      page_size: state.page_size,
+    });
     if (state.desde) params.set("desde", state.desde);
     if (state.hasta) params.set("hasta", state.hasta);
 
@@ -149,6 +199,7 @@ if (panel && panel.dataset.apiKeyId) {
         clearTimeout(showTimer);
         const finish = () => {
           els.loading.hidden = true;
+          if (els.tokensLoading) els.tokensLoading.hidden = true;
           panel.setAttribute("aria-busy", "false");
           panel.inert = false;
         };
@@ -165,6 +216,7 @@ if (panel && panel.dataset.apiKeyId) {
     const btn = e.target.closest("[data-value]");
     if (!btn) return;
     state.granularity = btn.dataset.value;
+    state.page = 1;
     els.granularity.removeAttribute("open");
     cargar();
   });
@@ -173,9 +225,29 @@ if (panel && panel.dataset.apiKeyId) {
     input.addEventListener("change", () => {
       state.desde = els.desde.value;
       state.hasta = els.hasta.value;
+      state.page = 1;
       cargar();
     });
   });
 
+  // -- Paginación de contadores de tokens --
+  if (els.tokensPrev) {
+    els.tokensPrev.addEventListener("click", () => {
+      if (els.tokensPrev.disabled) return;
+      state.page -= 1;
+      cargar();
+    });
+  }
+  if (els.tokensNext) {
+    els.tokensNext.addEventListener("click", () => {
+      if (els.tokensNext.disabled) return;
+      state.page += 1;
+      cargar();
+    });
+  }
+
   els.retryBtn.addEventListener("click", cargar);
+
+  // Carga inicial para poblar la tabla de tokens (ya no viene en el contexto Django)
+  cargar();
 }

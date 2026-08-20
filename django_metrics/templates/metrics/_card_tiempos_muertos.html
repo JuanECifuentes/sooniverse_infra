@@ -6,14 +6,22 @@ una sola petición dentro del rango filtrado.
 La columna de coste solo aparece si METRICS_COSTE_HORA_USD está configurado: con
 0 se oculta entera en vez de llenar la tabla de $0,0000, que no informa de nada.
 {% endcomment %}
-<article class="sv-card l-card--flush" id="card-tiempos-muertos">
-    <div class="l-card__head">
+<details class="sv-card sv-card--accordion l-card--flush" id="card-tiempos-muertos">
+    <summary class="l-card__head sv-card__summary">
         <div class="l-stack l-stack--tight">
             <span class="sv-eyebrow">Ocio</span>
-            <h3>Tiempos muertos</h3>
+            <div class="l-row l-row--align-center" style="gap: 8px">
+                <h3>Tiempos muertos</h3>
+                {% include "metrics/_tooltip.html" with text="Horas del rango sin ninguna petición. Se calcula sobre la rejilla horaria en hora local, respetando los filtros de día de la semana y franja." position="bottom-end" %}
+            </div>
         </div>
-        {% include "metrics/_tooltip.html" with text="Horas del rango sin ninguna petición. Se calcula sobre la rejilla horaria en hora local, respetando los filtros de día de la semana y franja." %}
-    </div>
+        <div class="l-row l-row--align-center" style="gap: 12px">
+            <span class="sv-badge sv-badge--muted" data-field="horas_ociosas_badge">
+                <span data-field="pct_ocioso">{{ ocio.pct_ocioso }} %</span> ocioso (<span data-field="horas_ociosas_ratio">{{ ocio.horas_ociosas }} / {{ ocio.horas_totales }} h</span>)
+            </span>
+            <span class="sv-accordion__chevron" aria-hidden="true"></span>
+        </div>
+    </summary>
 
     <div class="l-card__body">
         <div class="l-row l-row--between l-mb-md">
@@ -50,7 +58,7 @@ La columna de coste solo aparece si METRICS_COSTE_HORA_USD está configurado: co
                     </tr>
                 </thead>
                 <tbody id="ocio-ventanas-body">
-                    {% for v in ocio.ventanas %}
+                    {% for v in ocio.ventanas|slice:":7" %}
                         <tr>
                             <td data-label="Franja">{{ v.etiqueta }}</td>
                             <td data-label="Horas" class="sv-num">{{ v.horas }}</td>
@@ -64,6 +72,12 @@ La columna de coste solo aparece si METRICS_COSTE_HORA_USD está configurado: co
             </table>
         </div>
 
+        <div class="l-pagination" id="ocio-pagination" {% if ocio.ventanas|length <= 7 %}hidden{% endif %}>
+            <button type="button" class="sv-btn sv-btn--ghost sv-btn--sm" id="ocio-prev" disabled>Anterior</button>
+            <span class="sv-mono" id="ocio-page-label">Página 1 de {% widthratio ocio.ventanas|length|add:6 7 1 %}</span>
+            <button type="button" class="sv-btn sv-btn--ghost sv-btn--sm" id="ocio-next" {% if ocio.ventanas|length <= 7 %}disabled{% endif %}>Siguiente</button>
+        </div>
+
         {% if ocio.horas_sin_datos %}
             <p class="sv-help l-mt-sm">
                 {{ ocio.horas_sin_datos }} de esas horas no tienen agregación todavía:
@@ -71,4 +85,4 @@ La columna de coste solo aparece si METRICS_COSTE_HORA_USD está configurado: co
             </p>
         {% endif %}
     </div>
-</article>
+</details>

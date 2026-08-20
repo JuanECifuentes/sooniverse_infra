@@ -384,7 +384,7 @@ def rachas_vacias(rejilla: Sequence[datetime], activas: set) -> List[Tuple[datet
     return rachas
 
 
-def ventanas_ociosas(f: ft.FiltrosTemporales, top: int = 5) -> ResumenOcio:
+def ventanas_ociosas(f: ft.FiltrosTemporales, top: Optional[int] = 50) -> ResumenOcio:
     """Tramos más largos sin una sola petición dentro del rango filtrado."""
     activas = set(
         _base_horaria(f).filter(request_count__gt=0)
@@ -399,10 +399,14 @@ def ventanas_ociosas(f: ft.FiltrosTemporales, top: int = 5) -> ResumenOcio:
     rachas = rachas_vacias(rejilla, activas)
 
     coste_hora = Decimal(str(getattr(settings, "METRICS_COSTE_HORA_USD", 0) or 0))
+    ventanas_ordenadas = sorted(rachas, key=lambda r: r[2], reverse=True)
+    if top:
+        ventanas_ordenadas = ventanas_ordenadas[:top]
+
     ventanas = [
         VentanaOciosa(inicio=i, fin=fin, horas=h, etiqueta=_etiqueta_ventana(i, fin),
                       coste_usd=(coste_hora * h).quantize(Decimal("0.0001")))
-        for i, fin, h in sorted(rachas, key=lambda r: r[2], reverse=True)[:top]
+        for i, fin, h in ventanas_ordenadas
     ]
 
     horas_totales = len(rejilla)

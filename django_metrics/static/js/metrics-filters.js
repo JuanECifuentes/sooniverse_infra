@@ -49,6 +49,13 @@ if (panel) {
     horaDesde: document.getElementById("id_hora_desde"),
     horaHasta: document.getElementById("id_hora_hasta"),
     horaError: document.getElementById("metrics-hora-error"),
+    franjaContainer: document.getElementById("metrics-franja"),
+    franjaLabel: document.getElementById("franja-label"),
+    franjaSelectDesde: document.getElementById("franja-select-desde"),
+    franjaSelectHasta: document.getElementById("franja-select-hasta"),
+    franjaHoursGrid: document.getElementById("franja-hours-grid"),
+    franjaPresets: document.getElementById("franja-presets"),
+    franjaResetBtn: document.getElementById("franja-reset-btn"),
     estado: document.getElementById("metrics-estado"),
     incluirBenchmark: document.getElementById("id_incluir_benchmark"),
     comparar: document.getElementById("id_comparar"),
@@ -57,6 +64,12 @@ if (panel) {
     ocioVentanas: document.getElementById("ocio-ventanas-body"),
     ocioCoste: document.getElementById("ocio-coste-col"),
     cardOcio: document.getElementById("card-tiempos-muertos"),
+    ocioPagination: document.getElementById("ocio-pagination"),
+    ocioPageLabel: document.getElementById("ocio-page-label"),
+    ocioPrev: document.getElementById("ocio-prev"),
+    ocioNext: document.getElementById("ocio-next"),
+    ocioBadge: document.querySelector("[data-field='horas_ociosas_badge']"),
+    ocioRatio: document.querySelector("[data-field='horas_ociosas_ratio']"),
     // -- comparativa --
     comparativaBox: document.getElementById("metrics-comparativa"),
   };
@@ -200,9 +213,7 @@ if (panel) {
 
   function computePreset(preset) {
     const today = new Date();
-    // 24h fija además granularidad horaria: con la diaria devolvería un solo
-    // punto y la gráfica parecería rota.
-    if (preset === "24h") return { desde: isoDate(addDays(today, -1)), hasta: isoDate(today), granularity: "hourly" };
+    if (preset === "24h") return { desde: isoDate(addDays(today, -1)), hasta: isoDate(today), granularity: "daily" };
     if (preset === "7d") return { desde: isoDate(addDays(today, -7)), hasta: isoDate(today) };
     if (preset === "30d") return { desde: isoDate(addDays(today, -30)), hasta: isoDate(today) };
     if (preset === "90d") return { desde: isoDate(addDays(today, -90)), hasta: isoDate(today) };
@@ -269,10 +280,46 @@ if (panel) {
       .join("");
   }
 
+  let ocioVentanasList = [];
+  let ocioCurrentPage = 1;
+  const OCIO_PAGE_SIZE = 7;
+
+  function renderOcioPage() {
+    if (!els.ocioVentanas) return;
+    if (!ocioVentanasList.length) {
+      els.ocioVentanas.innerHTML =
+        '<tr><td colspan="3" class="sv-help">Sin franjas ociosas en el rango.</td></tr>';
+      if (els.ocioPagination) els.ocioPagination.hidden = true;
+      return;
+    }
+    const totalPages = Math.max(1, Math.ceil(ocioVentanasList.length / OCIO_PAGE_SIZE));
+    ocioCurrentPage = Math.max(1, Math.min(ocioCurrentPage, totalPages));
+    const start = (ocioCurrentPage - 1) * OCIO_PAGE_SIZE;
+    const pageItems = ocioVentanasList.slice(start, start + OCIO_PAGE_SIZE);
+
+    els.ocioVentanas.innerHTML = pageItems.map((v) => `
+      <tr>
+        <td data-label="Franja">${escapeHtml(v.etiqueta)}</td>
+        <td data-label="Horas" class="sv-num">${fmtInt(v.horas)}</td>
+        <td data-label="Coste" class="sv-num" data-coste-ocioso ${v.mostrar_coste !== false ? "" : "hidden"}>
+          ${fmtUsd(v.coste_usd)}</td>
+      </tr>`).join("");
+
+    if (els.ocioPagination) {
+      els.ocioPagination.hidden = totalPages <= 1;
+      if (els.ocioPageLabel) els.ocioPageLabel.textContent = `Página ${ocioCurrentPage} de ${totalPages}`;
+      if (els.ocioPrev) els.ocioPrev.disabled = ocioCurrentPage <= 1;
+      if (els.ocioNext) els.ocioNext.disabled = ocioCurrentPage >= totalPages;
+    }
+  }
+
   function renderTiemposMuertos(tm) {
     if (!tm || !els.cardOcio) return;
     setField("pct_ocioso", fmtPct(tm.pct_ocioso));
     setField("horas_ociosas", `${fmtInt(tm.horas_ociosas)} / ${fmtInt(tm.horas_totales)} h`);
+    if (els.ocioRatio) {
+      els.ocioRatio.textContent = `${fmtInt(tm.horas_ociosas)} / ${fmtInt(tm.horas_totales)} h`;
+    }
     setField("coste_ocioso", fmtUsd(tm.coste_ocioso_usd));
 
     // Con coste/hora sin configurar (METRICS_COSTE_HORA_USD=0) se oculta la
@@ -281,19 +328,12 @@ if (panel) {
       el.hidden = !tm.mostrar_coste;
     });
 
-    if (!els.ocioVentanas) return;
-    if (!tm.ventanas.length) {
-      els.ocioVentanas.innerHTML =
-        '<tr><td colspan="3" class="sv-help">Sin franjas ociosas en el rango.</td></tr>';
-      return;
-    }
-    els.ocioVentanas.innerHTML = tm.ventanas.map((v) => `
-      <tr>
-        <td data-label="Franja">${escapeHtml(v.etiqueta)}</td>
-        <td data-label="Horas" class="sv-num">${fmtInt(v.horas)}</td>
-        <td data-label="Coste" class="sv-num" data-coste-ocioso ${tm.mostrar_coste ? "" : "hidden"}>
-          ${fmtUsd(v.coste_usd)}</td>
-      </tr>`).join("");
+    ocioVentanasList = (tm.ventanas || []).map((v) => ({
+      ...v,
+      mostrar_coste: tm.mostrar_coste,
+    }));
+    ocioCurrentPage = 1;
+    renderOcioPage();
   }
 
   function renderComparativa(comp) {
@@ -494,11 +534,68 @@ if (panel) {
     });
   });
 
+  const FRANJA_PRESETS = {
+    "24h": [0, 23],
+    laboral: [8, 18],
+    manana: [6, 14],
+    tarde: [14, 20],
+    noche: [20, 23],
+  };
+
+  let selectingFranjaStart = null;
+
+  function syncFranjaUI(horaDesde, horaHasta) {
+    const d = Math.max(0, Math.min(23, Number(horaDesde ?? 0)));
+    const h = Math.max(0, Math.min(23, Number(horaHasta ?? 23)));
+
+    if (els.franjaLabel) {
+      els.franjaLabel.textContent = `${String(d).padStart(2, "0")}:00 – ${String(h).padStart(2, "0")}:00`;
+    }
+    if (els.franjaSelectDesde) els.franjaSelectDesde.value = String(d);
+    if (els.franjaSelectHasta) els.franjaSelectHasta.value = String(h);
+
+    if (els.franjaHoursGrid) {
+      els.franjaHoursGrid.querySelectorAll("[data-hour]").forEach((btn) => {
+        const hour = Number(btn.dataset.hour);
+        const inRange = hour >= d && hour <= h;
+        const isStart = hour === d;
+        const isEnd = hour === h;
+        btn.classList.toggle("in-range", inRange);
+        btn.classList.toggle("selected-start", isStart);
+        btn.classList.toggle("selected-end", isEnd);
+        btn.classList.remove("in-range-preview");
+        btn.setAttribute("aria-selected", inRange ? "true" : "false");
+      });
+    }
+
+    if (els.franjaPresets) {
+      els.franjaPresets.querySelectorAll("[data-franja-preset]").forEach((btn) => {
+        const presetKey = btn.dataset.franjaPreset;
+        const range = FRANJA_PRESETS[presetKey];
+        const isActive = range && range[0] === d && range[1] === h;
+        btn.classList.toggle("sv-segment__item--active", isActive);
+        btn.setAttribute("aria-pressed", isActive ? "true" : "false");
+      });
+    }
+  }
+
+  function setFranja(desde, hasta, apply = true) {
+    const d = Math.max(0, Math.min(23, Number(desde ?? 0)));
+    const h = Math.max(0, Math.min(23, Number(hasta ?? 23)));
+    state.hora_desde = d;
+    state.hora_hasta = h;
+    if (els.horaDesde) els.horaDesde.value = d;
+    if (els.horaHasta) els.horaHasta.value = h;
+    syncFranjaUI(d, h);
+    if (apply) {
+      state.page = 1;
+      applyFilters();
+    }
+  }
+
   function limpiarFranja() {
-    state.hora_desde = 0;
-    state.hora_hasta = 23;
-    if (els.horaDesde) els.horaDesde.value = 0;
-    if (els.horaHasta) els.horaHasta.value = 23;
+    selectingFranjaStart = null;
+    setFranja(0, 23, false);
   }
 
   els.chips.addEventListener("click", (e) => {
@@ -551,15 +648,88 @@ if (panel) {
     });
   }
 
+  if (els.franjaHoursGrid) {
+    els.franjaHoursGrid.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-hour]");
+      if (!btn) return;
+      const clickedHour = Number(btn.dataset.hour);
+
+      if (selectingFranjaStart === null) {
+        selectingFranjaStart = clickedHour;
+        setFranja(clickedHour, clickedHour, false);
+      } else {
+        const start = Math.min(selectingFranjaStart, clickedHour);
+        const end = Math.max(selectingFranjaStart, clickedHour);
+        selectingFranjaStart = null;
+        setFranja(start, end, true);
+      }
+    });
+
+    els.franjaHoursGrid.addEventListener("mouseover", (e) => {
+      if (selectingFranjaStart === null) return;
+      const btn = e.target.closest("[data-hour]");
+      if (!btn) return;
+      const hoveredHour = Number(btn.dataset.hour);
+      const minH = Math.min(selectingFranjaStart, hoveredHour);
+      const maxH = Math.max(selectingFranjaStart, hoveredHour);
+      els.franjaHoursGrid.querySelectorAll("[data-hour]").forEach((b) => {
+        const h = Number(b.dataset.hour);
+        b.classList.toggle("in-range-preview", h >= minH && h <= maxH);
+      });
+    });
+
+    els.franjaHoursGrid.addEventListener("mouseleave", () => {
+      if (selectingFranjaStart !== null) return;
+      els.franjaHoursGrid.querySelectorAll(".in-range-preview").forEach((b) => {
+        b.classList.remove("in-range-preview");
+      });
+    });
+  }
+
+  if (els.franjaPresets) {
+    els.franjaPresets.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-franja-preset]");
+      if (!btn) return;
+      const range = FRANJA_PRESETS[btn.dataset.franjaPreset];
+      if (range) {
+        selectingFranjaStart = null;
+        setFranja(range[0], range[1], true);
+      }
+    });
+  }
+
+  if (els.franjaResetBtn) {
+    els.franjaResetBtn.addEventListener("click", () => {
+      selectingFranjaStart = null;
+      setFranja(0, 23, true);
+    });
+  }
+
+  if (els.franjaSelectDesde) {
+    els.franjaSelectDesde.addEventListener("change", () => {
+      selectingFranjaStart = null;
+      const d = Number(els.franjaSelectDesde.value);
+      const h = Math.max(d, state.hora_hasta);
+      setFranja(d, h, true);
+    });
+  }
+
+  if (els.franjaSelectHasta) {
+    els.franjaSelectHasta.addEventListener("change", () => {
+      selectingFranjaStart = null;
+      const h = Number(els.franjaSelectHasta.value);
+      const d = Math.min(h, state.hora_desde);
+      setFranja(d, h, true);
+    });
+  }
+
   [els.horaDesde, els.horaHasta].forEach((input) => {
     if (!input) return;
     input.addEventListener("change", () => {
-      state.hora_desde = Math.max(0, Math.min(23, Number(els.horaDesde.value || 0)));
-      state.hora_hasta = Math.max(0, Math.min(23, Number(els.horaHasta.value ?? 23)));
-      els.horaDesde.value = state.hora_desde;
-      els.horaHasta.value = state.hora_hasta;
-      state.page = 1;
-      applyFilters();
+      selectingFranjaStart = null;
+      const d = Math.max(0, Math.min(23, Number(els.horaDesde.value || 0)));
+      const h = Math.max(0, Math.min(23, Number(els.horaHasta.value ?? 23)));
+      setFranja(d, h, true);
     });
   });
 
@@ -583,6 +753,25 @@ if (panel) {
       applyFilters();
     });
   });
+
+  if (els.ocioPrev) {
+    els.ocioPrev.addEventListener("click", () => {
+      if (ocioCurrentPage > 1) {
+        ocioCurrentPage -= 1;
+        renderOcioPage();
+      }
+    });
+  }
+
+  if (els.ocioNext) {
+    els.ocioNext.addEventListener("click", () => {
+      const totalPages = Math.ceil(ocioVentanasList.length / OCIO_PAGE_SIZE);
+      if (ocioCurrentPage < totalPages) {
+        ocioCurrentPage += 1;
+        renderOcioPage();
+      }
+    });
+  }
 
   if (els.atajosDow) {
     els.atajosDow.addEventListener("click", (e) => {
@@ -611,10 +800,8 @@ if (panel) {
     multiselects.dow?.querySelectorAll("input[type=checkbox]").forEach((cb) => {
       cb.checked = state.dow.includes(cb.value);
     });
-    state.hora_desde = hora_desde ?? 0;
-    state.hora_hasta = hora_hasta ?? 23;
-    if (els.horaDesde) els.horaDesde.value = state.hora_desde;
-    if (els.horaHasta) els.horaHasta.value = state.hora_hasta;
+    selectingFranjaStart = null;
+    setFranja(hora_desde ?? 0, hora_hasta ?? 23, false);
     state.page = 1;
     applyFilters();
   });
@@ -674,6 +861,19 @@ if (panel) {
   updateChips();
   updatePresetHighlight();
   updateGranularityHighlight();
+  syncFranjaUI(state.hora_desde, state.hora_hasta);
+
+  const bootstrapEl = document.getElementById("metrics-initial-payload");
+  if (bootstrapEl) {
+    try {
+      const initialData = JSON.parse(bootstrapEl.textContent);
+      if (initialData && initialData.tiempos_muertos) {
+        renderTiemposMuertos(initialData.tiempos_muertos);
+      }
+    } catch (e) {
+      console.error("Error leyendo bootstrap inicial en metrics-filters", e);
+    }
+  }
 
   // Respaldo directo para metrics-lente.js: el orden de los <script
   // type="module"> NO garantiza que su listener de "metrics:params" ya esté
