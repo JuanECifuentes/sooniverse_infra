@@ -101,6 +101,10 @@ def obtener_metricas(
     hasta: Optional[date] = None,
     *,
     incluir_benchmark: bool = False,
+    dias_semana: Optional[Sequence[int]] = None,
+    hora_desde: int = 0,
+    hora_hasta: int = 23,
+    solo_errores: bool = False,
 ) -> ResumenMetricas:
     """
     Construye el resumen del panel leyendo las agregaciones pre-calculadas.
@@ -111,12 +115,148 @@ def obtener_metricas(
     Todo lo añadido después va keyword-only con default que reproduce el
     comportamiento anterior.
     """
+    from .filtros import FiltrosTemporales, excluir_benchmark
+    from .models import UsageHourly
+
     if granularity not in GRANULARITY_WINDOWS:
         granularity = TokenUsageRollup.DAILY
 
     hasta = hasta or timezone.localdate()
     desde = desde or (hasta - timedelta(days=GRANULARITY_WINDOWS[granularity]))
 
+    usa_horaria = (
+        (hora_desde, hora_hasta) != (0, 23)
+        or solo_errores
+        or (bool(dias_semana) and granularity in (TokenUsageRollup.WEEKLY, TokenUsageRollup.MONTHLY))
+    )
+
+    if usa_horaria:
+        ventana = FiltrosTemporales(desde=desde, hasta=hasta)
+        qs_h = UsageHourly.objects.filter(bucket_ts__gte=ventana.inicio, bucket_ts__lt=ventana.fin)
+        if api_key_ids:
+            qs_h = qs_h.filter(api_key_id__in=api_key_ids)
+        if modelos:
+            qs_h = qs_h.filter(model_name__in=modelos)
+        if dias_semana:
+            qs_h = qs_h.filter(bucket_local_isodow__in=dias_semana)
+        if (hora_desde, hora_hasta) != (0, 23):
+            qs_h = qs_h.filter(bucket_local_hour__gte=hora_desde, bucket_local_hour__lte=hora_hasta)
+        if solo_errores:
+            qs_h = qs_h.filter(error_count__gt=0)
+        if not incluir_benchmark:
+            qs_h = excluir_benchmark(qs_h)
+
+        buckets_raw = (
+            qs_h.values("bucket_local_date")
+            .annotate(
+                prompt_tokens=Sum("prompt_tokens"),
+                completion_tokens=Sum("completion_tokens"),
+                total_tokens=Sum("total_tokens"),
+                request_count=Sum("request_count"),
+                spend_usd=Sum("spend_usd"),
+                error_count=Sum("error_count"),
+            )
+            .order_by("bucket_local_date")
+        )
+
+        if granularity == TokenUsageRollup.DAILY:
+            serie = [
+                SeriePunto(
+                    periodo=b["bucket_local_date"],
+                    etiqueta=_etiqueta_periodo(b["bucket_local_date"], granularity),
+                    prompt_tokens=b["prompt_tokens"] or 0,
+                    completion_tokens=b["completion_tokens"] or 0,
+                    total_tokens=b["total_tokens"] or 0,
+                    request_count=b["request_count"] or 0,
+                    spend_usd=b["spend_usd"] or Decimal("0"),
+                    error_count=b["error_count"] or 0,
+                )
+                for b in buckets_raw
+            ]
+        else:
+            # Agrupación semanal o mensual sobre los días filtrados
+            agrupados: Dict[date, Dict[str, Any]] = {}
+            for b in buckets_raw:
+                d = b["bucket_local_date"]
+                if granularity == TokenUsageRollup.WEEKLY:
+                    periodo_inicio = d - timedelta(days=d.weekday())
+                else:
+                    periodo_inicio = date(d.year, d.month, 1)
+
+                if periodo_inicio not in agrupados:
+                    agrupados[periodo_inicio] = {
+                        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                        "request_count": 0, "spend_usd": Decimal("0"), "error_count": 0,
+                    }
+                item = agrupados[periodo_inicio]
+                item["prompt_tokens"] += b["prompt_tokens"] or 0
+                item["completion_tokens"] += b["completion_tokens"] or 0
+                item["total_tokens"] += b["total_tokens"] or 0
+                item["request_count"] += b["request_count"] or 0
+                item["spend_usd"] += b["spend_usd"] or Decimal("0")
+                item["error_count"] += b["error_count"] or 0
+
+            serie = [
+                SeriePunto(
+                    periodo=p,
+                    etiqueta=_etiqueta_periodo(p, granularity),
+                    prompt_tokens=datos["prompt_tokens"],
+                    completion_tokens=datos["completion_tokens"],
+                    total_tokens=datos["total_tokens"],
+                    request_count=datos["request_count"],
+                    spend_usd=datos["spend_usd"],
+                    error_count=datos["error_count"],
+                )
+                for p, datos in sorted(agrupados.items(), key=lambda x: x[0])
+            ]
+
+        pico = max((p.total_tokens for p in serie), default=0)
+        for punto in serie:
+            punto.altura_pct = round(punto.total_tokens / pico * 100, 2) if pico else 0.0
+
+        resumen = ResumenMetricas(
+            granularity=granularity,
+            granularity_label=GRANULARITY_LABELS[granularity],
+            api_key_ids=list(api_key_ids or []),
+            desde=desde,
+            hasta=hasta,
+            serie=serie,
+            total_tokens=sum(p.total_tokens for p in serie),
+            prompt_tokens=sum(p.prompt_tokens for p in serie),
+            completion_tokens=sum(p.completion_tokens for p in serie),
+            request_count=sum(p.request_count for p in serie),
+            spend_usd=sum((p.spend_usd for p in serie), Decimal("0")),
+            error_count=sum(p.error_count for p in serie),
+        )
+
+        resumen.por_modelo = list(
+            qs_h.values("model_name")
+            .annotate(
+                total_tokens=Sum("total_tokens"),
+                prompt_tokens=Sum("prompt_tokens"),
+                completion_tokens=Sum("completion_tokens"),
+                request_count=Sum("request_count"),
+                spend_usd=Sum("spend_usd"),
+            )
+            .order_by("-total_tokens")[:12]
+        )
+
+        if not (api_key_ids and len(api_key_ids) == 1):
+            resumen.por_api_key = list(
+                qs_h.values("api_key_id", "api_key__key_alias", "api_key__is_active")
+                .annotate(
+                    total_tokens=Sum("total_tokens"),
+                    prompt_tokens=Sum("prompt_tokens"),
+                    completion_tokens=Sum("completion_tokens"),
+                    request_count=Sum("request_count"),
+                    spend_usd=Sum("spend_usd"),
+                )
+                .order_by("-total_tokens")[:25]
+            )
+
+        return resumen
+
+    # --- camino estándar sobre TokenUsageRollup -------------------------------
     qs = TokenUsageRollup.objects.filter(
         granularity=granularity, bucket_start__gte=desde, bucket_start__lte=hasta
     )
@@ -124,8 +264,9 @@ def obtener_metricas(
         qs = qs.filter(api_key_id__in=api_key_ids)
     if modelos:
         qs = qs.filter(model_name__in=modelos)
+    if dias_semana:
+        qs = qs.filter(bucket_start__iso_week_day__in=dias_semana)
     if not incluir_benchmark:
-        from .filtros import excluir_benchmark
         qs = excluir_benchmark(qs)
 
     # --- serie temporal -------------------------------------------------------
@@ -220,6 +361,9 @@ def obtener_peticiones(
     *,
     incluir_benchmark: bool = False,
     solo_errores: bool = False,
+    dias_semana: Optional[Sequence[int]] = None,
+    hora_desde: int = 0,
+    hora_hasta: int = 23,
 ) -> Dict[str, Any]:
     """Lista paginada de peticiones individuales (fila a fila) para la card
     de detalle del dashboard. A diferencia de `obtener_metricas`, consulta
@@ -241,6 +385,10 @@ def obtener_peticiones(
         qs = qs.filter(model_name__in=modelos)
     if solo_errores:
         qs = qs.exclude(status="success")
+    if dias_semana:
+        qs = qs.filter(event_ts__iso_week_day__in=dias_semana)
+    if (hora_desde, hora_hasta) != (0, 23):
+        qs = qs.filter(event_ts__hour__gte=hora_desde, event_ts__hour__lte=hora_hasta)
     if not incluir_benchmark:
         qs = excluir_benchmark(qs)
 
@@ -485,11 +633,6 @@ def detalle_api_key(
         "registro": registro,
         "metricas": obtener_metricas(granularity=granularity, api_key_ids=[key_id], desde=desde, hasta=hasta),
         "auditoria": list(ApiKeyAudit.objects.filter(api_key_id=key_id)[:50]),
-        "eventos_recientes": list(
-            TokenUsageEvent.objects.filter(api_key_id=key_id)
-            .values("event_ts", "model_name", "prompt_tokens", "completion_tokens",
-                    "total_tokens", "spend_usd", "status", "latency_ms")[:50]
-        ),
     }
 
 

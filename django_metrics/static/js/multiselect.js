@@ -8,13 +8,13 @@
  * página que use estos componentes (dashboard, gestor de API Keys, etc.).
  */
 document.addEventListener("click", (e) => {
-  document.querySelectorAll(".sv-disclosure[open]").forEach((details) => {
+  document.querySelectorAll(".sv-disclosure:not(.sv-card--accordion)[open]").forEach((details) => {
     if (!details.contains(e.target)) details.removeAttribute("open");
   });
 });
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    document.querySelectorAll(".sv-disclosure[open]").forEach((d) => d.removeAttribute("open"));
+    document.querySelectorAll(".sv-disclosure:not(.sv-card--accordion)[open]").forEach((d) => d.removeAttribute("open"));
   }
 });

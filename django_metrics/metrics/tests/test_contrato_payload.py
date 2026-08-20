@@ -127,9 +127,10 @@ class FirmaDeServicios(SimpleTestCase):
 
     def test_lo_nuevo_de_obtener_metricas_es_keyword_only_con_default(self):
         firma = inspect.signature(services.obtener_metricas)
-        p = firma.parameters["incluir_benchmark"]
-        self.assertEqual(p.kind, p.KEYWORD_ONLY)
-        self.assertIs(p.default, False)
+        for nombre in ("incluir_benchmark", "dias_semana", "hora_desde", "hora_hasta", "solo_errores"):
+            p = firma.parameters[nombre]
+            self.assertEqual(p.kind, p.KEYWORD_ONLY, f"{nombre} debe ser keyword-only")
+            self.assertIsNot(p.default, inspect.Parameter.empty, f"{nombre} debe tener valor por defecto")
 
     def test_obtener_peticiones_conserva_sus_posicionales(self):
         firma = inspect.signature(services.obtener_peticiones)
@@ -142,7 +143,7 @@ class FirmaDeServicios(SimpleTestCase):
             ["api_key_ids", "modelos", "desde", "hasta", "page", "page_size",
              "sort_by", "sort_dir"],
         )
-        for nombre in ("incluir_benchmark", "solo_errores"):
+        for nombre in ("incluir_benchmark", "solo_errores", "dias_semana", "hora_desde", "hora_hasta"):
             self.assertEqual(firma.parameters[nombre].kind,
                              inspect.Parameter.KEYWORD_ONLY)
 

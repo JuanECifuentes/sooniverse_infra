@@ -3,7 +3,7 @@ Tooltip accesible y estilizado (nunca title="..."). Uso:
   {% include "metrics/_tooltip.html" with text="Explicación del campo." %}
 Se revela con :hover o :focus-within (teclado), sin JS.
 {% endcomment %}
-<span class="sv-tooltip">
+<span class="sv-tooltip{% if position %} sv-tooltip--{{ position }}{% endif %}">
     <button type="button" class="sv-tooltip__trigger" aria-label="Más información">i</button>
     <span class="sv-tooltip__bubble" role="tooltip">{{ text }}</span>
 </span>

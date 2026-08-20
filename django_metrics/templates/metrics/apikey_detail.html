@@ -218,74 +218,85 @@
     </div>
 </div>
 
-{# ------------------------------------------------- EVENTOS Y AUDITORÍA #}
-<section class="l-grid l-grid--halves">
-    <article class="sv-card l-card--flush">
-        <div class="l-card__head">
-            <div class="l-stack l-stack--tight">
-                <span class="sv-eyebrow">Últimas peticiones</span>
-                <h3>Contadores de tokens</h3>
-            </div>
-            <span class="sv-badge sv-badge--muted">sin prompts ni respuestas</span>
+{# ------------------------------------------------- AUDITORÍA (acordeón) #}
+<details class="sv-card sv-card--accordion l-card--flush l-mb-lg" id="card-auditoria">
+    <summary class="l-card__head sv-card__summary">
+        <div class="l-stack l-stack--tight">
+            <span class="sv-eyebrow">Bitácora</span>
+            <h3>Auditoría de la credencial</h3>
         </div>
+        <div class="l-row l-row--align-center" style="gap: 12px">
+            <span class="sv-badge sv-badge--muted">{{ auditoria|length }} registro{{ auditoria|length|pluralize:"s" }}</span>
+            <span class="sv-accordion__chevron" aria-hidden="true"></span>
+        </div>
+    </summary>
+
+    <div class="l-card__body">
         <div class="l-table-wrap">
-            <table class="sv-table">
+            <table class="sv-table sv-table--responsive">
+                <caption class="sv-visually-hidden">Registros de auditoría de esta API Key</caption>
                 <thead>
                     <tr>
-                        <th>Fecha</th><th>Modelo</th>
-                        <th class="sv-num">In</th><th class="sv-num">Out</th><th class="sv-num">Total</th>
-                        <th>Estado</th>
+                        <th scope="col">Fecha</th>
+                        <th scope="col">Acción</th>
+                        <th scope="col">Actor</th>
+                        <th scope="col">Origen</th>
                     </tr>
-                </thead>
-                <tbody>
-                    {% for ev in eventos_recientes %}
-                        <tr>
-                            <td class="sv-mono">{{ ev.event_ts|date:"d/m H:i:s" }}</td>
-                            <td class="sv-mono">{{ ev.model_name }}</td>
-                            <td class="sv-num">{{ ev.prompt_tokens|human_tokens }}</td>
-                            <td class="sv-num">{{ ev.completion_tokens|human_tokens }}</td>
-                            <td class="sv-num sv-num--accent">{{ ev.total_tokens|human_tokens }}</td>
-                            <td>
-                                {% if ev.status == 'success' %}
-                                    <span class="sv-badge sv-badge--success">ok</span>
-                                {% else %}
-                                    <span class="sv-badge sv-badge--danger">{{ ev.status }}</span>
-                                {% endif %}
-                            </td>
-                        </tr>
-                    {% empty %}
-                        <tr><td colspan="6" class="sv-help">Sin eventos registrados.</td></tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </article>
-
-    <article class="sv-card l-card--flush">
-        <div class="l-card__head">
-            <div class="l-stack l-stack--tight">
-                <span class="sv-eyebrow">Bitácora</span>
-                <h3>Auditoría de la credencial</h3>
-            </div>
-        </div>
-        <div class="l-table-wrap">
-            <table class="sv-table">
-                <thead>
-                    <tr><th>Fecha</th><th>Acción</th><th>Actor</th><th>Origen</th></tr>
                 </thead>
                 <tbody>
                     {% for a in auditoria %}
                         <tr>
-                            <td class="sv-mono">{{ a.created_at|date:"d/m/Y H:i" }}</td>
-                            <td><span class="sv-badge sv-badge--info">{{ a.get_action_display }}</span></td>
-                            <td class="sv-mono">{{ a.actor }}</td>
-                            <td class="sv-mono">{{ a.source_ip|default:"—" }}</td>
+                            <td data-label="Fecha" class="sv-mono">{{ a.created_at|date:"d/m/Y H:i" }}</td>
+                            <td data-label="Acción"><span class="sv-badge sv-badge--info">{{ a.get_action_display }}</span></td>
+                            <td data-label="Actor" class="sv-mono">{{ a.actor }}</td>
+                            <td data-label="Origen" class="sv-mono">{{ a.source_ip|default:"—" }}</td>
                         </tr>
                     {% empty %}
                         <tr><td colspan="4" class="sv-help">Sin registros de auditoría.</td></tr>
                     {% endfor %}
                 </tbody>
             </table>
+        </div>
+    </div>
+</details>
+
+{# ---------------------------------------- CONTADORES DE TOKENS (full-width, paginada) #}
+<section class="l-mb-lg">
+    <article class="sv-card l-card--flush" id="card-tokens" style="position: relative;">
+        <div class="l-loading-overlay" id="akd-tokens-loading" hidden aria-hidden="true">
+            {% include "metrics/_spinner.html" with size="lg" %}
+        </div>
+        <div class="l-card__head">
+            <div class="l-stack l-stack--tight">
+                <span class="sv-eyebrow">Últimas peticiones</span>
+                <h3>Contadores de tokens</h3>
+            </div>
+            <span class="sv-mono sv-muted" id="akd-tokens-total-label">
+                <span data-field="akd-tokens-total"></span> en total
+            </span>
+        </div>
+        <div class="l-table-wrap">
+            <table class="sv-table sv-table--responsive" id="akd-tabla-tokens">
+                <caption class="sv-visually-hidden">Contadores de tokens por petición en la ventana seleccionada</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Fecha</th>
+                        <th scope="col">Modelo</th>
+                        <th scope="col" class="sv-num">In</th>
+                        <th scope="col" class="sv-num">Out</th>
+                        <th scope="col" class="sv-num">Total</th>
+                        <th scope="col">Estado</th>
+                    </tr>
+                </thead>
+                <tbody id="akd-tabla-tokens-body">
+                    <tr><td colspan="6" class="sv-help">Cargando…</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="l-pagination">
+            <button type="button" class="sv-btn sv-btn--ghost sv-btn--sm" id="akd-tokens-prev" disabled>Anterior</button>
+            <span class="sv-mono" id="akd-tokens-page-label">Página 1 de 1</span>
+            <button type="button" class="sv-btn sv-btn--ghost sv-btn--sm" id="akd-tokens-next" disabled>Siguiente</button>
         </div>
     </article>
 </section>

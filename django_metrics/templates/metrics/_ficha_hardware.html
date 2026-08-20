@@ -27,17 +27,10 @@ es interpretable ni comparable entre corridas.
         {% comment %} Decirlo importa: si la rampa acabó sin doler, el techo real puede ser
            MAYOR que el medido, y dimensionar con este número infraestima. {% endcomment %}
         <p class="sv-help l-mt-sm">
-            La rampa terminó sin degradar la respuesta: el techo real puede ser
-            <strong>mayor</strong> que el medido. Amplía
-            <span class="sv-mono">capacidad.niveles_concurrencia</span> para encontrarlo.
+            La prueba terminó sin degradar la respuesta: el techo real puede ser
+            <strong>mayor</strong> que el medido.
         </p>
     {% endif %}
-
-    <p class="sv-help l-mt-sm">
-        Medido desde el propio Gateway (<span class="sv-mono">127.0.0.1 → nginx → litellm →
-        worker</span>), que es el camino del cliente real. Los números de una corrida con
-        <span class="sv-mono">origen: operador</span> no son comparables con estos.
-    </p>
 {% else %}
-    <p class="sv-help">Sin corridas registradas todavía.</p>
+    <p class="sv-help">Sin pruebas registradas todavía.</p>
 {% endif %}
