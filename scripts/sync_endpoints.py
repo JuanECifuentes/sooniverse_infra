@@ -398,6 +398,7 @@ def build_endpoints(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     for wl in config["workloads"]:
         cluster = names[wl["id"]]
         frac = wl.get("asignacion_fraccional", {})
+        conc = wl.get("concurrencia", {}) or {}
         model_public_name = wl.get("nombre_publico", wl["id"])
         # Preferir la verdad sondeada (sooniverse.model_capability) sobre lo
         # declarado; solo antes del primer sondeo (recién desplegado) no hay
@@ -422,6 +423,13 @@ def build_endpoints(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "max_model_len": frac.get("max_model_len"),
                 "healthy": healthy,
                 "capacidades": capacidades,
+                # Ficha de hardware/planificador: sin esto, el benchmark de
+                # capacidad no puede registrar bajo qué configuración midió, y un
+                # techo sin su configuración no es interpretable.
+                "instance_type": wl.get("tipo_instancia"),
+                "gpu_count": wl.get("cantidad_gpus"),
+                "max_num_seqs": conc.get("max_num_seqs"),
+                "max_num_batched_tokens": conc.get("max_num_batched_tokens"),
             })
 
     return endpoints
@@ -603,8 +611,10 @@ def register_in_db(endpoints: List[Dict[str, Any]], cluster_of: Dict[str, str], 
                     INSERT INTO sooniverse.worker_node
                         (cluster_name, node_rank, private_ip, port, model_name, accelerator,
                          is_healthy, last_seen_at, deployment_id, subnet_id, security_group_id,
-                         last_health_check, health_status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, NOW(), %s)
+                         last_health_check, health_status,
+                         instance_type, gpu_count, max_num_seqs, max_num_batched_tokens, max_model_len)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, NOW(), %s,
+                            %s, %s, %s, %s, %s)
                     ON CONFLICT (cluster_name, private_ip, port) DO UPDATE SET
                         node_rank          = EXCLUDED.node_rank,
                         model_name         = EXCLUDED.model_name,
@@ -615,11 +625,19 @@ def register_in_db(endpoints: List[Dict[str, Any]], cluster_of: Dict[str, str], 
                         subnet_id          = COALESCE(EXCLUDED.subnet_id, sooniverse.worker_node.subnet_id),
                         security_group_id  = COALESCE(EXCLUDED.security_group_id, sooniverse.worker_node.security_group_id),
                         last_health_check  = NOW(),
-                        health_status      = EXCLUDED.health_status
+                        health_status      = EXCLUDED.health_status,
+                        instance_type      = COALESCE(EXCLUDED.instance_type, sooniverse.worker_node.instance_type),
+                        gpu_count          = COALESCE(EXCLUDED.gpu_count, sooniverse.worker_node.gpu_count),
+                        max_num_seqs       = COALESCE(EXCLUDED.max_num_seqs, sooniverse.worker_node.max_num_seqs),
+                        max_num_batched_tokens = COALESCE(EXCLUDED.max_num_batched_tokens,
+                                                          sooniverse.worker_node.max_num_batched_tokens),
+                        max_model_len      = COALESCE(EXCLUDED.max_model_len, sooniverse.worker_node.max_model_len)
                     """,
                     (ep["cluster"], rank, ep["ip"], ep["port"], ep["model_public_name"], ep.get("accelerator"),
                      healthy, net_ctx["deployment_id"], ep.get("subnet_id"), net_ctx["security_group_id"],
-                     "healthy" if healthy else "unhealthy"),
+                     "healthy" if healthy else "unhealthy",
+                     ep.get("instance_type"), ep.get("gpu_count"),
+                     ep.get("max_num_seqs"), ep.get("max_num_batched_tokens"), ep.get("max_model_len")),
                 )
         conn.commit()
         healthy_count = sum(1 for ep in endpoints if ep.get("healthy", True))

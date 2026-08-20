@@ -89,6 +89,9 @@ sky_*.yaml
 .sooniverse_endpoints.healthy.json
 # Resultado del sondeo de capacidades reales (scripts/test_model_capabilities.py)
 .sooniverse_capabilities.json
+# Artefacto de la fase 'capacidad': la corrida del benchmark. La fuente de
+# verdad es sooniverse.capacity_benchmark; esto es solo la copia local.
+.sooniverse_capacity.json
 # config.yaml de LiteLLM: contiene IPs privadas de la VPC del cliente
 docker_images/gateway/litellm_config.yaml
 # Espejo local de estado (PostgresInfraStateStore) y mirrors de prueba

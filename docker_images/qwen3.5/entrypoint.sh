@@ -8,15 +8,24 @@ set -e
 MODEL_NAME="${MODEL_NAME:?Debes definir MODEL_NAME}"
 PORT="${PORT:-8007}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
-MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$MAX_MODEL_LEN}"
+# Presupuesto de tokens por paso del planificador. La mitad del contexto: con
+# chunked prefill un prompt largo se parte en varios pasos en vez de monopolizar
+# uno entero y congelar la generación del resto de secuencias.
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.95}"
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
+# Peticiones que el worker atiende A LA VEZ. El default era 2, lo que hacía que
+# el tercer usuario concurrente esperara en cola por mucha VRAM libre que
+# hubiera: era el techo de capacidad real del sistema. Lo fija ahora el contrato
+# (workloads[].concurrencia.max_num_seqs) y lo mide scripts/benchmark_capacity.py.
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
 DTYPE="${DTYPE:-half}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 MM_PROCESSOR_KWARGS="${MM_PROCESSOR_KWARGS:-{\"max_pixels\": 602112}}"
-CUDAGRAPH_CAPTURE_SIZES="${CUDAGRAPH_CAPTURE_SIZES:-[1, 2, 4, 8]}"
+# Debe cubrir los tamaños de batch que se van a dar de verdad, o los lotes
+# grandes caen fuera del grafo capturado. Se mantiene alineado con MAX_NUM_SEQS.
+CUDAGRAPH_CAPTURE_SIZES="${CUDAGRAPH_CAPTURE_SIZES:-[1, 2, 4, 8, 16]}"
 
 # Capacidades declaradas en config_global.yaml (ver scripts/generate_infra.py
 # build_worker() y scripts/test_model_capabilities.py). Solo se le anuncia al
@@ -42,6 +51,12 @@ if [ -n "${QUANTIZATION}" ]; then
 fi
 if [ "${ENFORCE_EAGER}" = "1" ]; then
   EXTRA_ARGS+=(--enforce-eager)
+fi
+# Con un presupuesto de tokens por paso menor que la ventana de contexto, vLLM
+# necesita chunked prefill explícito o rechaza el arranque
+# ("max_num_batched_tokens must be >= max_model_len").
+if [ "${MAX_NUM_BATCHED_TOKENS}" -lt "${MAX_MODEL_LEN}" ]; then
+  EXTRA_ARGS+=(--enable-chunked-prefill)
 fi
 if [ "${ENABLE_TOOL_CALLING}" = "1" ]; then
   if [ -z "${TOOL_CALL_PARSER}" ]; then

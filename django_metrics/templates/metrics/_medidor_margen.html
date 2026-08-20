@@ -1,0 +1,25 @@
+{% comment %}
+Medidor de margen: cuánto del techo medido consume el pico observado.
+
+El color NUNCA es el único canal: la etiqueta textual va siempre al lado, y el
+elemento es role="meter" con aria-valuetext, para que un usuario con
+deuteranopía o con lector de pantalla obtenga la misma información.
+Las marcas del 60 % y el 85 % son los umbrales del semáforo, visibles.
+{% endcomment %}
+<div class="l-stack l-stack--tight">
+    <div class="l-meter" role="meter"
+         aria-valuenow="{{ margen.uso_pct|default:0 }}" aria-valuemin="0" aria-valuemax="100"
+         aria-valuetext="{{ margen.etiqueta }}" aria-label="Margen de capacidad">
+        <span class="l-meter__fill" data-semaforo="{{ margen.semaforo }}"
+              style="width: {% if margen.uso_pct %}{{ margen.uso_pct }}{% else %}0{% endif %}%"></span>
+        <span class="l-meter__mark" style="left: 60%" aria-hidden="true"></span>
+        <span class="l-meter__mark" style="left: 85%" aria-hidden="true"></span>
+    </div>
+    <div class="l-meter__foot">
+        <span class="sv-mono">0</span>
+        <span class="sv-mono">60 %</span>
+        <span class="sv-mono">85 %</span>
+        <span class="sv-mono">techo</span>
+    </div>
+    <p class="sv-semaforo-label" data-semaforo="{{ margen.semaforo }}">{{ margen.etiqueta }}</p>
+</div>

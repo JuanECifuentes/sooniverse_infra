@@ -28,6 +28,8 @@
                 <nav class="l-nav">
                     <a class="sv-nav__link {% if seccion == 'metricas' %}sv-nav__link--active{% endif %}"
                        href="{% url 'metrics:dashboard' %}">Métricas</a>
+                    <a class="sv-nav__link {% if seccion == 'capacidad' %}sv-nav__link--active{% endif %}"
+                       href="{% url 'metrics:capacidad' %}">Capacidad</a>
                     <a class="sv-nav__link {% if seccion == 'apikeys' %}sv-nav__link--active{% endif %}"
                        href="{% url 'metrics:api_keys' %}">API Keys</a>
                     <a class="sv-nav__link" href="/admin/">Admin</a>

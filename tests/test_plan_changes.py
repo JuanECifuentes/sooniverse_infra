@@ -165,3 +165,26 @@ def test_mixed_changes_classified_independently():
     plan = plan_changes(old, new)
     classifications = {c.classification for c in plan.changes}
     assert classifications == {IN_PLACE, RECREATE_CLUSTER, REQUIRES_DESTROY}
+
+
+def test_cambiar_concurrencia_exige_relanzar_el_worker():
+    """max_num_seqs es una bandera de arranque de vLLM: no se puede aplicar
+    sobre un proceso vivo, pero tampoco exige destruir la infraestructura."""
+    base = load_base_config()
+    nuevo = clone(base)
+    nuevo["workloads"][0]["concurrencia"]["max_num_seqs"] = 32
+
+    plan = plan_changes(base, nuevo)
+    assert plan.requires_destroy is False
+    assert plan.clusters_to_recreate == [base["workloads"][0]["id"]]
+    assert any(c.classification == RECREATE_CLUSTER and "concurrencia" in c.field
+               for c in plan.changes)
+
+
+def test_seccion_capacidad_no_afecta_al_plan_de_infraestructura():
+    """El benchmark es una fase de medición: cambiar sus parámetros no debe
+    tocar ni un recurso de AWS."""
+    base = load_base_config()
+    nuevo = clone(base)
+    nuevo["capacidad"]["segundos_por_nivel"] = 5
+    assert plan_changes(base, nuevo).is_no_op

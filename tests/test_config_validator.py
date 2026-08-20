@@ -231,3 +231,104 @@ def test_capacidades_absent_is_valid():
     cfg = clone(load_base_config())
     del cfg["workloads"][0]["capacidades"]
     ConfigValidator.validate(cfg)
+
+
+# -- concurrencia de vLLM ------------------------------------------------------
+def test_concurrencia_ausente_es_valida():
+    """Sección opcional: build_worker() aplica los defaults (16 / 8192)."""
+    cfg = clone(load_base_config())
+    del cfg["workloads"][0]["concurrencia"]
+    ConfigValidator.validate(cfg)
+
+
+def test_concurrencia_max_num_seqs_fuera_de_rango_rechazada():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["concurrencia"]["max_num_seqs"] = 0
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+    cfg["workloads"][0]["concurrencia"]["max_num_seqs"] = 99999
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_concurrencia_batched_tokens_menor_que_seqs_rechazado():
+    """Con menos tokens por paso que secuencias en vuelo, al menos una secuencia
+    no podría decodificar ni un token por paso del planificador."""
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["concurrencia"] = {"max_num_seqs": 2048, "max_num_batched_tokens": 1024}
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_concurrencia_batched_tokens_minimo():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["concurrencia"]["max_num_batched_tokens"] = 512
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+# -- benchmark de capacidad ----------------------------------------------------
+def test_capacidad_ausente_es_valida():
+    """Compatibilidad hacia atrás: un contrato anterior a esta sección sigue valiendo."""
+    cfg = clone(load_base_config())
+    del cfg["capacidad"]
+    ConfigValidator.validate(cfg)
+
+
+def test_capacidad_niveles_no_crecientes_rechazados():
+    cfg = clone(load_base_config())
+    cfg["capacidad"]["niveles_concurrencia"] = [1, 4, 2, 8]
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_capacidad_niveles_con_repetidos_rechazados():
+    cfg = clone(load_base_config())
+    cfg["capacidad"]["niveles_concurrencia"] = [1, 2, 2, 4]
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_capacidad_niveles_vacios_rechazados():
+    cfg = clone(load_base_config())
+    cfg["capacidad"]["niveles_concurrencia"] = []
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_capacidad_presupuesto_insuficiente_rechazado():
+    """La regla que convierte 'rampa acotada' en una garantía del contrato y no
+    en una intención: sin ella, 10 niveles x 60s se comerían 10 min de GPU en
+    cada despliegue sin que nadie lo notara."""
+    cfg = clone(load_base_config())
+    cfg["capacidad"]["niveles_concurrencia"] = [1, 2, 4, 8, 16, 32]
+    cfg["capacidad"]["segundos_por_nivel"] = 60
+    cfg["capacidad"]["presupuesto_segundos"] = 120
+    with pytest.raises(ConfigValidationError) as exc:
+        ConfigValidator.validate(cfg)
+    assert "presupuesto_segundos" in str(exc.value)
+
+
+def test_capacidad_origen_invalido_rechazado():
+    cfg = clone(load_base_config())
+    cfg["capacidad"]["origen"] = "portatil"
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_capacidad_umbral_error_fuera_de_rango_rechazado():
+    cfg = clone(load_base_config())
+    cfg["capacidad"]["umbral_error_pct"] = 0
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+    cfg["capacidad"]["umbral_error_pct"] = 150
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_capacidad_deshabilitada_es_valida():
+    cfg = clone(load_base_config())
+    cfg["capacidad"]["habilitado"] = False
+    ConfigValidator.validate(cfg)

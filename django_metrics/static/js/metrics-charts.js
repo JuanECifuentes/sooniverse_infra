@@ -13,47 +13,14 @@
  * destruirla y recrearla.
  */
 
+import { SIN_MOVIMIENTO, cssVar, escapeHtml, fmtInt, fmtTok, hexToRgba } from "./format.js";
+
 const panel = document.getElementById("metrics-panel");
 
 if (panel && window.Chart) {
   const canvas = document.getElementById("metrics-chart-canvas");
   const tableBody = document.getElementById("metrics-chart-table-body");
   const bootstrapEl = document.getElementById("metrics-initial-payload");
-
-  const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  const fmtInt = (n) => Number(n || 0).toLocaleString("es-ES");
-
-  // Todo lo que muestra esta gráfica es tokens, igual que human_tokens del
-  // servidor. >=1.000.000 -> "2,5M"; >=100.000 -> "125K"; si no, separador de miles.
-  function fmtCompacto(n, divisor, sufijo) {
-    let texto = (n / divisor).toFixed(1);
-    if (texto.endsWith(".0")) texto = texto.slice(0, -2);
-    return `${texto.replace(".", ",")}${sufijo}`;
-  }
-  function fmtTok(n) {
-    n = Number(n || 0);
-    if (Math.abs(n) >= 1_000_000) return fmtCompacto(n, 1_000_000, "M");
-    if (Math.abs(n) >= 100_000) return fmtCompacto(n, 1_000, "K");
-    return fmtInt(n);
-  }
-
-  function escapeHtml(str) {
-    return String(str).replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[c]));
-  }
-
-  // Chart.js necesita rgba() para la transparencia de relleno; los tokens de
-  // color son hex sólidos, así que se convierten en tiempo de ejecución.
-  function hexToRgba(hex, alpha) {
-    const limpio = hex.replace("#", "");
-    const valor = parseInt(
-      limpio.length === 3 ? limpio.split("").map((c) => c + c).join("") : limpio,
-      16
-    );
-    const r = (valor >> 16) & 255, g = (valor >> 8) & 255, b = valor & 255;
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-  }
 
   let chart = null;
 
@@ -107,6 +74,10 @@ if (panel && window.Chart) {
       data: { labels: data.series.labels, datasets: buildDatasets(data.series) },
       options: {
         maintainAspectRatio: false,
+        // La regla prefers-reduced-motion de theme-sooniverse.css neutraliza las
+        // transiciones CSS pero NO alcanza a Chart.js, que anima por JS: era un
+        // incumplimiento ya existente, no solo de las gráficas nuevas.
+        animation: SIN_MOVIMIENTO ? false : undefined,
         scales: {
           x: {
             stacked: true,

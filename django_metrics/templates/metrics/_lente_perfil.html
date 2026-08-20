@@ -1,0 +1,31 @@
+{% comment %}
+Lente "Perfil horario": curva de carga 0-23 h con banda mediana/pico y la línea
+del techo de capacidad medido superpuesta. Es donde se ve si el pico de una hora
+concreta roza el límite de la infraestructura.
+
+Canvas e instancia de Chart.js PROPIOS: nunca se cambia el `type` de la gráfica
+de barras, porque Chart.js no lo soporta de forma fiable.
+{% endcomment %}
+<div class="l-chart-canvas-wrap">
+    <canvas id="metrics-perfil-canvas" role="img"
+            aria-describedby="metrics-perfil-table-caption"></canvas>
+</div>
+
+<p class="sv-help l-mt-sm" id="metrics-perfil-nota"></p>
+
+<table class="sv-table sv-visually-hidden" id="metrics-perfil-table">
+    <caption id="metrics-perfil-table-caption">
+        Perfil de carga por hora del día: mediana, percentil 90 y pico de peticiones,
+        con el número de días observados en cada hora.
+    </caption>
+    <thead>
+        <tr>
+            <th scope="col">Hora</th>
+            <th scope="col" class="sv-num">Mediana</th>
+            <th scope="col" class="sv-num">P90</th>
+            <th scope="col" class="sv-num">Pico</th>
+            <th scope="col" class="sv-num">Días</th>
+        </tr>
+    </thead>
+    <tbody id="metrics-perfil-table-body"></tbody>
+</table>

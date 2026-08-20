@@ -96,6 +96,18 @@ python scripts/generate_infra.py --run --only network            # una sola fase
 - **Puede fallar (sin abortar el despliegue):** un mismatch peligroso (`capacidades.vision: true` en el contrato pero el modelo lo rechaza) se imprime en la tabla y devuelve código 1, pero la infra queda `active`/`degraded` igual — corrige `config_global.yaml` y re-despliega, o re-corre `python scripts/test_model_capabilities.py --write-db` suelto tras arreglar el worker.
 - **Por qué `GATEWAY_RUN_SCRIPT` persiste `CLIENTE_ID`/`ENTORNO` en `.env` (hallazgo de un despliegue de prueba real):** SkyPilot solo exporta las `envs:` del contrato (`CLIENTE_ID`, `ENTORNO`, ...) al script `setup:`/`run:` que corre durante `sky launch`; una invocación posterior de `docker compose` vía `sky exec` (exactamente lo que hace `sync_openwebui_models.py` en cada corrida de esta fase) **no hereda ese entorno de shell** — confirmado con `sky exec <gw> 'echo $CLIENTE_ID'` devolviendo vacío. Sin escribir esas dos variables en `.env` (idempotente, primer paso de `GATEWAY_RUN_SCRIPT`), `openwebui-bootstrap` consultaría `sooniverse.model_capability` con `client_id='default'` en vez del cliente real, sin encontrar la fila, y aplicaría el fallback fail-closed (todo apagado) en silencio en cada resincronización posterior al primer despliegue.
 
+## Fase 6.6 — `capacidad`
+
+- **Función:** dentro de `deploy()` (`scripts/generate_infra.py:1658-1685`), entre `capabilities` y `verify`: invoca `scripts/benchmark_capacity.py --config <config> --write-db --json <out_dir>/.sooniverse_capacity.json` como subproceso. **Best-effort**: un código de salida distinto de cero solo genera un `[WARNING]`; el despliegue continúa y termina igual.
+- **Qué responde:** "¿cuántas peticiones y cuántos tokens por minuto aguanta esta infraestructura antes de degradar la respuesta?". Hasta esta fase, el panel podía decir cuánto se había consumido, pero no si el consumo estaba cerca de algún límite — el techo era una conjetura del operador, no un número medido.
+- **Qué hace:** una **rampa acotada** de concurrencia (`capacidad.niveles_concurrencia`, por defecto `[1, 2, 4, 8, 16]`). En cada nivel lanza peticiones en bucle cerrado durante `segundos_por_nivel` y mide throughput, tokens de salida por segundo, TTFT y latencias p50/p95/p99. Tras cada nivel evalúa si parar: `errores` (tasa por encima de `umbral_error_pct`), `p95_degradado` (p95 por encima de `umbral_p95_degradacion` × el p95 del nivel 1), `saturacion_throughput` (un nivel más de concurrencia ya no aporta tokens/s, así que solo añade cola) o `presupuesto_agotado`. La **rodilla** es el último nivel que no disparó ninguna condición. Si la rampa termina sin doler, el motivo es `nivel_maximo` y el techo real puede ser mayor que el medido — la ficha del panel lo dice explícitamente, porque dimensionar con ese número infraestima.
+- **Por qué se mide desde el Gateway y no desde la máquina del operador:** fuera de la VPC, el RTT del ISP de quien lanza el script domina el TTFT y limita la concurrencia alcanzable; se estaría midiendo la conexión del operador, no la infraestructura. El script se auto-invoca en remoto vía `sky exec` con `--local`, de modo que el camino medido es `127.0.0.1:80 → nginx → litellm → worker`: exactamente el del cliente real (Open WebUI). La columna `capacity_benchmark.origen` registra cuál de los dos se usó, porque los números de un origen **no son comparables** con los del otro.
+- **Transporte del script al Gateway:** `scp`, no `sky rsync`. Ese subcomando **no existe** en la versión de SkyPilot de este repo (0.13.0 responde `Error: No such command 'rsync'`, confirmado en un despliegue real), así que no es un fallo de red que se pueda reintentar. Se reutiliza el patrón de `scripts/sync_openwebui_models.py`: resolver IP + clave generada por SkyPilot (`~/.sky/generated/ssh-keys/<cluster>.key`) y empujar por `scp`, con `sky exec` + heredoc como reserva. El push es necesario porque `scripts/` solo se sincroniza en el `sky launch` del Gateway (`file_mounts`): un `--only capacidad` en frío encontraría allí una copia vieja del script, o ninguna la primera vez.
+- **Tráfico sintético y métricas de negocio:** el benchmark genera peticiones reales que LiteLLM registra en `SpendLogs`. Para que no contaminen el panel, el runner emite una API Key **efímera** (`duration: 1h`, borrada al terminar) que el driver registra en `sooniverse.api_key_registry` con `proposito = 'benchmark'`. El panel la excluye por defecto —con un chip visible para poder incluirla— y, sobre todo, el **pico observado** de la página de capacidad la excluye siempre: si no, el pico sería siempre el propio test de estrés y el semáforo de margen estaría en rojo permanente sin que existiera ningún problema real.
+- **Duración:** ~2-4 minutos de GPU por workload. `capacidad.presupuesto_segundos` (default 240) es un **tope duro**, no una intención: `ConfigValidator._validate_capacidad` rechaza el contrato si `len(niveles) × segundos_por_nivel + warmup` lo supera, de modo que una rampa de 10 niveles × 60s no puede colarse y comerse 10 minutos de GPU en cada despliegue sin que nadie lo note.
+- **Escribe:** una fila en `sooniverse.capacity_benchmark` (con la curva completa por nivel en JSONB) y el artefacto `<out_dir>/.sooniverse_capacity.json`.
+- **Puede fallar (sin abortar el despliegue):** si no hay Gateway activo, el script imprime `[N/A]` y devuelve 0. Si la persistencia en PostgreSQL falla, se avisa con `[WARNING]` pero la medición ya viajó en el JSON. Con `capacidad.habilitado: false` la fase ni siquiera se ejecuta: log `[SKIP]`.
+
 ## Fase 7 — `verify`
 
 - **Función:** `deploy()` invoca `scripts/verify_deployment.py --config <config>` como subproceso, **best-effort**: un código de salida distinto de cero solo genera un `[WARNING]`, no aborta el reporte final.
@@ -134,9 +146,21 @@ operador          generate_infra.py         PostgreSQL            AwsNetworkMana
    │                     │◀──sooniverse.model_capability actualizada──────────│                    │                 │
    │                     │──sync_openwebui_models.py --apply (best-effort)────────────────────────────────────────▶│
    │                     │                                                                       │◀──recrea open-webui + bootstrap modelos
+   │                     │──benchmark_capacity.py --write-db (best-effort)────────────────────────────────────────▶│
+   │                     │                                    │  sky exec: el script se mide A SÍ MISMO desde el   │
+   │                     │                                    │  Gateway (rampa acotada, key efímera 'benchmark')  │
+   │                     │◀──sooniverse.capacity_benchmark + .sooniverse_capacity.json───────────│                 │
    │                     │──verify_deployment.py (best-effort)                                   │                   │
    │◀──URLs + deployment_id──│                       │                       │                    │                 │
 ```
+
+**Orden de fases (`PHASE_ORDER`, `scripts/generate_infra.py:1356`):**
+
+```
+network → gateway → workers → endpoints → capabilities → capacidad → verify
+```
+
+`--only` acepta `all` o cualquiera de esos nombres; sus `choices` se derivan de `PHASE_ORDER` (`["all", *PHASE_ORDER]`), así que añadir una fase nueva solo exige tocar esa lista y no se pueden desincronizar.
 
 ## Diagrama de secuencia — `destroy` completo
 

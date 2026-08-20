@@ -1,0 +1,74 @@
+{% comment %}
+Tarjeta "Tiempos muertos": responde directamente a "¿en qué momento del fin de
+semana está sin uso la máquina?" listando los tramos contiguos más largos sin
+una sola petición dentro del rango filtrado.
+
+La columna de coste solo aparece si METRICS_COSTE_HORA_USD está configurado: con
+0 se oculta entera en vez de llenar la tabla de $0,0000, que no informa de nada.
+{% endcomment %}
+<article class="sv-card l-card--flush" id="card-tiempos-muertos">
+    <div class="l-card__head">
+        <div class="l-stack l-stack--tight">
+            <span class="sv-eyebrow">Ocio</span>
+            <h3>Tiempos muertos</h3>
+        </div>
+        {% include "metrics/_tooltip.html" with text="Horas del rango sin ninguna petición. Se calcula sobre la rejilla horaria en hora local, respetando los filtros de día de la semana y franja." %}
+    </div>
+
+    <div class="l-card__body">
+        <div class="l-row l-row--between l-mb-md">
+            <div class="l-kpi">
+                <span class="sv-eyebrow">Horas ociosas</span>
+                <span class="l-kpi__value">
+                    <span class="sv-metric-sm" data-field="pct_ocioso">{{ ocio.pct_ocioso }} %</span>
+                </span>
+                <span class="l-kpi__foot sv-mono sv-muted" data-field="horas_ociosas">
+                    {{ ocio.horas_ociosas }} / {{ ocio.horas_totales }} h
+                </span>
+            </div>
+
+            <div class="l-kpi" data-coste-ocioso {% if not ocio.coste_hora_usd %}hidden{% endif %}>
+                <span class="sv-eyebrow">Coste de la máquina parada</span>
+                <span class="l-kpi__value">
+                    <span class="sv-metric-sm" data-field="coste_ocioso">${{ ocio.coste_ocioso_usd }}</span>
+                </span>
+                <span class="l-kpi__foot sv-mono sv-muted">a ${{ ocio.coste_hora_usd }}/h</span>
+            </div>
+        </div>
+
+        <div class="l-table-wrap">
+            <table class="sv-table sv-table--responsive">
+                <caption class="sv-visually-hidden">
+                    Franjas contiguas más largas sin ninguna petición dentro del rango seleccionado.
+                </caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Franja sin uso</th>
+                        <th scope="col" class="sv-num">Horas</th>
+                        <th scope="col" class="sv-num" data-coste-ocioso
+                            {% if not ocio.coste_hora_usd %}hidden{% endif %}>Coste</th>
+                    </tr>
+                </thead>
+                <tbody id="ocio-ventanas-body">
+                    {% for v in ocio.ventanas %}
+                        <tr>
+                            <td data-label="Franja">{{ v.etiqueta }}</td>
+                            <td data-label="Horas" class="sv-num">{{ v.horas }}</td>
+                            <td data-label="Coste" class="sv-num" data-coste-ocioso
+                                {% if not ocio.coste_hora_usd %}hidden{% endif %}>${{ v.coste_usd }}</td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="3" class="sv-help">Sin franjas ociosas en el rango.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        {% if ocio.horas_sin_datos %}
+            <p class="sv-help l-mt-sm">
+                {{ ocio.horas_sin_datos }} de esas horas no tienen agregación todavía:
+                aparecen como ociosas pero podrían no serlo hasta que el ETL las procese.
+            </p>
+        {% endif %}
+    </div>
+</article>

@@ -1,9 +1,10 @@
 """Filtros de formato específicos del panel de métricas."""
 
 from django import template
-from django.contrib.humanize.templatetags.humanize import intcomma
 
 register = template.Library()
+
+SEPARADOR_MILES = "."
 
 
 def _formato_compacto(numero, divisor, sufijo):
@@ -14,12 +15,32 @@ def _formato_compacto(numero, divisor, sufijo):
     return f"{texto.replace('.', ',')}{sufijo}"
 
 
+def _con_separador_de_miles(numero):
+    """Agrupación explícita con punto, según el manual de imagen (§2.1).
+
+    NO se delega en `intcomma`: el locale `es` de Django agrupa con un espacio
+    duro (U+00A0), así que `99999` salía como "99 999" en el render del
+    servidor y como "99.999" en el del cliente (`toLocaleString('es-ES')` en
+    format.js). El mismo número cambiaba de aspecto al tocar cualquier filtro,
+    porque el primer pintado lo hace la plantilla y los siguientes el fetch.
+    """
+    return f"{numero:,}".replace(",", SEPARADOR_MILES)
+
+
 @register.filter
 def human_tokens(value):
-    """Formatea un contador de tokens: por debajo de 100.000 usa el mismo
-    separador de miles que `intcomma`; de 100.000 a menos de 1.000.000 lo
-    expresa en miles (p. ej. 125.000 -> "125K"); por encima, en millones
-    (p. ej. 2.500.000 -> "2,5M")."""
+    """Formatea un contador de tokens: por debajo de 100.000, separador de
+    miles; de 100.000 a menos de 1.000.000, en miles (125.000 -> "125K"); por
+    encima, en millones (2.500.000 -> "2,5M").
+
+    Espejo de `static/js/format.js::fmtTok`. La tabla de casos canónica está en
+    `metrics/tests/test_formato.py`; si cambias un umbral aquí, cámbialo allí.
+    """
+    if value is None:
+        # Un contador ausente es cero en este panel (todas las columnas son
+        # NOT NULL DEFAULT 0; un None solo llega de un agregado vacío). Sin
+        # esto la plantilla renderizaba literalmente "None".
+        return "0"
     try:
         numero = int(value)
     except (TypeError, ValueError):
@@ -29,7 +50,7 @@ def human_tokens(value):
         return _formato_compacto(numero, 1_000_000, "M")
     if abs(numero) >= 100_000:
         return _formato_compacto(numero, 1_000, "K")
-    return intcomma(numero)
+    return _con_separador_de_miles(numero)
 
 
 @register.filter
