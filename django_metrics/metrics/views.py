@@ -63,6 +63,8 @@ def _peticiones_payload(resultado):
                 "model": e.model_name,
                 "input": e.prompt_tokens,
                 "output": e.completion_tokens,
+                "total": e.total_tokens,
+                "status": e.status,
                 "api_key": (e.api_key.key_alias if e.api_key_id and e.api_key else None) or "(sin registro)",
             }
             for e in resultado["items"]
@@ -310,8 +312,6 @@ def metrics_api(request):
     navegación — así nunca queda reflejado ni cacheado en la URL de la página.
     """
     granularity = request.POST.get("granularity") or TokenUsageRollup.DAILY
-    # Se valida contra las granularidades del PANEL, no contra las del modelo:
-    # 'hourly' no vive en token_usage_rollup sino en la tabla usage_hourly.
     if granularity not in dict(ft.GRANULARIDADES_PANEL):
         return JsonResponse(
             {"error": f"Agrupación inválida: '{granularity}'. Usa uno de: "
@@ -322,13 +322,6 @@ def metrics_api(request):
     f, error = _parse_filtros(request)
     if error:
         return error
-
-    if granularity == ft.HOURLY and f.dias > ft.HOURLY_MAX_DIAS:
-        return JsonResponse(
-            {"error": f"La agrupación 'Por hora' admite como máximo {ft.HOURLY_MAX_DIAS} días "
-                      f"(pediste {f.dias}). Reduce el rango o cambia a 'Diario'."},
-            status=400,
-        )
 
     api_key_ids = list(f.api_key_ids) or None
     modelos_filtro = list(f.modelos) or None
@@ -352,15 +345,31 @@ def metrics_api(request):
         return JsonResponse({"error": "'dir' inválido. Usa 'asc' o 'desc'."}, status=400)
 
     metricas = services.obtener_metricas(
-        granularity=granularity if granularity != ft.HOURLY else TokenUsageRollup.DAILY,
-        api_key_ids=api_key_ids, modelos=modelos_filtro,
-        desde=f.desde, hasta=f.hasta, incluir_benchmark=f.incluir_benchmark,
+        granularity=granularity,
+        api_key_ids=api_key_ids,
+        modelos=modelos_filtro,
+        desde=f.desde,
+        hasta=f.hasta,
+        incluir_benchmark=f.incluir_benchmark,
+        dias_semana=f.dias_semana,
+        hora_desde=f.hora_desde,
+        hora_hasta=f.hora_hasta,
+        solo_errores=(f.estado == ft.ESTADO_ERRORES),
     )
     peticiones = services.obtener_peticiones(
-        api_key_ids=api_key_ids, modelos=modelos_filtro, desde=f.desde, hasta=f.hasta,
-        page=page, page_size=page_size, sort_by=sort_by, sort_dir=sort_dir,
+        api_key_ids=api_key_ids,
+        modelos=modelos_filtro,
+        desde=f.desde,
+        hasta=f.hasta,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
         incluir_benchmark=f.incluir_benchmark,
         solo_errores=(f.estado == ft.ESTADO_ERRORES),
+        dias_semana=f.dias_semana,
+        hora_desde=f.hora_desde,
+        hora_hasta=f.hora_hasta,
     )
 
     # Los tiempos muertos SÍ viajan en el camino caliente (a diferencia del mapa
@@ -391,15 +400,28 @@ def _comparativa(f, granularity):
     """
     prev = f.periodo_anterior()
     m = services.obtener_metricas(
-        granularity=granularity if granularity != ft.HOURLY else TokenUsageRollup.DAILY,
+        granularity=granularity,
         api_key_ids=list(prev.api_key_ids) or None,
         modelos=list(prev.modelos) or None,
-        desde=prev.desde, hasta=prev.hasta, incluir_benchmark=prev.incluir_benchmark,
+        desde=prev.desde,
+        hasta=prev.hasta,
+        incluir_benchmark=prev.incluir_benchmark,
+        dias_semana=prev.dias_semana,
+        hora_desde=prev.hora_desde,
+        hora_hasta=prev.hora_hasta,
+        solo_errores=(prev.estado == ft.ESTADO_ERRORES),
     )
     actual = services.obtener_metricas(
-        granularity=granularity if granularity != ft.HOURLY else TokenUsageRollup.DAILY,
-        api_key_ids=list(f.api_key_ids) or None, modelos=list(f.modelos) or None,
-        desde=f.desde, hasta=f.hasta, incluir_benchmark=f.incluir_benchmark,
+        granularity=granularity,
+        api_key_ids=list(f.api_key_ids) or None,
+        modelos=list(f.modelos) or None,
+        desde=f.desde,
+        hasta=f.hasta,
+        incluir_benchmark=f.incluir_benchmark,
+        dias_semana=f.dias_semana,
+        hora_desde=f.hora_desde,
+        hora_hasta=f.hora_hasta,
+        solo_errores=(f.estado == ft.ESTADO_ERRORES),
     )
     return {
         "desde": prev.desde.isoformat(),

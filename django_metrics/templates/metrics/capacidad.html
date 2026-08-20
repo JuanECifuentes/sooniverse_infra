@@ -11,8 +11,7 @@
         <span class="sv-eyebrow">Infraestructura</span>
         <h1>Capacidad y margen</h1>
         <p class="sv-help">
-            Techo medido por la fase <span class="sv-mono">capacidad</span> del despliegue
-            (<span class="sv-mono">scripts/benchmark_capacity.py</span>): una rampa acotada de
+            Techo medido por la fase <span class="sv-mono">capacidad</span> del despliegue: una rampa acotada de
             concurrencia que para en cuanto la latencia degrada, no busca el punto de rotura.
         </p>
     </div>
@@ -60,7 +59,7 @@
         </div>
     </article>
 
-    <article class="sv-card sv-card--metric">
+    <article class="sv-card sv-card--infra">
         <div class="l-kpi">
             <span class="sv-eyebrow">Tokens de salida</span>
             <span class="l-kpi__value">
@@ -70,7 +69,7 @@
         </div>
     </article>
 
-    <article class="sv-card sv-card--infra">
+    <article class="sv-card sv-card--metric">
         <div class="l-kpi">
             <span class="sv-eyebrow">Concurrencia sin degradar</span>
             <span class="l-kpi__value">
@@ -78,12 +77,12 @@
             </span>
             <span class="l-kpi__foot sv-mono sv-muted">
                 ≈ <span data-cap="usuarios">{{ corrida.usuarios_estimados|default:"—" }}</span> usuarios
-                {% include "metrics/_tooltip.html" with text="Traducción de slots concurrentes a personas: una persona chateando mantiene una petición activa solo una fracción del tiempo. El factor exacto se guarda en las notas de la corrida." %}
+                {% include "metrics/_tooltip.html" with text="Traducción de slots concurrentes a personas: una persona chateando mantiene una petición activa solo una fracción del tiempo. El factor exacto se guarda en las notas de la prueba." %}
             </span>
         </div>
     </article>
 
-    <article class="sv-card sv-card--secure">
+    <article class="sv-card sv-card--infra">
         <div class="l-kpi">
             <span class="sv-eyebrow">Pico observado</span>
             <span class="l-kpi__value">
@@ -97,8 +96,8 @@
     </article>
 </section>
 
-{# ------------------------------------------------- CURVA + MARGEN Y PROYECCIÓN #}
-<section class="l-grid l-grid--split l-mb-lg">
+{# ------------------------------------------------- CURVA DE DEGRADACIÓN (ANCHO COMPLETO) #}
+<section class="l-mb-md">
     <article class="sv-card l-card--flush">
         <div class="l-card__head">
             <div class="l-stack l-stack--tight">
@@ -114,45 +113,30 @@
             <p class="sv-help l-mt-sm" id="capacidad-curva-nota"></p>
         </div>
     </article>
+</section>
 
-    <article class="sv-card">
-        <div class="l-stack l-stack--tight l-mb-md">
-            <span class="sv-eyebrow">Margen</span>
-            <h3>¿Se está quedando corta?</h3>
+{# ------------------------------------------------- MARGEN OPERATIVO (ANCHO COMPLETO COMPACTO) #}
+<section class="l-mb-lg">
+    <article class="sv-card sv-card--compact">
+        <div class="l-card__head l-card__head--compact">
+            <div class="l-stack l-stack--tight">
+                <span class="sv-eyebrow">Margen</span>
+                <div class="l-row l-row--align-center" style="gap: 8px">
+                    <h3>Margen operativo</h3>
+                    {% include "metrics/_tooltip.html" with text="Evalúa el margen de capacidad disponible frente al pico observado y responde a preguntas como: ¿Se está quedando corta la infraestructura?, ¿estamos cerca del límite seguro de saturación o hay suficiente holgura?" position="bottom-end" %}
+                </div>
+            </div>
         </div>
-
-        <div id="capacidad-medidor">
-            {% include "metrics/_medidor_margen.html" %}
-        </div>
-
-        <div class="sv-divider"></div>
-
-        <div class="l-stack l-stack--tight">
-            <span class="sv-eyebrow">Proyección</span>
-            {% if proyeccion.confiable %}
-                <p class="sv-metric-sm" data-cap="semanas">
-                    ≈ {{ proyeccion.semanas_al_techo }} semanas al techo
-                </p>
-            {% else %}
-                <p class="sv-strong" data-cap="semanas">Sin tendencia clara</p>
-            {% endif %}
-            {% comment %} Un número de semanas sin el intervalo que lo respalda invita a
-               tomar decisiones de gasto sobre ruido estadístico. {% endcomment %}
-            <p class="sv-help" data-cap="proyeccion-nota">{{ proyeccion.explicacion }}</p>
+        <div class="l-card__body l-card__body--compact">
+            <div id="capacidad-medidor">
+                {% include "metrics/_medidor_margen.html" %}
+            </div>
         </div>
     </article>
 </section>
 
-{# ------------------------------------------------------ FICHA + TABLA DE CURVA #}
-<section class="l-grid l-grid--halves">
-    <article class="sv-card">
-        <div class="l-stack l-stack--tight l-mb-md">
-            <span class="sv-eyebrow">Condiciones de la medición</span>
-            <h3>Bajo qué configuración se midió</h3>
-        </div>
-        {% include "metrics/_ficha_hardware.html" %}
-    </article>
-
+{# ------------------------------------------------------ TABLA DE CURVA + FICHA #}
+<section class="l-grid l-grid--split l-mb-lg">
     <article class="sv-card l-card--flush">
         <div class="l-card__head">
             <div class="l-stack l-stack--tight">
@@ -160,21 +144,39 @@
                 <h3>Resultados por nivel</h3>
             </div>
         </div>
-        <div class="l-card__body l-table-wrap">
+        <div class="l-card__body l-table-wrap l-table-wrap--visible">
             {# Visible, no oculta: son 5-12 filas y el operador las quiere leer. #}
-            <table class="sv-table sv-table--responsive">
+            <table class="sv-table sv-table--fit sv-table--responsive" id="capacidad-curva-tabla">
                 <caption class="sv-visually-hidden" id="capacidad-curva-caption">
                     Resultados por nivel de concurrencia: peticiones, throughput, latencia p95
                     y tasa de error. Los mismos datos representados en la curva de degradación.
                 </caption>
                 <thead>
                     <tr>
-                        <th scope="col" class="sv-num">Conc.</th>
-                        <th scope="col" class="sv-num">Pet.</th>
-                        <th scope="col" class="sv-num">Tok/s</th>
-                        <th scope="col" class="sv-num">p95</th>
-                        <th scope="col" class="sv-num">TTFT p95</th>
-                        <th scope="col" class="sv-num">Error</th>
+                        <th scope="col" class="sv-num">
+                            Conc.
+                            {% include "metrics/_tooltip.html" with text="Nivel de concurrencia o slots de peticiones simultáneas enviadas en este escalón de la prueba." position="bottom-start" %}
+                        </th>
+                        <th scope="col" class="sv-num">
+                            Pet.
+                            {% include "metrics/_tooltip.html" with text="Total de peticiones procesadas y evaluadas durante este nivel de carga." position="bottom-start" %}
+                        </th>
+                        <th scope="col" class="sv-num">
+                            Tok/s
+                            {% include "metrics/_tooltip.html" with text="Throughput o tokens de salida por segundo generados de forma sostenida en este escalón." position="bottom-end" %}
+                        </th>
+                        <th scope="col" class="sv-num">
+                            p95
+                            {% include "metrics/_tooltip.html" with text="Latencia total de respuesta en el percentil 95: el 95 % de las peticiones completó en este tiempo o menos." position="bottom-end" %}
+                        </th>
+                        <th scope="col" class="sv-num">
+                            TTFT p95
+                            {% include "metrics/_tooltip.html" with text="Time To First Token en el percentil 95: tiempo transcurrido hasta recibir el primer token generado." position="bottom-end" %}
+                        </th>
+                        <th scope="col" class="sv-num">
+                            Error
+                            {% include "metrics/_tooltip.html" with text="Tasa porcentual de peticiones fallidas o con error durante este escalón de la prueba." position="bottom-end" %}
+                        </th>
                     </tr>
                 </thead>
                 <tbody id="capacidad-curva-body">
@@ -182,6 +184,14 @@
                 </tbody>
             </table>
         </div>
+    </article>
+
+    <article class="sv-card">
+        <div class="l-stack l-stack--tight l-mb-md">
+            <span class="sv-eyebrow">Condiciones de la medición</span>
+            <h3>Bajo qué configuración se midió</h3>
+        </div>
+        {% include "metrics/_ficha_hardware.html" %}
     </article>
 </section>
 </div>

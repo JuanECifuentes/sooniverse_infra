@@ -45,23 +45,15 @@ def tz():
     return ZoneInfo(settings.TIME_ZONE)
 
 
-# Granularidades que ofrece el panel. 'hourly' NO existe en
-# TokenUsageRollup.GRANULARITIES: se sirve desde usage_hourly, que es otra tabla.
-HOURLY = "hourly"
 DAILY = "daily"
 WEEKLY = "weekly"
 MONTHLY = "monthly"
 
 GRANULARIDADES_PANEL = [
-    (HOURLY, "Por hora"),
     (DAILY, "Diario"),
     (WEEKLY, "Semanal"),
     (MONTHLY, "Mensual"),
 ]
-
-# 14 días x 24 = 336 puntos. Más allá, la gráfica es ruido ilegible y el payload
-# crece x24 sin aportar nada.
-HOURLY_MAX_DIAS = 14
 # El mapa de calor en modo p95 escanea token_usage_event crudo con
 # percentile_cont: es la consulta más cara del panel y necesita un tope duro.
 P95_MAX_DIAS = 90
