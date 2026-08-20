@@ -31,6 +31,8 @@
 {# ---------------------------------------------------- PANEL (filtros + datos) #}
 <div id="metrics-panel"
      data-api-url="{% url 'metrics:metrics_api' %}"
+     data-lente-url="{% url 'metrics:lente_api' %}"
+     data-csrf="{{ csrf_token }}"
      data-default-desde="{{ desde_activa|date:'Y-m-d' }}"
      data-default-hasta="{{ hasta_activa|date:'Y-m-d' }}">
     <div class="l-loading-overlay" id="metrics-loading" hidden aria-hidden="true">
@@ -98,6 +100,45 @@
             </details>
         </div>
 
+        {% comment %} Día de la semana: mismo componente que Modelo/API Key, cero CSS nuevo.
+           Los atajos van DENTRO del panel para no ocupar una celda del grid. {% endcomment %}
+        <div class="l-field">
+            <span class="sv-label" id="label_dow">Día de la semana</span>
+            <details class="sv-disclosure sv-multiselect" data-filter-group="dow" aria-labelledby="label_dow">
+                <summary class="sv-multiselect__trigger">
+                    <span>Días<span class="sv-multiselect__count" data-count-for="dow" hidden></span></span>
+                    <span class="sv-multiselect__chevron" aria-hidden="true"></span>
+                </summary>
+                <div class="sv-multiselect__panel">
+                    <div class="sv-segment" id="dow-atajos" role="group" aria-label="Atajos de días">
+                        <button type="button" class="sv-segment__item" data-dow-preset="laborables">Laborables</button>
+                        <button type="button" class="sv-segment__item" data-dow-preset="finde">Fin de semana</button>
+                        <button type="button" class="sv-segment__item" data-dow-preset="todos">Todos</button>
+                    </div>
+                    {% for valor, etiqueta in dias_semana %}
+                        <label class="sv-multiselect__option">
+                            <input type="checkbox" value="{{ valor }}">
+                            <span>{{ etiqueta }}</span>
+                        </label>
+                    {% endfor %}
+                </div>
+            </details>
+        </div>
+
+        {% comment %} Dos number inputs y no un slider doble: un slider de rango es un
+           componente nuevo, con problemas de accesibilidad conocidos, a cambio
+           de ninguna ganancia real sobre 24 valores enteros. {% endcomment %}
+        <div class="l-field">
+            <span class="sv-label" id="label_franja">Franja horaria</span>
+            <div class="l-row" role="group" aria-labelledby="label_franja">
+                <input type="number" class="sv-input" id="id_hora_desde" min="0" max="23" step="1"
+                       value="0" aria-label="Hora desde" aria-describedby="metrics-hora-error">
+                <span class="sv-muted" aria-hidden="true">–</span>
+                <input type="number" class="sv-input" id="id_hora_hasta" min="0" max="23" step="1"
+                       value="23" aria-label="Hora hasta" aria-describedby="metrics-hora-error">
+            </div>
+        </div>
+
         <div class="l-field">
             <label class="sv-label" for="id_desde">Desde</label>
             <input type="text" class="sv-input" id="id_desde" data-filter="desde" data-flatpickr
@@ -111,19 +152,55 @@
         </div>
 
         <div class="l-field">
+            <span class="sv-label" id="label_estado">Estado</span>
+            <details class="sv-disclosure sv-multiselect sv-listbox" id="metrics-estado" aria-labelledby="label_estado">
+                <summary class="sv-multiselect__trigger">
+                    <span data-listbox-label>Todas</span>
+                    <span class="sv-multiselect__chevron" aria-hidden="true"></span>
+                </summary>
+                <div class="sv-multiselect__panel sv-listbox__panel" role="listbox" aria-labelledby="label_estado">
+                    {% for valor, etiqueta in estados %}
+                        <button type="button" class="sv-multiselect__option sv-listbox__option {% if valor == 'todas' %}sv-listbox__option--active{% endif %}"
+                                data-value="{{ valor }}" role="option" aria-selected="{% if valor == 'todas' %}true{% else %}false{% endif %}">
+                            <span>{{ etiqueta }}</span>
+                        </button>
+                    {% endfor %}
+                </div>
+            </details>
+        </div>
+
+        <div class="l-field">
             <span class="sv-label">Rangos rápidos</span>
             <div class="sv-segment" id="metrics-presets" role="group" aria-label="Rangos rápidos">
+                <button type="button" class="sv-segment__item" data-preset="24h">24 h</button>
                 <button type="button" class="sv-segment__item" data-preset="7d">7 días</button>
                 <button type="button" class="sv-segment__item" data-preset="30d">30 días</button>
                 <button type="button" class="sv-segment__item" data-preset="90d">90 días</button>
                 <button type="button" class="sv-segment__item" data-preset="mes_actual">Mes actual</button>
             </div>
         </div>
+
+        {% comment %} Dos booleanos secundarios comparten celda: darles una cada uno les
+           daría un peso visual que no merecen. {% endcomment %}
+        <div class="l-field">
+            <span class="sv-label">Opciones</span>
+            <label class="sv-check">
+                <input type="checkbox" id="id_incluir_benchmark">
+                <span>Incluir tráfico de benchmark</span>
+                {% include "metrics/_tooltip.html" with text="El test de capacidad genera tráfico sintético que satura la máquina a propósito. Se excluye por defecto para que no falsee el pico observado." %}
+            </label>
+            <label class="sv-check">
+                <input type="checkbox" id="id_comparar">
+                <span>Comparar con periodo anterior</span>
+            </label>
+        </div>
     </div>
 
     <p class="sv-error l-mt-sm" id="metrics-date-error" hidden></p>
+    <p class="sv-error l-mt-sm" id="metrics-hora-error" hidden></p>
 
     <div class="l-chips" id="metrics-chips" aria-label="Filtros activos"></div>
+    <div class="l-comparativa" id="metrics-comparativa" hidden></div>
 </section>
 
 {# ---------------------------------------------------------------- RESULTADOS #}
@@ -186,31 +263,33 @@
         {# ---------------------------------------------------- GRÁFICA + POOL VPC #}
         <section class="l-grid l-grid--split l-mb-lg">
             <article class="sv-card l-card--flush">
+                {% comment %} El selector de lente vive en el head de la tarjeta, que ya es
+                   flex con hueco a la derecha: no añade una fila al grid ni
+                   cambia la altura de la tarjeta. {% endcomment %}
                 <div class="l-card__head">
                     <div class="l-stack l-stack--tight">
                         <span class="sv-eyebrow" id="chart-granularity-label">Serie {{ metricas.granularity_label|lower }}</span>
-                        <h3>Evolución del consumo</h3>
+                        <h3 id="lente-titulo">Evolución del consumo</h3>
                     </div>
+                    {% include "metrics/_lente_selector.html" %}
                 </div>
                 <div class="l-card__body">
                     {{ metricas_payload|json_script:"metrics-initial-payload" }}
-                    <div class="l-chart-canvas-wrap">
-                        <canvas id="metrics-chart-canvas" role="img" aria-describedby="metrics-chart-table-caption"></canvas>
+
+                    <div class="l-loading-overlay" id="metrics-lente-loading" hidden aria-hidden="true">
+                        {% include "metrics/_spinner.html" %}
                     </div>
-                    <table class="sv-table sv-visually-hidden" id="metrics-chart-table">
-                        <caption id="metrics-chart-table-caption">
-                            Consumo de tokens por periodo (los mismos datos representados en la gráfica)
-                        </caption>
-                        <thead>
-                            <tr>
-                                <th scope="col">Periodo</th>
-                                <th scope="col" class="sv-num">Prompt</th>
-                                <th scope="col" class="sv-num">Completion</th>
-                                <th scope="col" class="sv-num">Total</th>
-                            </tr>
-                        </thead>
-                        <tbody id="metrics-chart-table-body"></tbody>
-                    </table>
+                    <p class="sv-error" id="metrics-lente-error" hidden></p>
+
+                    <div data-lente-panel="serie" tabindex="-1">
+                        {% include "metrics/_lente_serie.html" %}
+                    </div>
+                    <div data-lente-panel="heatmap" tabindex="-1" hidden>
+                        {% include "metrics/_lente_heatmap.html" %}
+                    </div>
+                    <div data-lente-panel="perfil" tabindex="-1" hidden>
+                        {% include "metrics/_lente_perfil.html" %}
+                    </div>
                 </div>
             </article>
 
@@ -334,6 +413,10 @@
                     </table>
                 </div>
             </article>
+
+            {% comment %} Tercera tarjeta del grid `halves` (auto-fit minmax(340px,1fr)):
+               pasa a 3 columnas en pantallas anchas sin tocar el CSS. {% endcomment %}
+            {% include "metrics/_card_tiempos_muertos.html" %}
         </section>
 
         {# --------------------------------------------------------- PETICIONES #}
@@ -396,6 +479,12 @@
 
 {% block scripts %}
 <script src="{% static 'js/vendor/chart.umd.min.js' %}"></script>
+{% comment %} El plugin de matriz se auto-registra sobre el global Chart: tiene que ir
+   DESPUÉS de chart.umd.min.js. {% endcomment %}
+<script src="{% static 'js/vendor/chartjs-chart-matrix.min.js' %}"></script>
 <script type="module" src="{% static 'js/metrics-filters.js' %}"></script>
 <script type="module" src="{% static 'js/metrics-charts.js' %}"></script>
+<script type="module" src="{% static 'js/metrics-lente.js' %}"></script>
+<script type="module" src="{% static 'js/metrics-heatmap.js' %}"></script>
+<script type="module" src="{% static 'js/metrics-perfil.js' %}"></script>
 {% endblock %}

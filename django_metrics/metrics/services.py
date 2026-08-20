@@ -99,10 +99,17 @@ def obtener_metricas(
     modelos: Optional[List[str]] = None,
     desde: Optional[date] = None,
     hasta: Optional[date] = None,
+    *,
+    incluir_benchmark: bool = False,
 ) -> ResumenMetricas:
     """
     Construye el resumen del panel leyendo las agregaciones pre-calculadas.
     `api_key_ids`/`modelos` filtran por una o varias API Keys / modelos a la vez.
+
+    Los cinco primeros parámetros conservan nombre, orden y semántica: `serie_json`
+    (contrato externo heredado) y `detalle_api_key` los pasan posicionalmente.
+    Todo lo añadido después va keyword-only con default que reproduce el
+    comportamiento anterior.
     """
     if granularity not in GRANULARITY_WINDOWS:
         granularity = TokenUsageRollup.DAILY
@@ -117,6 +124,9 @@ def obtener_metricas(
         qs = qs.filter(api_key_id__in=api_key_ids)
     if modelos:
         qs = qs.filter(model_name__in=modelos)
+    if not incluir_benchmark:
+        from .filtros import excluir_benchmark
+        qs = excluir_benchmark(qs)
 
     # --- serie temporal -------------------------------------------------------
     buckets = (
@@ -207,18 +217,32 @@ def obtener_peticiones(
     page_size: int = 30,
     sort_by: str = "fecha",
     sort_dir: str = "desc",
+    *,
+    incluir_benchmark: bool = False,
+    solo_errores: bool = False,
 ) -> Dict[str, Any]:
     """Lista paginada de peticiones individuales (fila a fila) para la card
     de detalle del dashboard. A diferencia de `obtener_metricas`, consulta
     TokenUsageEvent directamente: el rollup no tiene granularidad de petición."""
+    from .filtros import FiltrosTemporales, excluir_benchmark
+
     hasta = hasta or timezone.localdate()
     desde = desde or (hasta - timedelta(days=30))
 
-    qs = TokenUsageEvent.objects.filter(event_ts__date__gte=desde, event_ts__date__lte=hasta)
+    # Límites aware y semiabiertos en vez de `event_ts__date__gte`: ese lookup
+    # evaluaba la fecha en la zona de la CONEXIÓN (UTC con USE_TZ=True) en vez
+    # de en la del panel, y además aplicaba una función sobre la columna, lo que
+    # anulaba el índice idx_usage_event_ts.
+    ventana = FiltrosTemporales(desde=desde, hasta=hasta)
+    qs = TokenUsageEvent.objects.filter(event_ts__gte=ventana.inicio, event_ts__lt=ventana.fin)
     if api_key_ids:
         qs = qs.filter(api_key_id__in=api_key_ids)
     if modelos:
         qs = qs.filter(model_name__in=modelos)
+    if solo_errores:
+        qs = qs.exclude(status="success")
+    if not incluir_benchmark:
+        qs = excluir_benchmark(qs)
 
     campo = PETICIONES_SORT_FIELDS.get(sort_by, "event_ts")
     prefijo = "-" if sort_dir == "desc" else ""
@@ -302,15 +326,35 @@ def estado_pool() -> Dict[str, Any]:
 def refrescar_metricas(since_hours: int = 48, since_days: int = 90) -> Dict[str, int]:
     """
     Dispara el ETL desde `LiteLLM_SpendLogs` y recalcula las agregaciones
-    daily/weekly/monthly usando las funciones SQL del esquema.
+    daily/weekly/monthly y la horaria, usando las funciones SQL del esquema.
+
+    La zona horaria se pasa EXPLÍCITA. Con `USE_TZ=True` Django fija la conexión
+    en UTC, así que sin este parámetro las funciones cortarían los buckets en
+    UTC mientras el panel los renderiza en `settings.TIME_ZONE`: 5 h de desfase
+    entre el día del bucket y el día que ve el usuario. No se arregla tocando
+    `DATABASES.OPTIONS` -fijar la zona de la conexión rompería el manejo de
+    timestamptz de Django-, se arregla aquí.
     """
+    from django.conf import settings
+
+    zona = settings.TIME_ZONE
+    # La ventana horaria se acota: recalcular percentiles sobre 90 días de
+    # eventos crudos en cada refresco periódico (cada 5 min) no compensa.
+    horas_dias = min(since_days, 30)
+
     with connection.cursor() as cur:
         cur.execute("SELECT sooniverse.ingest_litellm_spendlogs(%s)", [since_hours])
         ingeridos = cur.fetchone()[0]
-        cur.execute("SELECT sooniverse.refresh_usage_rollups(%s)", [since_days])
+        cur.execute("SELECT sooniverse.refresh_usage_rollups(%s, %s)", [since_days, zona])
         agregados = cur.fetchone()[0]
+        cur.execute("SELECT sooniverse.refresh_usage_hourly(%s, %s)", [horas_dias, zona])
+        horarios = cur.fetchone()[0]
 
-    return {"eventos_ingeridos": ingeridos, "filas_agregadas": agregados}
+    return {
+        "eventos_ingeridos": ingeridos,
+        "filas_agregadas": agregados,
+        "buckets_horarios": horarios,
+    }
 
 
 # =============================================================================

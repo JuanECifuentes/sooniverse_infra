@@ -53,7 +53,19 @@ WORKER_MANIFEST_FMT = ".sky_generated.worker-{wl_id}.yaml"
 SKY_GATEWAY_CONFIG = ".sky_config_gateway.yaml"
 SKY_WORKERS_CONFIG = ".sky_config_workers.yaml"
 ENDPOINTS_CACHE = ".sooniverse_endpoints.json"
+CAPACITY_CACHE = ".sooniverse_capacity.json"
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config_global.yaml"
+
+# Planificador de vLLM. El default histórico de docker_images/qwen3.5/entrypoint.sh
+# era max_num_seqs=2, lo que limitaba cada worker a DOS peticiones concurrentes
+# por mucha VRAM libre que hubiera -era, por sí solo, el techo de capacidad del
+# sistema-. Estos defaults se aplican cuando el workload no declara
+# 'concurrencia'; el razonamiento del valor está en config_global.yaml.
+DEFAULT_MAX_NUM_SEQS = 16
+DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
+
+# Rampa por defecto del benchmark de capacidad (sección 'capacidad').
+DEFAULT_NIVELES_CONCURRENCIA = [1, 2, 4, 8, 16]
 
 
 def artifacts_dir_for(config_path: Path, config: Dict[str, Any]) -> Path:
@@ -110,6 +122,12 @@ class ConfigValidator:
     # 'segun_capacidades' (default): la verdad observada en sooniverse.model_capability
     # decide. 'activado'/'desactivado': escape manual del operador.
     ALLOWED_OPEN_WEBUI_OVERRIDES = {"segun_capacidades", "activado", "desactivado"}
+    # Desde dónde mide el benchmark de capacidad. Los números de un origen NO son
+    # comparables con los del otro (fuera de la VPC el RTT del ISP domina el TTFT).
+    ALLOWED_BENCH_ORIGENES = {"gateway", "operador"}
+    # Tope de cordura para max_num_seqs: por encima, casi seguro es un error de
+    # tecleo y el worker moriría por OOM en el arranque.
+    MAX_NUM_SEQS_LIMITE = 1024
 
     @classmethod
     def validate(cls, config: Dict[str, Any]) -> None:
@@ -121,6 +139,7 @@ class ConfigValidator:
         cls._validate_gateway(config)
         cls._validate_base_de_datos(config)
         cls._validate_workloads(config)
+        cls._validate_capacidad(config)
 
     # -- secciones -------------------------------------------------------------
     @classmethod
@@ -379,6 +398,121 @@ class ConfigValidator:
                         "'capacidades.tool_call_parser' (ej. 'hermes', 'qwen')."
                     )
 
+            cls._validate_concurrencia(wl_id, wl)
+
+    @classmethod
+    def _validate_concurrencia(cls, wl_id: str, wl: Dict[str, Any]) -> None:
+        """Planificador de vLLM. Sección opcional: si falta, build_worker() aplica
+        los defaults (16 / 8192)."""
+        conc = wl.get("concurrencia")
+        if conc is None:
+            return
+        if not isinstance(conc, dict):
+            raise ConfigValidationError(f"Workload '{wl_id}': 'concurrencia' debe ser un objeto.")
+
+        seqs = conc.get("max_num_seqs", DEFAULT_MAX_NUM_SEQS)
+        if not isinstance(seqs, int) or isinstance(seqs, bool) or not (1 <= seqs <= cls.MAX_NUM_SEQS_LIMITE):
+            raise ConfigValidationError(
+                f"Workload '{wl_id}': 'concurrencia.max_num_seqs' debe ser un entero entre 1 y "
+                f"{cls.MAX_NUM_SEQS_LIMITE} (recibido: {seqs!r})."
+            )
+
+        batched = conc.get("max_num_batched_tokens", DEFAULT_MAX_NUM_BATCHED_TOKENS)
+        if not isinstance(batched, int) or isinstance(batched, bool) or batched < 1024:
+            raise ConfigValidationError(
+                f"Workload '{wl_id}': 'concurrencia.max_num_batched_tokens' debe ser un entero "
+                f">= 1024 (recibido: {batched!r})."
+            )
+
+        # Con menos tokens por paso que secuencias en vuelo, al menos una secuencia
+        # no puede ni decodificar un token por paso: vLLM se queda en vilo.
+        if batched < seqs:
+            raise ConfigValidationError(
+                f"Workload '{wl_id}': 'concurrencia.max_num_batched_tokens' ({batched}) no puede "
+                f"ser menor que 'concurrencia.max_num_seqs' ({seqs}): al menos una secuencia no "
+                "podría decodificar ni un token por paso del planificador."
+            )
+
+    @classmethod
+    def _validate_capacidad(cls, config: Dict[str, Any]) -> None:
+        """Benchmark de capacidad. Sección opcional y de nivel superior: si falta,
+        la fase usa los defaults de scripts/benchmark_capacity.py."""
+        cap = config.get("capacidad")
+        if cap is None:
+            return
+        if not isinstance(cap, dict):
+            raise ConfigValidationError("'capacidad' debe ser un mapa.")
+
+        if not isinstance(cap.get("habilitado", True), bool):
+            raise ConfigValidationError("'capacidad.habilitado' debe ser booleano.")
+
+        niveles = cap.get("niveles_concurrencia", DEFAULT_NIVELES_CONCURRENCIA)
+        if (not isinstance(niveles, list) or not niveles
+                or any(not isinstance(n, int) or isinstance(n, bool) or n <= 0 for n in niveles)
+                or any(b <= a for a, b in zip(niveles, niveles[1:]))):
+            raise ConfigValidationError(
+                "'capacidad.niveles_concurrencia' debe ser una lista de enteros positivos "
+                f"estrictamente creciente (ej. [1, 2, 4, 8, 16]). Recibido: {niveles!r}"
+            )
+        if max(niveles) > 256:
+            raise ConfigValidationError(
+                f"'capacidad.niveles_concurrencia': el nivel máximo ({max(niveles)}) supera 256. "
+                "Una rampa así deja de medir la GPU y pasa a medir la cola."
+            )
+
+        enteros_positivos = {
+            "segundos_por_nivel": 20,
+            "prompt_tokens_objetivo": 512,
+            "max_tokens": 128,
+            "presupuesto_segundos": 240,
+        }
+        for campo, defecto in enteros_positivos.items():
+            valor = cap.get(campo, defecto)
+            if not isinstance(valor, int) or isinstance(valor, bool) or valor <= 0:
+                raise ConfigValidationError(
+                    f"'capacidad.{campo}' debe ser un entero positivo (recibido: {valor!r})."
+                )
+
+        warmup = cap.get("warmup_segundos", 10)
+        if not isinstance(warmup, int) or isinstance(warmup, bool) or warmup < 0:
+            raise ConfigValidationError(
+                f"'capacidad.warmup_segundos' debe ser un entero >= 0 (recibido: {warmup!r})."
+            )
+
+        for campo, defecto in (("umbral_p95_degradacion", 3.0),
+                               ("ganancia_minima_throughput_pct", 10.0),
+                               ("factor_usuarios_por_slot", 8)):
+            valor = cap.get(campo, defecto)
+            if isinstance(valor, bool) or not isinstance(valor, (int, float)) or valor <= 0:
+                raise ConfigValidationError(
+                    f"'capacidad.{campo}' debe ser un número positivo (recibido: {valor!r})."
+                )
+
+        error_pct = cap.get("umbral_error_pct", 5.0)
+        if isinstance(error_pct, bool) or not isinstance(error_pct, (int, float)) \
+                or not (0 < error_pct <= 100):
+            raise ConfigValidationError(
+                f"'capacidad.umbral_error_pct' debe estar en (0, 100] (recibido: {error_pct!r})."
+            )
+
+        # Regla cruzada: hace que "rampa acotada" sea una GARANTÍA del contrato y
+        # no una intención. Sin esto, una rampa de 10 niveles x 60s se comería
+        # 10 minutos de GPU en cada despliegue sin que nadie lo notara.
+        necesario = len(niveles) * cap.get("segundos_por_nivel", 20) + warmup
+        presupuesto = cap.get("presupuesto_segundos", 240)
+        if necesario > presupuesto:
+            raise ConfigValidationError(
+                f"'capacidad': la rampa configurada necesita ~{necesario}s pero "
+                f"'presupuesto_segundos' es {presupuesto}s. Reduce 'niveles_concurrencia' o "
+                "'segundos_por_nivel', o sube el presupuesto."
+            )
+
+        origen = cap.get("origen", "gateway")
+        if origen not in cls.ALLOWED_BENCH_ORIGENES:
+            raise ConfigValidationError(
+                f"'capacidad.origen' inválido: '{origen}'. Permitidos: {cls.ALLOWED_BENCH_ORIGENES}"
+            )
+
 
 # =============================================================================
 # SCRIPTS REMOTOS
@@ -433,9 +567,15 @@ export MAX_MODEL_LEN="${{MAX_MODEL_LEN}}"
 export ENABLE_VISION="${{ENABLE_VISION}}"
 export ENABLE_TOOL_CALLING="${{ENABLE_TOOL_CALLING}}"
 export TOOL_CALL_PARSER="${{TOOL_CALL_PARSER}}"
+# Sin estos dos export, los envs que SkyPilot inyecta en la sesión no llegan a
+# 'docker compose' y vLLM arrancaría con los defaults del entrypoint (que eran
+# max_num_seqs=2: dos peticiones concurrentes por worker).
+export MAX_NUM_SEQS="${{MAX_NUM_SEQS}}"
+export MAX_NUM_BATCHED_TOKENS="${{MAX_NUM_BATCHED_TOKENS}}"
 
 sudo docker compose up -d
 sudo docker compose ps
+echo "===> vLLM con max_num_seqs=${{MAX_NUM_SEQS}} max_num_batched_tokens=${{MAX_NUM_BATCHED_TOKENS}}"
 
 # El worker solo escucha en la red interna de la VPC; LiteLLM en el Gateway lo consume.
 SELF_IP=$(hostname -I | awk '{{print $1}}')
@@ -708,6 +848,7 @@ class TopologyBuilder:
             resources["instance_type"] = wl["tipo_instancia"]
 
         capacidades = wl.get("capacidades", {})
+        conc = wl.get("concurrencia", {}) or {}
         envs = {
             **self._base_envs(),
             "ROL_NODO": "worker",
@@ -717,6 +858,13 @@ class TopologyBuilder:
             "GPU_MEMORY_UTILIZATION": str(frac.get("gpu_memory_utilization", 0.95)),
             "MAX_MODEL_LEN": str(frac.get("max_model_len", 16384)),
             "VLLM_PORT": str(wl["puerto"]),
+            # Planificador de vLLM (ver 'concurrencia' en config_global.yaml).
+            # Determina cuántas peticiones atiende el worker A LA VEZ; es el
+            # parámetro que fija el techo de capacidad real de la infraestructura.
+            "MAX_NUM_SEQS": str(conc.get("max_num_seqs", DEFAULT_MAX_NUM_SEQS)),
+            "MAX_NUM_BATCHED_TOKENS": str(
+                conc.get("max_num_batched_tokens", DEFAULT_MAX_NUM_BATCHED_TOKENS)
+            ),
             # Capacidades declaradas (ver config_global.yaml): el entrypoint solo
             # agrega --enable-auto-tool-choice/--limit-mm-per-prompt si aquí están
             # activas, para no anunciarle a un cliente (Open WebUI, LiteLLM) una
@@ -1022,7 +1170,11 @@ REQUIRES_DESTROY = "requires-destroy"
 
 # Campos de workload cuyo cambio implica relanzar ese clúster worker (hardware,
 # imagen o puerto distintos no se pueden aplicar sobre una instancia viva).
-WORKLOAD_RECREATE_KEYS = {"accelerator", "cantidad_gpus", "tipo_instancia", "puerto", "hf_repo", "modelo", "replicas"}
+# 'concurrencia' entra aquí y no en IN_PLACE porque max_num_seqs/
+# max_num_batched_tokens son banderas de arranque de vLLM: no se pueden aplicar
+# sobre un proceso vivo, hay que relanzar el worker (que reutiliza la instancia
+# y vuelve a correr setup+run; no destruye la máquina).
+WORKLOAD_RECREATE_KEYS = {"accelerator", "cantidad_gpus", "tipo_instancia", "puerto", "hf_repo", "modelo", "replicas", "concurrencia"}
 # Campos que solo requieren re-renderizar litellm_config.yaml + reload (sin tocar SkyPilot).
 WORKLOAD_IN_PLACE_KEYS = {"nombre_publico", "peso_balanceo", "asignacion_fraccional"}
 
@@ -1199,7 +1351,9 @@ def _gateway_public_ip(cluster: str) -> Optional[str]:
         return None
 
 
-PHASE_ORDER = ["network", "gateway", "workers", "endpoints", "capabilities", "verify"]
+# 'capacidad' va después de 'capabilities' (el modelo ya está caliente, el pool
+# sincronizado y las capacidades efectivas aplicadas) y antes de 'verify'.
+PHASE_ORDER = ["network", "gateway", "workers", "endpoints", "capabilities", "capacidad", "verify"]
 
 # Compatibilidad con los valores antiguos de --only (antes de la Fase 3).
 _ONLY_LEGACY_ALIASES = {"all": set(PHASE_ORDER), "gateway": {"gateway"}, "workers": {"workers"}}
@@ -1451,7 +1605,17 @@ def deploy(
             manifest = artefactos["workers"][wl["id"]]
             print(f"\n> Workload '{wl['id']}' ({wl.get('replicas', 1)} nodo/s)")
             t0 = time.monotonic()
-            _run_sky(["launch", "-y", "-c", cluster, str(manifest)], env=worker_env)
+            # --retry-until-up: las instancias GPU sufren InsufficientInstanceCapacity
+            # con bastante frecuencia (observado dos veces con g6.xlarge en
+            # us-east-1a). No es un error del despliegue, es capacidad transitoria
+            # de AWS, y sin reintento tumbaba el pipeline entero dejando la red y
+            # el Gateway ya creados -y facturando- a medio camino.
+            # No se puede reintentar en otra AZ: con `azs: 1` la subred privada
+            # solo existe en una, y SkyPilot está anclado a ella por
+            # `use_internal_ips`. Si esto se vuelve crónico, la salida es subir
+            # `red_y_aislamiento.azs`.
+            _run_sky(["launch", "-y", "--retry-until-up", "-c", cluster, str(manifest)],
+                     env=worker_env)
             if state and deployment_id:
                 state.log_event(deployment_id, "workers", "sky_launch", "ok",
                                  message=cluster, duration_ms=int((time.monotonic() - t0) * 1000))
@@ -1500,6 +1664,35 @@ def deploy(
                       "reintenta manualmente: python scripts/sync_openwebui_models.py --apply")
         else:
             print("[SKIP] scripts/sync_openwebui_models.py no existe todavía.")
+
+    # --- FASE: capacidad (best-effort; no aborta el resto del pipeline) --------
+    cap_cfg = config.get("capacidad") or {}
+    if "capacidad" in phases and not cap_cfg.get("habilitado", True):
+        print("\n[SKIP] 'capacidad.habilitado: false' -> se omite el benchmark de capacidad.")
+    elif "capacidad" in phases and dry_run:
+        print("\n--- [CAPACIDAD] --dry-run: se ejecutaría benchmark_capacity.py --write-db ---")
+        bench_script = REPO_ROOT / "scripts" / "benchmark_capacity.py"
+        if bench_script.exists():
+            subprocess.run([sys.executable, str(bench_script),
+                            "--config", str(config_path), "--dry-run"])
+    elif "capacidad" in phases:
+        print("\n--- [CAPACIDAD] Benchmark de capacidad (rampa acotada) ---")
+        bench_script = REPO_ROOT / "scripts" / "benchmark_capacity.py"
+        if bench_script.exists():
+            bench_json = out_dir / CAPACITY_CACHE
+            cmd = [
+                sys.executable, str(bench_script),
+                "--config", str(config_path),
+                "--write-db",
+                "--json", str(bench_json),
+            ]
+            print(f"[EXEC] {' '.join(cmd)}")
+            result = subprocess.run(cmd)
+            if result.returncode != 0:
+                print(f"[WARNING] benchmark_capacity.py terminó con código {result.returncode}; "
+                      "revisa sooniverse.capacity_benchmark. No se aborta el despliegue.")
+        else:
+            print("[SKIP] scripts/benchmark_capacity.py no existe todavía.")
 
     # --- FASE: verify (best-effort; no aborta el resto del pipeline) -----------
     if "verify" in phases and dry_run:
@@ -1558,7 +1751,9 @@ def main() -> int:
     parser.add_argument("--run", action="store_true",
                         help="Aprovisiona la topología completa en AWS tras generar los manifiestos")
     parser.add_argument(
-        "--only", choices=["all", "network", "gateway", "workers", "endpoints", "capabilities", "verify"],
+        # Derivado de PHASE_ORDER, no repetido a mano: añadir una fase nueva solo
+        # exige tocar esa lista.
+        "--only", choices=["all", *PHASE_ORDER],
         default="all",
         help="Limita el aprovisionamiento a una fase de la topología",
     )

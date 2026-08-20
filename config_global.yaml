@@ -132,6 +132,24 @@ workloads:
       habilitado: true
       gpu_memory_utilization: 0.95 # Asignación de VRAM fraccional (0.0 - 1.0)
       max_model_len: 16384
+    # Planificador de vLLM. Va FUERA de 'asignacion_fraccional' a propósito: ese
+    # bloque está clasificado como cambio 'in-place' en plan_changes() y no
+    # relanzaría el worker, mientras que estos dos exigen reiniciar vLLM.
+    #
+    # max_num_seqs es el número de peticiones que el worker atiende A LA VEZ. El
+    # default histórico del entrypoint era 2: el tercer usuario concurrente hacía
+    # cola por mucha VRAM libre que hubiera. En una L4 de 24 GB con un modelo de
+    # 2B cuantizado a 4 bits el KV cache no es el cuello de botella (da para ~35
+    # secuencias con el contexto completo); lo es el cómputo, que se aplana entre
+    # batch 16 y 32. 16 deja el batch justo por debajo de esa meseta.
+    # El techo real lo mide scripts/benchmark_capacity.py (fase 'capacidad').
+    concurrencia:
+      max_num_seqs: 16             # peticiones en vuelo simultáneas por réplica
+      # Presupuesto de tokens por paso del planificador. La mitad de
+      # max_model_len: con chunked prefill, un prompt de 16k se parte en dos
+      # pasos en vez de monopolizar uno entero y congelar la generación de las
+      # otras secuencias.
+      max_num_batched_tokens: 8192
     # Capacidades reales de ESTE modelo/checkpoint. El generador solo activa en
     # vLLM las banderas correspondientes si aquí están en true -evita mandarle
     # tool_choice="auto" o imágenes a un modelo que nunca las va a soportar.
@@ -141,3 +159,35 @@ workloads:
       vision: true               # Este checkpoint de Qwen3.5 sí tiene torre de visión.
       tool_calling: false        # Sin --tool-call-parser confirmado para este checkpoint: no anunciarlo.
       tool_call_parser: null     # ej. "hermes" o "qwen" -requerido si tool_calling: true.
+
+# 6. Benchmark de capacidad (fase 'capacidad' del despliegue)
+# ------------------------------------------------------------------------------
+# Responde "¿cuántas peticiones/tokens por minuto aguanta esta infra antes de
+# degradar?" con una rampa ACOTADA de concurrencia: para en cuanto la latencia
+# se degrada o el throughput deja de crecer, NO busca el punto de rotura.
+# El resultado va a sooniverse.capacity_benchmark y lo pinta el panel en
+# /panel/metrics/capacidad/. Coste: ~2-4 min de GPU por despliegue.
+capacidad:
+  habilitado: true
+  niveles_concurrencia: [1, 2, 4, 8, 16]   # estrictamente creciente
+  segundos_por_nivel: 20
+  warmup_segundos: 10           # tráfico descartado: absorbe el primer forward pass
+  prompt_tokens_objetivo: 512
+  max_tokens: 128               # fijo, para que todos los niveles generen el mismo trabajo
+  presupuesto_segundos: 240     # tope duro de la fase completa
+  umbral_p95_degradacion: 3.0   # para si p95(nivel) > 3x p95(concurrencia 1)
+  umbral_error_pct: 5.0
+  ganancia_minima_throughput_pct: 10.0   # para si un nivel no aporta al menos esto
+  # Traducción "slots concurrentes -> personas". Una persona chateando mantiene
+  # una petición activa una fracción pequeña del tiempo (lee, escribe, piensa).
+  # Se guarda en capacity_benchmark.notas para que el número sea auditable.
+  factor_usuarios_por_slot: 8
+  # El tráfico del benchmark se emite con una API Key dedicada y efímera, para
+  # que el panel pueda excluirlo de las métricas de negocio
+  # (sooniverse.api_key_registry.proposito = 'benchmark').
+  api_key_alias: "sooniverse-benchmark"
+  # gateway (recomendado): mide desde el propio Gateway, el camino del cliente
+  #   real (127.0.0.1 -> nginx -> litellm -> worker).
+  # operador: mide desde tu máquina, fuera de la VPC. El RTT de tu ISP domina el
+  #   TTFT, así que los números NO son comparables con los de 'gateway'.
+  origen: "gateway"

@@ -1,0 +1,49 @@
+{% comment %}
+Lente "Mapa semanal": rejilla 7 días x 24 horas en hora local.
+
+El selector de métrica vive AQUÍ y no en la barra de filtros: pertenece a la
+vista, no a la consulta (cambiarlo no altera qué datos se están mirando, solo
+cómo se colorean).
+
+Accesibilidad: el canvas no es navegable por teclado, así que el equivalente
+textual de la tabla oculta es obligatorio, y la ruta de teclado para filtrar por
+día/hora son los controles "Día de la semana" y "Franja horaria" de la barra de
+filtros. El clic sobre una celda es un atajo de ratón, nunca la única vía.
+{% endcomment %}
+<div class="l-row l-row--between l-mb-sm">
+    <label class="sv-label" for="heatmap-metrica">Métrica</label>
+    <select class="sv-input" id="heatmap-metrica">
+        <option value="peticiones">Peticiones</option>
+        <option value="tokens">Tokens</option>
+        <option value="p95">Latencia p95</option>
+    </select>
+</div>
+
+<div class="l-heatmap-scroll">
+    <div class="l-heatmap-wrap">
+        <canvas id="metrics-heatmap-canvas" role="img"
+                aria-describedby="metrics-heatmap-table-caption"></canvas>
+    </div>
+</div>
+
+<p class="sv-help" id="metrics-heatmap-vacio" hidden>
+    Sin tráfico agregado en el rango seleccionado.
+</p>
+
+{% comment %} Los cortes numéricos reales van en la leyenda: el color nunca puede ser el
+   único canal de información. {% endcomment %}
+<div class="l-heatmap__legend" id="metrics-heatmap-legend"></div>
+
+<table class="sv-table sv-visually-hidden" id="metrics-heatmap-table">
+    <caption id="metrics-heatmap-table-caption">
+        Actividad por día de la semana y hora del día (los mismos datos del mapa de calor).
+        Las filas son los días de lunes a domingo; las columnas, las 24 horas en hora local.
+    </caption>
+    <thead>
+        <tr>
+            <th scope="col">Día</th>
+            {% for h in horas %}<th scope="col" class="sv-num">{{ h }}h</th>{% endfor %}
+        </tr>
+    </thead>
+    <tbody id="metrics-heatmap-table-body"></tbody>
+</table>

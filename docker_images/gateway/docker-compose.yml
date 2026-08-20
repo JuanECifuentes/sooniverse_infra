@@ -203,6 +203,14 @@ services:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}
       CLIENTE_ID: ${CLIENTE_ID:-default}
       ENTORNO: ${ENTORNO:-prod}
+      # TIENE que ser la misma zona con la que scripts/db_setup.py corta los
+      # buckets (sooniverse.app_setting.reporting_timezone). Si el panel
+      # renderiza en una zona y la agregación se hizo en otra, los días salen
+      # desplazados: es exactamente el bug que arregla 004_usage_analytics.sql.
+      TIME_ZONE: ${TIME_ZONE:-America/Bogota}
+      # Coste por hora de la infraestructura de inferencia, para la tarjeta de
+      # tiempos muertos. Con 0 (por defecto) la columna de coste se oculta.
+      METRICS_COSTE_HORA_USD: ${METRICS_COSTE_HORA_USD:-0}
       METRICS_REFRESH_INTERVAL: ${METRICS_REFRESH_INTERVAL:-300}
       DJANGO_SUPERUSER_USERNAME: ${DJANGO_SUPERUSER_USERNAME:-admin}
       DJANGO_SUPERUSER_PASSWORD: ${DJANGO_SUPERUSER_PASSWORD:-}

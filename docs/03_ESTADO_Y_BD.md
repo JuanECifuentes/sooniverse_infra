@@ -42,6 +42,16 @@ Bitácora de auditoría: una fila por cada operación (`phase`, `action`, `statu
 
 `002_infra_state.sql` le añade con `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`: `deployment_id`, `subnet_id`, `security_group_id`, `last_health_check`, `health_status`. La tabla en sí (con `cluster_name`, `private_ip`, `port`, `is_healthy`, etc.) la crea `001_init_schema.sql` y la mantiene `scripts/sync_endpoints.py::register_in_db()`.
 
+`004_usage_analytics.sql` la amplía otra vez con la **ficha de hardware y planificador**: `instance_type`, `gpu_count`, `max_num_seqs`, `max_num_batched_tokens`, `max_model_len`. Antes solo se guardaba `accelerator` (la cadena `"L4"`), lo que dejaba al benchmark de capacidad sin poder registrar bajo qué configuración midió — y un techo sin su configuración no se puede comparar entre corridas. Las puebla el mismo `register_in_db()`, desde los campos que `build_endpoints()` ya tenía a mano en el contrato.
+
+### `sooniverse.api_key_registry.proposito` (`004_usage_analytics.sql`)
+
+Columna nueva, `VARCHAR(24) NOT NULL DEFAULT 'cliente'` con `CHECK (proposito IN ('cliente','benchmark','sistema'))` e índice parcial `WHERE proposito <> 'cliente'`.
+
+Marca el tráfico que **no** es de negocio para que el panel pueda excluirlo. Hoy lo usa el benchmark de capacidad, cuya key efímera se registra con `proposito='benchmark'`. Se eligió una columna con `CHECK` en vez de filtrar por alias (`LIKE 'sooniverse-benchmark%'`) porque un alias es texto libre que el operador puede reutilizar o cambiar; esto es un contrato que el motor hace cumplir.
+
+**Trampa de Django que hay que respetar al filtrar por esta columna:** `qs.exclude(api_key__proposito="benchmark")` genera un `NOT IN` sobre un `LEFT JOIN` que **también descarta las filas con `api_key_id NULL`** — los eventos cuya key no está registrada, que son legítimos y suelen ser mayoría en un despliegue recién hecho. La forma correcta está centralizada en `django_metrics/metrics/filtros.py::excluir_benchmark()`: `Q(api_key__isnull=True) | ~Q(api_key__proposito="benchmark")`.
+
 ### `sooniverse.model_capability` (`003_model_capabilities.sql`)
 
 La verdad OBSERVADA por `scripts/test_model_capabilities.py --write-db` sobre cada modelo público desplegado, separada en tres capas por fila (`UNIQUE (client_id, environment, model_public_name)`):
@@ -53,6 +63,44 @@ La verdad OBSERVADA por `scripts/test_model_capabilities.py --write-db` sobre ca
 | Efectivo | `effective_vision`, `effective_tool_calling`, `effective_json_object` | Columnas `GENERATED ALWAYS AS` — fail-closed: declarado Y sondeo=`TRUE` (`effective_json_object` no tiene declaración en el contrato, así que exige directamente sondeo=`TRUE`) |
 
 Ningún consumidor (`docker_images/openwebui/overlay/sooniverse/bootstrap_models.py`, `scripts/render_litellm_config.py`, `scripts/render_gateway_stack.py`, `scripts/sync_endpoints.py`) debe leer `declared_*`/`probed_*` directamente — siempre las columnas `effective_*`, para que la política fail-closed viva en un solo sitio (el motor de PostgreSQL, no repetida en cada script). Vista de inspección manual: `sooniverse.v_model_capability_effective`. Ver `docs/00_ARQUITECTURA.md` §4.7 para el razonamiento completo y `docs/01_FLUJO_DESPLIEGUE.md` (Fase 6.5) para cuándo se escribe.
+
+### `sooniverse.app_setting` (`004_usage_analytics.sql`)
+
+Tabla clave/valor mínima (`key` PK, `value`, `updated_at`). Hoy guarda una sola entrada: `reporting_timezone`. Ver §8 para el porqué — no es un cajón de sastre de configuración, existe para resolver un bug concreto de corte de buckets.
+
+### `sooniverse.usage_hourly` (`004_usage_analytics.sql`)
+
+Agregación **horaria** cortada en la zona de reporte, `UNIQUE (bucket_ts, api_key_key, model_name)`. La rellena `sooniverse.refresh_usage_hourly(p_since_days, p_timezone, p_retention_days)` desde `token_usage_event`.
+
+| Grupo | Columnas | Notas |
+|---|---|---|
+| Instante | `bucket_ts` (TIMESTAMPTZ), `tz_name` | `tz_name` es auditoría: con qué zona se cortó esa fila |
+| Dimensiones locales | `bucket_local_date`, `bucket_local_hour` (0-23), `bucket_local_isodow` (1=lunes) | Precalculadas para que el mapa de calor agrupe por columnas indexadas y no por `EXTRACT(... AT TIME ZONE ...)` en cada consulta |
+| Identidad | `api_key_id`, `api_key_key` (generada), `model_name` | `api_key_key = COALESCE(api_key_id, 0)`; ver §9 |
+| Contadores | `request_count`, `error_count`, `cache_hit_count`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `spend_usd` | Recombinables entre buckets |
+| Percentiles | `latency_p50_ms`, `latency_p95_ms`, `latency_p99_ms`, `latency_max_ms`, `ttft_p50_ms`, `ttft_p95_ms` | **NO recombinables** — ver §10 |
+| Media honesta | `latency_sum_ms`, `latency_count` | Sí recombinables: permiten una media ponderada entre buckets sin volver a los eventos crudos |
+
+Vistas asociadas: `sooniverse.v_usage_heatmap` (rejilla **completa** 7×24 vía `generate_series(1,7) CROSS JOIN generate_series(0,23)` + `LEFT JOIN`; sin densificar, las horas sin tráfico no tendrían fila y tanto el mapa como la detección de ocio mentirían) y `sooniverse.v_usage_ventanas_ociosas` (las celdas de esa rejilla con `request_count = 0`).
+
+Por qué es una tabla aparte y no una granularidad más de `token_usage_rollup`: ver `docs/00_ARQUITECTURA.md` §4.8.
+
+### `sooniverse.capacity_benchmark` (`005_capacity_benchmark.sql`)
+
+Una fila por corrida de `scripts/benchmark_capacity.py` (`run_id` UUID único, que da idempotencia al script). Cuatro bloques:
+
+| Bloque | Columnas | Notas |
+|---|---|---|
+| Identidad | `client_id`, `environment`, `deployment_id`, `workload_id`, `model_public_name` | `deployment_id` **sin FK a propósito**: la medición debe sobrevivir al destroy del despliegue que la produjo, porque es el histórico con el que se dimensiona el siguiente |
+| Configuración medida | `instance_type`, `accelerator`, `gpu_count`, `replicas`, `max_num_seqs`, `max_num_batched_tokens`, `max_model_len`, `gpu_memory_utilization`, `enforce_eager`, `quantization`, `vllm_version`, `lb_strategy` | Snapshot inmutable. **Un techo sin su configuración no es interpretable**: el mismo modelo en la misma GPU con `max_num_seqs=2` y con `16` da números completamente distintos |
+| Parámetros del test | `niveles_concurrencia` (INTEGER[]), `prompt_tokens_objetivo`, `max_tokens`, `segundos_por_nivel`, `warmup_segundos`, `streaming`, `origen`, `benchmark_key_alias`, `benchmark_key_hash` | `origen` ∈ `gateway\|operador`; los números de un origen no son comparables con los del otro. Se guarda el **hash** de la key, nunca la key en claro |
+| Resultados | `concurrencia_rodilla`, `rpm_sostenido`, `tokens_salida_por_min`, `p50/p95_base_ms`, `ttft_p50/p95_base_ms`, `p95_rodilla_ms`, `itl_medio_rodilla_ms`, `tasa_error_pct`, `usuarios_estimados`, `motivo_parada`, `curva` (JSONB) | `motivo_parada` ∈ `nivel_maximo\|p95_degradado\|errores\|saturacion_throughput\|presupuesto_agotado\|fallo` |
+
+`niveles_concurrencia` es `INTEGER[]` de PostgreSQL, no JSONB — el modelo Django lo mapea con `ArrayField`, no con `JSONField`: psycopg2 ya devuelve una lista de Python y un `JSONField` reventaría al intentar `json.loads()` sobre ella (fallo encontrado contra la BD real, no teórico).
+
+`usuarios_estimados` es `concurrencia_rodilla × notas.factor_usuarios_por_slot`. El factor se guarda dentro de `notas` (JSONB) precisamente para que el número sea auditable y no un multiplicador mágico enterrado en el código.
+
+Vista: `sooniverse.v_capacity_benchmark_latest` (`DISTINCT ON (client_id, environment, workload_id)`), que es lo que consume el panel para el techo vigente.
 
 ### Vistas
 
@@ -121,3 +169,99 @@ Verificado que ninguna colisiona con los objetos de `database/*.sql` (`api_key_r
 `db_setup.py` **nunca** toca las tablas de Open WebUI (no están en `database/*.sql`, así que quedan fuera de `apply_schema_dir()`/`EXPECTED_TABLES`) — su ciclo de vida de esquema es responsabilidad exclusiva del propio contenedor `open-webui` al arrancar.
 
 **LiteLLM es la excepción deliberada: NO comparte `sooniverse`.** Vive en su propio esquema `litellm` (`database/001_init_schema.sql`, `CREATE SCHEMA IF NOT EXISTS litellm;`, y `DATABASE_URL=...?schema=litellm` en `docker_images/gateway/docker-compose.yml`, generado por `scripts/render_gateway_stack.py`). A diferencia de Alembic (Open WebUI) y de las migraciones nativas de Django, el motor de migraciones de LiteLLM (Prisma) calcula un diff contra **todo** lo que encuentra en el esquema activo del `search_path`, no solo contra sus propias tablas — compartiendo `sooniverse` se reprodujo en un despliegue real un intento de `DROP TABLE api_key_registry` (bloqueado por PostgreSQL solo porque `v_usage_daily`/`v_usage_weekly`/`v_usage_monthly`/`v_apikey_summary` dependían de ella), que dejaba a LiteLLM sin ninguna tabla propia (`LiteLLM_SpendLogs`, `LiteLLM_VerificationToken`, etc.) y al proxy completo respondiendo con errores en cada petición. La función `sooniverse.ingest_litellm_spendlogs()` sigue leyendo esas tablas, ahora con el esquema cualificado explícitamente (`FROM litellm."LiteLLM_SpendLogs"`) — una lectura entre esquemas de la misma base de datos, nunca escribe ahí.
+
+## 8. Los seis huecos de datos que cerró `004_usage_analytics.sql`
+
+El panel podía decir *cuánto* se había consumido, pero no *cuándo* ni *si quedaba margen*. El obstáculo no era la interfaz: eran seis huecos en los propios datos. Se documentan aquí con el antes/después porque varios eran invisibles (una columna que existe y siempre vale lo mismo no parece rota).
+
+| # | Hueco | Antes | Después |
+|---|---|---|---|
+| 1 | El ETL no leía `endTime` ni `completionStartTime` | `token_usage_event.latency_ms` **NULL siempre**. No había ni una sola latencia medida en todo el sistema, y `token_usage_rollup.avg_latency_ms` era NULL en consecuencia | `latency_ms` = `endTime - startTime`, y columna nueva `ttft_ms` = `completionStartTime - startTime` |
+| 2 | El ETL no leía `status` | `token_usage_event.status` se quedaba en su `DEFAULT 'success'` para todo, así que `error_count` era **0 siempre** y la tarjeta "Tasa de error" del panel era decorativa | `status` real; cualquier valor distinto de `'success'` cuenta como error en los rollups |
+| 3 | El ETL no leía `api_base` | `worker_endpoint` **NULL siempre**: imposible atribuir carga a un worker concreto | Se extrae el `host:puerto` de `api_base` con `regexp_replace('^[a-z]+://([^/]+).*$', '\1')` |
+| 4 | La agregación mínima era diaria | "¿A qué hora del sábado está parada la máquina?" era literalmente incontestable | Tabla `usage_hourly` (ver arriba y `docs/00_ARQUITECTURA.md` §4.8) |
+| 5 | `DATE_TRUNC` usaba la zona horaria **de la sesión** | Django fija la conexión en UTC (`USE_TZ=True`) mientras el panel renderiza en `America/Bogota`: 5 h de desfase entre el bucket y el día que veía el usuario. Peor: el corte cambiaba según quién disparara el ETL (Django, `db_setup.py` o un `psql` de cron) | Ver §9 |
+| 6 | El grupo `api_key_id IS NULL` duplicaba filas en cada refresco | Ver §9 | Ver §9 |
+
+Columnas nuevas de `token_usage_event`, todas con `ADD COLUMN IF NOT EXISTS`: `ttft_ms`, `model_group`, `model_id`, `call_type`, `cache_hit`. Cada una se justifica por sí sola:
+
+- **`ttft_ms`** — sin él no se distingue "el modelo tarda en arrancar" de "el modelo genera lento", que es justo la distinción que necesita cualquier diagnóstico de saturación.
+- **`model_group`** / **`model_id`** — el nombre público con el que enrutó LiteLLM y el deployment concreto del pool. Más estables que la IP privada del worker, que cambia entre despliegues.
+- **`cache_hit`** — un acierto de caché con `latency_ms=3` hunde el p95 y hace creer que la infraestructura es más rápida de lo que es. `latency_percentiles()` lo excluye por defecto.
+- **`call_type`** — permite dejar fuera de los percentiles de chat las llamadas de embeddings o los health checks.
+
+La política de privacidad se mantiene intacta: ninguna columna nueva almacena prompts, mensajes ni respuestas.
+
+### Compatibilidad con Prisma: por qué el ETL se construye con SQL dinámico
+
+`litellm."LiteLLM_SpendLogs"` la crea Prisma y su juego de columnas **cambia entre versiones de LiteLLM**. Un `SELECT` estático que nombre `completionStartTime` deja de funcionar entero en cuanto el proxy se actualiza (o se revierte) a una versión que no la tenga. Por eso `sooniverse.ingest_litellm_spendlogs_range()` construye su sentencia en tiempo de ejecución a partir de `information_schema`, con tres helpers:
+
+- `sooniverse._spendlog_has(col)` — ¿existe la columna en esta versión?
+- `sooniverse._spendlog_expr(col, fallback)` — `sl."col"` o el literal de reserva.
+- `sooniverse._spendlog_ts_expr(col)` — **la trampa importante.** Prisma mapea `DateTime` a `timestamp` **SIN zona horaria**; verificado contra la BD real de este proyecto, donde `startTime`, `endTime` y `completionStartTime` son las tres `timestamp without time zone`. Comparar eso con `NOW()` o guardarlo en un `TIMESTAMPTZ` aplica un cast implícito que usa la zona **de la sesión**: el mismo bug del hueco #5, pero dentro del propio ETL, desplazando `event_ts` según quién lo dispare. Prisma persiste en UTC, así que cuando la columna es naive el helper la ancla ahí con `AT TIME ZONE 'UTC'`.
+
+Otra sorpresa confirmada contra la BD real: **`cache_hit` es de tipo `text`, no boolean**. El ETL normaliza con `lower(...) IN ('true','t','1')` en vez de castear directamente.
+
+Se descartó la alternativa obvia (una vista de compatibilidad dentro del esquema `litellm`): crear objetos propios ahí es exactamente lo que prohíbe el comentario "CONVIVENCIA CON LITELLM" de `001_init_schema.sql`, por el diff agresivo de Prisma descrito en §7.
+
+`sooniverse._delta_ms(desde, hasta)` es defensiva a propósito: devuelve `NULL` si el orden es inconsistente (reloj desincronizado) o si la diferencia supera 2 horas, para que un outlier absurdo no contamine los percentiles.
+
+### `ON CONFLICT DO NOTHING` → `DO UPDATE` acotado
+
+El ETL original usaba `ON CONFLICT (litellm_request_id) DO NOTHING`, así que una fila ya ingerida **nunca se volvía a tocar**. Con las columnas nuevas eso significaba que la latencia, el estado y el worker jamás llegarían a las filas de las últimas 48 h — precisamente las que mira el panel. Ahora hay `DO UPDATE`, con tres salvaguardas:
+
+1. El `SET` solo cubre campos derivados y usa `COALESCE(EXCLUDED.x, e.x)`: un re-ingest **nunca borra** un dato que ya teníamos, solo rellena huecos.
+2. Una guarda `WHERE (...) IS DISTINCT FROM (...)`: en régimen estacionario el `UPDATE` toca **0 filas** y la corrida cuesta lo mismo que el `DO NOTHING` original. Sin ella, cada pasada reescribiría toda la ventana (WAL, tuplas muertas, todos los índices tocados) aunque no cambiara ni un campo.
+3. El backfill del histórico completo vive en una función aparte (`sooniverse.backfill_litellm_spendlogs`), por lotes y de invocación manual, no en el camino del refresco periódico.
+
+## 9. Zona horaria de reporte y el bug de duplicados
+
+### `app_setting.reporting_timezone`
+
+`DATE_TRUNC` sobre un `TIMESTAMPTZ` usa el parámetro `TimeZone` **de la sesión que ejecuta la función**. Como Django con `USE_TZ=True` fija la conexión en UTC y el panel renderiza en `settings.TIME_ZONE` (`America/Bogota`), había 5 h de desfase entre el día del bucket y el día que veía el usuario. Y el corte no era ni siquiera estable: el mismo día se recalculaba con fronteras distintas según lo disparara Django, `db_setup.py` o un `psql` de cron.
+
+`refresh_usage_rollups(p_since_days, p_timezone)` y `refresh_usage_hourly(...)` reciben ahora la zona **explícita** y truncan sobre `event_ts AT TIME ZONE v_tz` (un timestamp naive en hora local, cuyo `::DATE` ya no depende de la sesión). Pero un parámetro no basta como única defensa —el fallo que se arregla es exactamente "alguien llamó a la función sin pasar la zona"—, así que el DEFAULT dentro del motor también tiene que ser correcto: de ahí `sooniverse.reporting_timezone(p_override)`, que cae a `app_setting.reporting_timezone` y, en último término, a `'UTC'`.
+
+`scripts/db_setup.py::sync_reporting_timezone()` reconcilia ese valor desde `.env:TIME_ZONE` en cada despliegue y **avisa si cambió**, recordando que los buckets históricos siguen cortados con la zona anterior y que hay que realinearlos con `--recompute-rollups 3650`. El contenedor del panel recibe la misma variable (`TIME_ZONE` en el servicio `metrics` de `docker_images/gateway/docker-compose.yml`): si el panel renderizara en una zona y la agregación se hubiera hecho en otra, volveríamos al bug original.
+
+Detalle que se corrigió a la vez: el límite inferior de `refresh_usage_rollups` es ahora el **inicio del día local** hace N días. Con un `NOW() - N days` a secas, el bucket más antiguo del rango se recalculaba a partir de un día *parcial* de eventos y se guardaba con un total menor que el real.
+
+**Nota sobre DST:** `ts AT TIME ZONE tz` → truncar → `AT TIME ZONE tz` es ambiguo en la hora repetida del cambio de horario. `America/Bogota` no tiene DST, así que hoy es inocuo; en una zona que sí lo tenga habrá una hora al año con dos buckets colapsados en uno. Está documentado en el comentario de `refresh_usage_hourly`. La alternativa (guardar en UTC y desplazar en el panel) incumpliría el requisito de que el corte coincida con lo que ve el usuario.
+
+### El bug de duplicados con `api_key_id NULL`
+
+`token_usage_rollup` tenía `CONSTRAINT rollup_unique_bucket UNIQUE (granularity, bucket_start, api_key_id, model_name)`. En PostgreSQL, **dos filas con `NULL` en una columna del `UNIQUE` no colisionan**. Los eventos cuya key no está en `api_key_registry` se agrupan bajo `api_key_id IS NULL`, así que para ese grupo el `ON CONFLICT` nunca disparaba y `refresh_usage_rollups` **insertaba una fila nueva en cada refresco** — con el job periódico corriendo cada 5 minutos por defecto.
+
+El arreglo es una columna generada con centinela:
+
+```sql
+ALTER TABLE sooniverse.token_usage_rollup
+    ADD COLUMN IF NOT EXISTS api_key_key BIGINT
+        GENERATED ALWAYS AS (COALESCE(api_key_id, 0)) STORED;
+```
+
+seguida de la purga de los duplicados ya acumulados (conservando el cálculo más reciente por grano), el `DROP CONSTRAINT` del `UNIQUE` antiguo y un `CREATE UNIQUE INDEX ux_rollup_bucket (granularity, bucket_start, api_key_key, model_name)`. El orden importa: la purga tiene que ir **antes** de crear el índice, o su creación falla. `usage_hourly` nace ya con la misma columna generada.
+
+Se eligió el centinela `0` en vez de `UNIQUE NULLS NOT DISTINCT` (más limpio) porque este último exige PostgreSQL 15 y la versión mínima no está fijada en el contrato del proyecto.
+
+**Trampa de aridad al redefinir la función:** añadir `p_timezone TEXT DEFAULT NULL` a `refresh_usage_rollups(INTEGER)` **no reemplaza** la función, crea una **sobrecarga**. La llamada existente `SELECT sooniverse.refresh_usage_rollups(90)` pasaría a resolver contra dos candidatas y PostgreSQL respondería `function ... is not unique`, rompiendo `db_setup.refresh_metrics` y `metrics/services.refrescar_metricas`. Por eso `004_usage_analytics.sql` abre con un `DROP FUNCTION IF EXISTS sooniverse.refresh_usage_rollups(INTEGER);` **antes** del `CREATE OR REPLACE`. Por el mismo motivo, `ingest_litellm_spendlogs` **conserva** su firma `(INTEGER) RETURNS INTEGER`: ambos consumidores hacen `cur.fetchone()[0]` sobre un escalar. La lógica nueva vive en `ingest_litellm_spendlogs_range(p_from, p_to)`, que devuelve `TABLE(inserted, updated)`, y la función vieja pasó a ser un envoltorio que preserva el contrato. `tests/test_sql_schema.py` verifica ambas cosas por posición en el texto del archivo.
+
+## 10. Los percentiles no se recombinan
+
+Es la regla más fácil de romper de todo el esquema, así que se repite aquí: `usage_hourly.latency_p95_ms` es el p95 **de esa hora concreta**. Promediar o maximizar los p95 de trece lunes **no da** el p95 del lunes; un percentil no es una media y no hay operación aritmética que lo reconstruya desde sus partes.
+
+Para cualquier percentil sobre una ventana mayor de una hora, la única vía soportada es:
+
+```sql
+SELECT * FROM sooniverse.latency_percentiles(
+    p_from, p_to, p_api_key_ids := NULL, p_models := NULL, p_incluir_cache := FALSE
+);
+```
+
+que vuelve a `token_usage_event` y devuelve `(muestras, p50_ms, p95_ms, p99_ms, ttft_p50_ms, ttft_p95_ms)`. Excluye los aciertos de caché por defecto, por el motivo del §8.
+
+En el panel esto se traduce en una decisión concreta: el mapa de calor en modo "peticiones"/"tokens" agrega con el ORM sobre `usage_hourly` (sumas, recombinables), pero en modo "latencia p95" cae a SQL crudo con `percentile_cont` sobre los eventos —es la consulta más cara del panel, y por eso vive en un endpoint aparte y tiene un tope duro de 90 días (`filtros.P95_MAX_DIAS`)—.
+
+## 11. Retención
+
+`refresh_usage_hourly(..., p_retention_days)` (default 400) borra los buckets horarios más viejos que ese umbral al final de cada corrida. Es la única tabla de este esquema con purga automática: `usage_hourly` crece con 24 filas por día y combinación (api_key, modelo), mientras que `token_usage_rollup` crece con una por día y `capacity_benchmark` con una por despliegue.

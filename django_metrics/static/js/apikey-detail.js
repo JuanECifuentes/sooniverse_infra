@@ -9,6 +9,8 @@
  * replica). El filtrado nunca queda reflejado en la URL: por eso metrics_api
  * es POST y no GET.
  */
+import { escapeHtml, fmtInt, fmtTok } from "./format.js";
+
 const panel = document.getElementById("metrics-panel");
 
 if (panel && panel.dataset.apiKeyId) {
@@ -33,26 +35,6 @@ if (panel && panel.dataset.apiKeyId) {
   function getCsrfToken() {
     const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
     return match ? decodeURIComponent(match[1]) : "";
-  }
-
-  const fmtInt = (n) => Number(n || 0).toLocaleString("es-ES");
-
-  function fmtCompacto(n, divisor, sufijo) {
-    let texto = (n / divisor).toFixed(1);
-    if (texto.endsWith(".0")) texto = texto.slice(0, -2);
-    return `${texto.replace(".", ",")}${sufijo}`;
-  }
-  function fmtTok(n) {
-    n = Number(n || 0);
-    if (Math.abs(n) >= 1_000_000) return fmtCompacto(n, 1_000_000, "M");
-    if (Math.abs(n) >= 100_000) return fmtCompacto(n, 1_000, "K");
-    return fmtInt(n);
-  }
-
-  function escapeHtml(str) {
-    return String(str).replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[c]));
   }
 
   const state = {
