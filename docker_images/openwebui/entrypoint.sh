@@ -28,6 +28,16 @@ else
     echo "[openwebui] DATABASE_URL no apunta a PostgreSQL; se omite la espera."
 fi
 
+# Personalización de marca en caliente (post-despliegue):
+# Si el cliente coloca sus propias imágenes en /app/backend/data/branding/ (volumen persistente webui_data),
+# se aplican sobre los directorios estáticos de la aplicación sin tener que recompilar la imagen Docker.
+if [ -d "/app/backend/data/branding" ]; then
+    echo "[openwebui] Aplicando archivos de marca personalizados desde /app/backend/data/branding..."
+    mkdir -p /app/backend/open_webui/static /app/build/static
+    cp -rf /app/backend/data/branding/* /app/backend/open_webui/static/ 2>/dev/null || true
+    cp -rf /app/backend/data/branding/* /app/build/static/ 2>/dev/null || true
+fi
+
 echo "[openwebui] Delegando arranque a la imagen base (Alembic + uvicorn)."
 cd /app/backend
 exec bash start.sh

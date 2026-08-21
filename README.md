@@ -36,7 +36,7 @@ de diseño.
 │                                       ▼                                            │
 │  SUBRED PÚBLICA                                    SUBRED PRIVADA                  │
 │  ┌───────────────────────────────┐        ┌──────────────────────────────────────┐ │
-│  │  NODO GATEWAY (1 · t3.large)  │        │  WORKERS vLLM (N · GPU)              │ │
+│  │  NODO GATEWAY (1 · t4g.large)  │        │  WORKERS vLLM (N · GPU)              │ │
 │  │  ── única IP pública ──       │        │  ── SIN IP pública ──                │ │
 │  │                                │        │                                      │ │
 │  │  nginx   :80 (+443 si TLS)    │        │  worker-0   10.0.x.a:8007            │ │
@@ -213,7 +213,7 @@ red_y_aislamiento:
 
 gateway:
   habilitado: true
-  tipo_instancia: "t3.large"        # CPU-only
+  tipo_instancia: "t4g.large"        # CPU-only
   exponer_puertos_directos: false   # false (recomendado): nginx es la única puerta pública
   puertos_publicos: [4000, 8080, 8000]   # solo aplican si exponer_puertos_directos: true
   load_balancing_strategy: "latency-based-routing"
