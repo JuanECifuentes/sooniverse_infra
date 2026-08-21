@@ -762,7 +762,6 @@ span.flatpickr-weekday { color: var(--text-muted); background: transparent; font
 /* Overlay de carga: atenúa el panel completo (filtros + resultados) debajo */
 .l-loading-overlay {
     background-color: color-mix(in srgb, var(--surface-0) 75%, transparent);
-    backdrop-filter: blur(2px);
 }
 #metrics-panel[aria-busy="true"] #metrics-filters,
 #metrics-panel[aria-busy="true"] #metrics-content,
@@ -1145,7 +1144,7 @@ span.flatpickr-weekday { color: var(--text-muted); background: transparent; font
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
         transition-duration: 0.01ms !important;
-        animation-duration: 0.01ms !important;
+        animation-duration: 850.01ms !important;
     }
 
     #main-header .l-header,
