@@ -32,3 +32,17 @@
   --sv-warning: #d99a3d;
   --sv-negative: #e0616f;
 }
+
+/* Optimización para el Splash Screen con SVG Vectorial Animado */
+html.dark #splash-screen,
+#splash-screen {
+  background: #080718 !important;
+}
+
+#splash-screen #logo {
+  max-width: min(85vw, 440px) !important;
+  width: auto !important;
+  height: auto !important;
+  max-height: 7.5rem !important;
+  filter: drop-shadow(0 0 20px rgba(96, 239, 255, 0.2));
+}

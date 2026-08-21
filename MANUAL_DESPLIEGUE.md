@@ -126,7 +126,7 @@ cliente:
   entorno: "prod"                   # prod | dev
 
 gateway:
-  tipo_instancia: "t3.large"        # subir a t3.xlarge si hay muchos usuarios en WebUI
+  tipo_instancia: "t4g.large"        # subir a t3.xlarge si hay muchos usuarios en WebUI
   load_balancing_strategy: "latency-based-routing"
 
 base_de_datos:

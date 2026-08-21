@@ -1,0 +1,219 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-140 -140 280 280" width="100%" height="100%">
+  <defs>
+    <linearGradient id="cosmicGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00FF87" />
+      <stop offset="50%" stop-color="#60EFFF" />
+      <stop offset="100%" stop-color="#8A2BE2" />
+    </linearGradient>
+    <linearGradient id="planetGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563EB" />
+      <stop offset="45%" stop-color="#4C1D95" />
+      <stop offset="100%" stop-color="#1E1B4B" />
+    </linearGradient>
+    <linearGradient id="errorTextGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FF2A6D" />
+      <stop offset="50%" stop-color="#FF0055" />
+      <stop offset="100%" stop-color="#FF5E00" />
+    </linearGradient>
+    <filter id="neonGlow2" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+    <filter id="errorGlowFilter" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <style>
+      /* Entrada cinemática del isotipo */
+      .planet-core {
+        transform-origin: center;
+        animation: planetAppear 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards,
+                   planetHover 4s ease-in-out 1.2s infinite alternate;
+      }
+
+      /* Rotación y oscilación de los anillos */
+      .rings-layer {
+        transform-origin: center;
+        animation: ringTilt 6s ease-in-out infinite alternate;
+      }
+
+      /* Latido de las líneas atmosféricas del planeta */
+      .atmos-line {
+        stroke-dasharray: 100;
+        animation: atmosFlow 4s linear infinite;
+      }
+
+      /* Efecto de pulso y resplandor en los nodos orbitales */
+      .node {
+        transform-box: fill-box;
+        transform-origin: center;
+        animation: nodeBreathe 2s ease-in-out infinite alternate;
+      }
+      .node-delay-1 { animation-delay: 0.5s; }
+      .node-delay-2 { animation-delay: 1s; }
+
+      /* Visual del Texto ERROR Animado con Neón Glitch */
+      .error-group {
+        transform-origin: center;
+        pointer-events: none;
+      }
+
+      .error-text-main {
+        font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+        font-size: 40px;
+        font-weight: 900;
+        letter-spacing: 8px;
+        fill: url(#errorTextGrad);
+        stroke: #070614;
+        stroke-width: 1.2px;
+        filter: drop-shadow(0 0 2px #FF0055) drop-shadow(0 0 6px rgba(255,0,85,0.5));
+        animation: errorPulse 2.5s ease-in-out infinite, glitchText 3.2s infinite;
+        transform-origin: center;
+        text-anchor: middle;
+        dominant-baseline: central;
+      }
+
+      .error-glitch-cyan {
+        font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+        font-size: 40px;
+        font-weight: 900;
+        letter-spacing: 8px;
+        fill: #00F0FF;
+        opacity: 0;
+        animation: glitchCyan 3.2s infinite;
+        transform-origin: center;
+        text-anchor: middle;
+        dominant-baseline: central;
+      }
+
+      .error-glitch-red {
+        font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+        font-size: 40px;
+        font-weight: 900;
+        letter-spacing: 8px;
+        fill: #FF0055;
+        opacity: 0;
+        animation: glitchRed 3.2s infinite;
+        transform-origin: center;
+        text-anchor: middle;
+        dominant-baseline: central;
+      }
+
+      @keyframes planetAppear {
+        0% { transform: scale(0.2) rotate(-15deg); opacity: 0; }
+        100% { transform: scale(1) rotate(0deg); opacity: 1; }
+      }
+
+      @keyframes planetHover {
+        0% { transform: translateY(0px) rotate(0deg); }
+        50% { transform: translateY(-7px) rotate(2deg); }
+        100% { transform: translateY(5px) rotate(-1deg); }
+      }
+
+      @keyframes ringTilt {
+        0% { transform: rotate(-18deg) scaleY(1); }
+        50% { transform: rotate(-14deg) scaleY(0.92); }
+        100% { transform: rotate(-22deg) scaleY(1.05); }
+      }
+
+      @keyframes atmosFlow {
+        0% { stroke-dashoffset: 200; }
+        100% { stroke-dashoffset: 0; }
+      }
+
+      @keyframes nodeBreathe {
+        0% { transform: scale(0.85); opacity: 0.6; filter: drop-shadow(0 0 2px #00FF87); }
+        100% { transform: scale(1.25); opacity: 1; filter: drop-shadow(0 0 10px #60EFFF); }
+      }
+
+      /* Keyframes para el efecto Glitch Cyberpunk */
+      @keyframes glitchText {
+        0%, 84%, 100% { transform: translate(0, 0) skewX(0deg); opacity: 1; }
+        85% { transform: translate(-4px, 1px) skewX(12deg); opacity: 0.85; }
+        86% { transform: translate(4px, -2px) skewX(-10deg); opacity: 1; }
+        87% { transform: translate(-2px, 2px) skewX(6deg); opacity: 0.9; }
+        88% { transform: translate(0, 0) skewX(0deg); opacity: 1; }
+        94% { transform: translate(5px, -1px) skewX(-14deg); opacity: 0.85; }
+        95% { transform: translate(-3px, 1px) skewX(8deg); opacity: 1; }
+        96% { transform: translate(0, 0) skewX(0deg); opacity: 1; }
+      }
+
+      @keyframes glitchCyan {
+        0%, 83%, 100% { transform: translate(0, 0); opacity: 0; }
+        84% { transform: translate(-5px, -2px); opacity: 0.8; }
+        86% { transform: translate(4px, 2px); opacity: 0.85; }
+        87% { transform: translate(0, 0); opacity: 0; }
+        93% { transform: translate(-4px, 1px); opacity: 0.75; }
+        95% { transform: translate(0, 0); opacity: 0; }
+      }
+
+      @keyframes glitchRed {
+        0%, 83%, 100% { transform: translate(0, 0); opacity: 0; }
+        85% { transform: translate(5px, 2px); opacity: 0.8; }
+        87% { transform: translate(-4px, -2px); opacity: 0.85; }
+        88% { transform: translate(0, 0); opacity: 0; }
+        94% { transform: translate(4px, -1px); opacity: 0.75; }
+        96% { transform: translate(0, 0); opacity: 0; }
+      }
+
+      @keyframes errorPulse {
+        0%, 100% { filter: drop-shadow(0 0 2px #FF0055) drop-shadow(0 0 5px rgba(255,0,85,0.4)); opacity: 0.98; }
+        50% { filter: drop-shadow(0 0 4px #FF2A6D) drop-shadow(0 0 9px rgba(255,42,109,0.6)); opacity: 1; }
+      }
+    </style>
+  </defs>
+
+  <!-- Sistema Planetario Transparente Animado -->
+  <g class="planet-core">
+    <!-- Anillos Traseros -->
+    <g class="rings-layer">
+      <path d="M -68,0 A 68,19 0 0,1 68,0" fill="none" stroke="url(#cosmicGrad2)" stroke-width="2.5" opacity="0.35"/>
+      <path d="M -92,0 A 92,26 0 0,1 92,0" fill="none" stroke="url(#cosmicGrad2)" stroke-width="11" opacity="0.4"/>
+      <path d="M -92,0 A 92,26 0 0,1 92,0" fill="none" stroke="#60EFFF" stroke-width="2" opacity="0.6"/>
+      <path d="M -114,0 A 114,32 0 0,1 114,0" fill="none" stroke="url(#cosmicGrad2)" stroke-width="3.5" opacity="0.3"/>
+    </g>
+
+    <!-- Cuerpo Celeste -->
+    <circle cx="0" cy="0" r="46" fill="url(#planetGrad2)" stroke="#3B82F6" stroke-width="1.5" stroke-opacity="0.5"/>
+    <path class="atmos-line" d="M -40,-22 Q 0,-10 40,-22" fill="none" stroke="#60EFFF" stroke-width="1.5" stroke-opacity="0.5"/>
+    <path class="atmos-line" d="M -45,12 Q 0,26 45,12" fill="none" stroke="#00FF87" stroke-width="1.5" stroke-opacity="0.6"/>
+    <path d="M -46,0 Q 0,14 46,0" fill="none" stroke="#FFFFFF" stroke-width="1" stroke-opacity="0.3" stroke-dasharray="4 3"/>
+
+    <!-- Anillos Delanteros -->
+    <g class="rings-layer">
+      <path d="M 68,0 A 68,19 0 0,1 -68,0" fill="none" stroke="url(#cosmicGrad2)" stroke-width="2.5" stroke-linecap="round"/>
+      <path d="M 92,0 A 92,26 0 0,1 -92,0" fill="none" stroke="url(#cosmicGrad2)" stroke-width="11" stroke-linecap="round"/>
+      <path d="M 92,0 A 92,26 0 0,1 -92,0" fill="none" stroke="#FFFFFF" stroke-width="2" opacity="0.85" stroke-linecap="round"/>
+      <path d="M 114,0 A 114,32 0 0,1 -114,0" fill="none" stroke="url(#cosmicGrad2)" stroke-width="3.5" stroke-linecap="round"/>
+    </g>
+
+    <!-- Nodos Activos -->
+    <g class="node">
+      <circle cx="-80" cy="-45" r="9" fill="#00FF87" filter="url(#neonGlow2)"/>
+      <circle cx="-80" cy="-45" r="4" fill="#FFFFFF"/>
+    </g>
+
+    <g class="node node-delay-1">
+      <circle cx="104" cy="12" r="7.5" fill="#60EFFF" filter="url(#neonGlow2)"/>
+    </g>
+
+    <g class="node node-delay-2">
+      <circle cx="15" cy="58" r="8.5" fill="#8A2BE2" filter="url(#neonGlow2)"/>
+      <circle cx="15" cy="58" r="3" fill="#60EFFF"/>
+    </g>
+  </g>
+
+  <!-- Texto de Error Animado (Superpuesto directamente sin contenedor ni fondo) -->
+  <g class="error-group">
+    <text x="0" y="4" class="error-glitch-cyan">ERROR</text>
+    <text x="0" y="4" class="error-glitch-red">ERROR</text>
+    <text x="0" y="4" class="error-text-main">ERROR</text>
+  </g>
+</svg>

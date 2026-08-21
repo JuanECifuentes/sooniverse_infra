@@ -64,7 +64,7 @@ red_y_aislamiento:
 # 3. Nodo Gateway
 gateway:
   habilitado: true
-  tipo_instancia: "t3.large"
+  tipo_instancia: "t4g.large"
   disk_size: 100
   exponer_puertos_directos: false
   puertos_publicos:

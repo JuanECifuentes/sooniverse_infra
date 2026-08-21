@@ -57,7 +57,7 @@ red_y_aislamiento:
 # 3. Nodo Gateway (única puerta de entrada pública del clúster)
 gateway:
   habilitado: true
-  tipo_instancia: "t3.large"  # Instancia CPU-only: no requiere GPU
+  tipo_instancia: "t4g.large"  # Instancia CPU-only: no requiere GPU
   disk_size: 100              # GB de disco para imágenes Docker y volúmenes
   # false (recomendado) -> el SG del gateway solo abre 80/443; litellm/open-webui/
   # metrics quedan detrás de nginx. true -> además abre 4000/8000/8080 al CIDR
