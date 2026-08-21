@@ -210,7 +210,7 @@ span.flatpickr-weekday { color: var(--text-muted); background: transparent; font
 .numInputWrapper span.arrowUp:after { border-bottom-color: var(--text-muted); }
 .numInputWrapper span.arrowDown:after { border-top-color: var(--text-muted); }
 
-.l-loading-overlay { background-color: color-mix(in srgb, var(--surface-0) 75%, transparent); backdrop-filter: blur(2px); }
+.l-loading-overlay { background-color: color-mix(in srgb, var(--surface-0) 75%, transparent); }
 #metrics-panel[aria-busy="true"] #metrics-filters,
 #metrics-panel[aria-busy="true"] #metrics-content,
 #metrics-panel[aria-busy="true"] #akd-content { opacity: 0.5; transition: opacity var(--dur-base) var(--ease-out); }

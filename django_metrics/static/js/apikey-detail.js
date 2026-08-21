@@ -137,7 +137,7 @@ if (panel && panel.dataset.apiKeyId) {
     if (data.requests) renderTokens(data.requests);
   }
 
-  async function cargar() {
+  async function cargar(tipo = "filtro") {
     if (state.desde && state.hasta && state.desde > state.hasta) {
       els.dateError.hidden = false;
       els.dateError.textContent = 'La fecha "desde" no puede ser posterior a "hasta".';
@@ -154,17 +154,24 @@ if (panel && panel.dataset.apiKeyId) {
     activeController = controller;
     const myRequestId = ++requestCounter;
 
-    // Overlay del token table: inmediato para feedback de paginación
-    if (els.tokensLoading) els.tokensLoading.hidden = false;
-
     let overlayShown = false;
-    const showTimer = setTimeout(() => {
-      overlayShown = true;
-      els.loading.hidden = false;
-      panel.setAttribute("aria-busy", "true");
-      panel.inert = true;
-      els.live.textContent = "Cargando datos";
-    }, 150);
+    let showTimer = null;
+
+    if (tipo === "paginacion") {
+      // Paginación: spinner local solo sobre la tarjeta de contadores de tokens
+      if (els.tokensLoading) els.tokensLoading.hidden = false;
+      if (els.tokensPrev) els.tokensPrev.disabled = true;
+      if (els.tokensNext) els.tokensNext.disabled = true;
+    } else {
+      // Filtrado: overlay general que cubre todas las tarjetas
+      showTimer = setTimeout(() => {
+        overlayShown = true;
+        els.loading.hidden = false;
+        panel.setAttribute("aria-busy", "true");
+        panel.inert = true;
+        els.live.textContent = "Cargando datos";
+      }, 150);
+    }
     const startedAt = performance.now();
 
     const params = new URLSearchParams({
@@ -196,7 +203,7 @@ if (panel && panel.dataset.apiKeyId) {
       els.live.textContent = "No se pudieron cargar los datos";
     } finally {
       if (myRequestId === requestCounter) {
-        clearTimeout(showTimer);
+        if (showTimer) clearTimeout(showTimer);
         const finish = () => {
           els.loading.hidden = true;
           if (els.tokensLoading) els.tokensLoading.hidden = true;
@@ -218,7 +225,7 @@ if (panel && panel.dataset.apiKeyId) {
     state.granularity = btn.dataset.value;
     state.page = 1;
     els.granularity.removeAttribute("open");
-    cargar();
+    cargar("filtro");
   });
 
   [els.desde, els.hasta].forEach((input) => {
@@ -226,7 +233,7 @@ if (panel && panel.dataset.apiKeyId) {
       state.desde = els.desde.value;
       state.hasta = els.hasta.value;
       state.page = 1;
-      cargar();
+      cargar("filtro");
     });
   });
 
@@ -235,19 +242,19 @@ if (panel && panel.dataset.apiKeyId) {
     els.tokensPrev.addEventListener("click", () => {
       if (els.tokensPrev.disabled) return;
       state.page -= 1;
-      cargar();
+      cargar("paginacion");
     });
   }
   if (els.tokensNext) {
     els.tokensNext.addEventListener("click", () => {
       if (els.tokensNext.disabled) return;
       state.page += 1;
-      cargar();
+      cargar("paginacion");
     });
   }
 
-  els.retryBtn.addEventListener("click", cargar);
+  els.retryBtn.addEventListener("click", () => cargar("filtro"));
 
   // Carga inicial para poblar la tabla de tokens (ya no viene en el contexto Django)
-  cargar();
+  cargar("filtro");
 }

@@ -322,7 +322,7 @@
                 <div class="l-card__body">
                     {{ metricas_payload|json_script:"metrics-initial-payload" }}
 
-                    <div class="l-loading-overlay" id="metrics-lente-loading" hidden aria-hidden="true">
+                    <div class="l-loading-overlay l-loading-overlay--card" id="metrics-lente-loading" hidden aria-hidden="true">
                         {% include "metrics/_spinner.html" %}
                     </div>
                     <p class="sv-error" id="metrics-lente-error" hidden></p>
