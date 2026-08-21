@@ -769,7 +769,7 @@ class TopologyBuilder:
         resources: Dict[str, Any] = {
             "cloud": "aws",
             "region": self.red["region"],
-            "instance_type": gw.get("tipo_instancia", "t3.large"),
+            "instance_type": gw.get("tipo_instancia", "t4g.large"),
             "disk_size": gw.get("disk_size", 100),
             "ports": public_ports,
             "labels": {**self.red.get("tags_obligatorios", {}), "rol": "gateway"},

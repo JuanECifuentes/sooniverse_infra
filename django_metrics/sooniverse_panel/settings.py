@@ -174,7 +174,7 @@ ENTORNO = _env("ENTORNO", "prod")
 # tokens). Es lo que permite responder "¿cuánto me cuesta la máquina parada?"
 # en la tarjeta de tiempos muertos. Con 0, la tarjeta oculta la columna de coste
 # en vez de mostrar $0,0000 en todas las filas.
-# Referencia us-east-1: g6.xlarge ~0.80 + t3.large ~0.08 + NAT/EIP ~0.05.
+# Referencia us-east-1: g6.xlarge ~0.80 + t4g.large ~0.06 + NAT/EIP ~0.05.
 METRICS_COSTE_HORA_USD = float(_env("METRICS_COSTE_HORA_USD", "0") or 0)
 
 # Refresco automático de métricas (segundos). 0 desactiva el job.

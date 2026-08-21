@@ -25,12 +25,18 @@ RUN apt-get update \
 # (scripts/render_gateway_stack.py) o scripts/sync_openwebui_models.py.
 COPY overlay/sooniverse ./sooniverse
 
-# Overlay visual: tokens del Manual de imagen Sooniverse. Open WebUI sirve
-# cualquier archivo de FRONTEND_BUILD_DIR como estático (SPAStaticFiles), así
-# que queda alcanzable en GET /sooniverse.css. El <link> que lo activa en
-# index.html es un patch pendiente para la iteración de re-tematizado visual
-# completo (alcance de ESTA iteración: solo funcional, ver el manual de skill).
+# Overlay visual: logos (splash, favicons), tokens y CSS de Sooniverse. Open WebUI
+# sirve cualquier archivo de FRONTEND_BUILD_DIR como estático y los sincroniza
+# con STATIC_DIR (/app/backend/open_webui/static).
+COPY overlay/static/ /app/build/static/
+COPY overlay/static/ /app/backend/open_webui/static/
 COPY overlay/static/sooniverse.css /app/build/sooniverse.css
+COPY overlay/static/favicon.png /app/build/favicon.png
+
+# Configurar index.html para usar SVG nativos en splash/favicon y activar sooniverse.css
+RUN sed -i 's|</head>|    <link rel="stylesheet" href="/sooniverse.css" />\n</head>|g' /app/build/index.html \
+ && sed -i 's|/static/splash-dark.png|/static/splash-dark.svg|g' /app/build/index.html \
+ && sed -i 's|/static/splash.png|/static/splash.svg|g' /app/build/index.html
 
 # Parches de backend/frontend contra este tag exacto. Si un .patch no aplica
 # limpio, el build FALLA a propósito: un bump de tag nunca debe descartar en
