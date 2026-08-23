@@ -1,0 +1,11 @@
+# ID de la cuenta AWS de Sooniverse (Cuenta A)
+sooniverse_account_id = "111111111111"
+
+# Identificador secreto único acordado con Sooniverse (ejemplo generado: uuid o token seguro)
+external_id = "sooniverse-acme-prod-external-id-12345"
+
+# Nombre del rol (opcional)
+role_name = "SooniverseDeployRole"
+
+# Región principal (opcional)
+aws_region = "us-east-1"
