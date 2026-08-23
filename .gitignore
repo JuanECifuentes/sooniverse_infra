@@ -19,6 +19,13 @@ venv/
 .venv/
 env/
 
+# Terraform (onboarding BYOC) - state y tfvars contienen secretos/IDs de cuenta reales
+onboarding/**/.terraform/
+onboarding/**/terraform.tfstate
+onboarding/**/terraform.tfstate.backup
+onboarding/**/terraform.tfvars
+onboarding/**/*.tfplan
+
 # Django
 *.log
 local_settings.py
