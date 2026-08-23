@@ -58,6 +58,7 @@ EXPECTED_TABLES = (
     "app_setting",
     "usage_hourly",
     "capacity_benchmark",
+    "worker_action",
 )
 
 

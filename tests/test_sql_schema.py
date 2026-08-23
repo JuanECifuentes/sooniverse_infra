@@ -19,7 +19,7 @@ from db_setup import EXPECTED_TABLES  # noqa: E402
 
 SQL_DIR = REPO_ROOT / "database"
 ARCHIVOS = sorted(SQL_DIR.glob("*.sql"))
-NUEVOS = [p for p in ARCHIVOS if p.name.startswith(("004_", "005_"))]
+NUEVOS = [p for p in ARCHIVOS if p.name.startswith(("004_", "005_", "006_"))]
 
 
 def leer(path: Path) -> str:

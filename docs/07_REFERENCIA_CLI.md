@@ -11,7 +11,7 @@ Genera los manifiestos de la topología y, opcionalmente, la aprovisiona.
 | `--config` | `config_global.yaml` | Ruta al contrato |
 | `--out-dir` | (calculado) | Directorio de manifiestos; ver `docs/05_MULTICLIENTE.md` |
 | `--run` | off | Aprovisiona en AWS tras generar los manifiestos |
-| `--only` | `all` | `all\|network\|gateway\|workers\|endpoints\|capabilities\|capacidad\|verify` (los `choices` se derivan de `PHASE_ORDER`, así que no pueden desincronizarse de las fases reales) |
+| `--only` | `all` | `all\|network\|gateway\|dominio\|workers\|endpoints\|capabilities\|capacidad\|verify` (los `choices` se derivan de `PHASE_ORDER`, así que no pueden desincronizarse de las fases reales) |
 | `--dry-run` | off | Con `--run`: solo imprime el plan, ninguna llamada mutante a AWS/PostgreSQL |
 | `--init-db` | off | Corre `db_setup.py --refresh` localmente, ignorando `AUTO_INIT_DB` |
 | `--no-auto-init-db` | off | Fuerza `AUTO_INIT_DB=false` para esta corrida sin editar el YAML |

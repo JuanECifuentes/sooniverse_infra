@@ -354,21 +354,87 @@
                     </span>
                 </div>
 
+                {% if not pool.restart_disponible or not pool.ec2_disponible %}
+                    <p class="sv-help l-mb-md">
+                        {% if not pool.restart_disponible %}"Reiniciar" no está disponible: falta la clave SSH del bastion en este despliegue.{% endif %}
+                        {% if not pool.ec2_disponible %}"Apagar"/"Arrancar" no están disponibles: falta boto3 en este despliegue.{% endif %}
+                    </p>
+                {% endif %}
+
                 <div class="sv-divider"></div>
 
                 <div class="l-stack l-stack--tight">
                     {% for nodo in pool.nodos %}
-                        <div class="l-row">
-                            <span class="sv-dot {% if nodo.is_healthy %}sv-dot--on{% else %}sv-dot--off{% endif %}"></span>
-                            <span class="sv-mono">{{ nodo.private_ip }}:{{ nodo.port }}</span>
-                            <span class="l-spacer"></span>
-                            <span class="sv-badge sv-badge--muted">{{ nodo.accelerator|default:"—" }}</span>
+                        <div class="l-worker-row">
+                            <div class="l-row">
+                                <span class="sv-dot
+                                    {% if nodo.estado_operativo == 'sano' %}sv-dot--on
+                                    {% elif nodo.estado_operativo == 'apagado' or nodo.estado_operativo == 'desconocido' %}sv-dot--muted
+                                    {% elif nodo.estado_operativo == 'desincronizado' %}sv-dot--off
+                                    {% else %}sv-dot--warn{% endif %}"></span>
+                                <span class="sv-mono">{{ nodo.private_ip }}:{{ nodo.port }}</span>
+                                <span class="l-spacer"></span>
+                                <span class="sv-badge sv-badge--muted">{{ nodo.accelerator|default:"—" }}</span>
+                                <span class="sv-badge
+                                    {% if nodo.estado_operativo == 'sano' %}sv-badge--success
+                                    {% elif nodo.estado_operativo == 'desincronizado' %}sv-badge--danger
+                                    {% elif nodo.estado_operativo == 'apagado' or nodo.estado_operativo == 'desconocido' %}sv-badge--muted
+                                    {% else %}sv-badge--warning{% endif %}">
+                                    {{ nodo.get_estado_operativo_display }}
+                                </span>
+                            </div>
+                            <div class="l-table-actions l-mt-sm">
+                                <form method="post" action="{% url 'metrics:worker_accion' nodo.id 'health' %}"
+                                      class="l-inline-form" data-spinner-submit>
+                                    {% csrf_token %}
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button type="submit" class="sv-btn sv-btn--ghost sv-btn--sm"
+                                            data-loading-text="Comprobando…">Salud</button>
+                                </form>
+                                <form method="post" action="{% url 'metrics:worker_accion' nodo.id 'restart' %}"
+                                      class="l-inline-form"
+                                      data-worker-confirm="¿Reiniciar vLLM en {{ nodo.private_ip }}? El nodo dejará de servir peticiones un momento.">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm"
+                                            {% if not pool.restart_disponible %}disabled{% endif %}>Reiniciar</button>
+                                </form>
+                                {% if nodo.estado_operativo == 'apagado' %}
+                                    <form method="post" action="{% url 'metrics:worker_accion' nodo.id 'start' %}"
+                                          class="l-inline-form" data-spinner-submit>
+                                        {% csrf_token %}
+                                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                        <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm"
+                                                data-loading-text="Arrancando…"
+                                                {% if not pool.ec2_disponible %}disabled{% endif %}>Arrancar</button>
+                                    </form>
+                                {% else %}
+                                    <form method="post" action="{% url 'metrics:worker_accion' nodo.id 'stop' %}"
+                                          class="l-inline-form"
+                                          data-worker-confirm="¿Apagar la instancia de {{ nodo.private_ip }}? Dejará de facturar cómputo hasta que la arranques de nuevo.">
+                                        {% csrf_token %}
+                                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                        <button type="submit" class="sv-btn sv-btn--danger sv-btn--sm"
+                                                {% if not pool.ec2_disponible %}disabled{% endif %}>Apagar</button>
+                                    </form>
+                                {% endif %}
+                            </div>
                         </div>
                     {% empty %}
                         <p class="sv-help">Sin workers registrados. Ejecuta
                            <span class="sv-mono">python scripts/sync_endpoints.py --apply</span>.</p>
                     {% endfor %}
                 </div>
+
+                <dialog id="worker-confirm-dialog" class="sv-dialog">
+                    <form method="dialog">
+                        <p class="sv-body" id="worker-confirm-message"></p>
+                        <div class="l-form-actions">
+                            <button type="button" class="sv-btn sv-btn--ghost sv-btn--sm" data-worker-confirm-cancel>Cancelar</button>
+                            <button type="submit" class="sv-btn sv-btn--danger sv-btn--sm" data-worker-confirm-accept>Confirmar</button>
+                        </div>
+                    </form>
+                </dialog>
 
                 {% if pool.modelos %}
                     <div class="sv-divider"></div>

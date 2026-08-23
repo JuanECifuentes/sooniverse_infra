@@ -1,0 +1,66 @@
+{% load static %}<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Iniciar sesión · {{ MARCA_NOMBRE_1 }}{{ MARCA_NOMBRE_2 }}</title>
+    <link rel="icon" type="image/png" sizes="192x192" href="{% static 'img/icon-192x192.png' %}">
+    <link rel="stylesheet" href="{% static 'css/layout.css' %}">
+    <link rel="stylesheet" href="{% static 'css/theme-sooniverse.css' %}">
+    <style>
+        /* Página de login: pantalla única, sin el shell del panel (header/nav/
+           footer no tienen sentido antes de autenticarse). */
+        body { min-height: 100vh; display: flex; align-items: center; justify-content: center; background-color: var(--surface-0); }
+        .sv-login-card { width: 100%; max-width: 380px; margin: 24px; }
+        .sv-login-logo { display: flex; justify-content: center; margin-bottom: 24px; }
+        .sv-login-logo img { height: 40px; }
+        .sv-login-field { margin-bottom: 16px; }
+        .sv-login-field label { display: block; margin-bottom: 6px; }
+        .sv-login-field input { width: 100%; }
+        .sv-login-submit { width: 100%; margin-top: 8px; }
+    </style>
+</head>
+<body>
+    <div class="sv-noise" aria-hidden="true"></div>
+    <div class="sv-login-card">
+        <div class="sv-login-logo">
+            <img src="{% static 'img/logo_completo_sin_fondo_soloNombre2.svg' %}" alt="Sooniverse">
+        </div>
+        <div class="sv-card">
+            <div class="l-stack l-stack--tight l-mb-md">
+                <span class="sv-eyebrow">Acceso</span>
+                <h2>Iniciar sesión</h2>
+                <p class="sv-body">Una sola cuenta para el panel y el chat.</p>
+            </div>
+
+            {% if error %}
+                <div class="sv-alert sv-alert--error l-mb-md">
+                    <span>{{ error }}</span>
+                </div>
+            {% endif %}
+            {% if form.non_field_errors %}
+                <div class="sv-alert sv-alert--error l-mb-md">
+                    <span>{{ form.non_field_errors.0 }}</span>
+                </div>
+            {% endif %}
+
+            <form method="post" novalidate data-spinner-submit>
+                {% csrf_token %}
+                <input type="hidden" name="next" value="{{ next }}">
+                <div class="sv-login-field">
+                    <label class="sv-label" for="{{ form.identificador.id_for_label }}">{{ form.identificador.label }}</label>
+                    {{ form.identificador }}
+                </div>
+                <div class="sv-login-field">
+                    <label class="sv-label" for="{{ form.password.id_for_label }}">{{ form.password.label }}</label>
+                    {{ form.password }}
+                </div>
+                <button type="submit" class="sv-btn sv-btn--primary sv-login-submit" data-loading-text="Entrando…">
+                    Entrar
+                </button>
+            </form>
+        </div>
+    </div>
+    <script src="{% static 'js/spinner.js' %}"></script>
+</body>
+</html>

@@ -61,13 +61,17 @@ class BootstrapError(Exception):
 
 
 def _http(method: str, url: str, body: Optional[Dict[str, Any]] = None,
-          token: Optional[str] = None, timeout: int = 20) -> Dict[str, Any]:
+          token: Optional[str] = None, timeout: int = 20,
+          extra_headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """'token' se manda como Authorization: Bearer <token> sea cual sea su
     origen (sesión de Open WebUI o la master key de LiteLLM) -son dos APIs
-    HTTP distintas, pero el mismo esquema de auth."""
+    HTTP distintas, pero el mismo esquema de auth. 'extra_headers' es lo que
+    usa authenticate() en modo SSO por cabecera de confianza."""
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if extra_headers:
+        headers.update(extra_headers)
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
@@ -101,10 +105,56 @@ def wait_for_openwebui() -> None:
     raise BootstrapError(f"Open WebUI no respondió en {OPENWEBUI_BASE_URL}/ tras {READY_TIMEOUT_SECONDS}s")
 
 
+TRUSTED_EMAIL_HEADER = os.environ.get("WEBUI_AUTH_TRUSTED_EMAIL_HEADER", "")
+
+
+def _authenticate_trusted_header() -> str:
+    """Con SSO por cabecera de confianza activo (WEBUI_AUTH_TRUSTED_EMAIL_HEADER,
+    ver docker_images/openwebui/README.md), Open WebUI BLOQUEA /signup y /signin
+    por contraseña sin condiciones (backend/open_webui/routers/auths.py:
+    /signin exige la cabecera y falla con 400 si no está; /signup exige
+    'ui.enable_login_form', que este despliegue deja en False) -confirmado
+    contra el código fuente del tag fijado en el Dockerfile, no una suposición.
+
+    Por eso la cuenta técnica de bootstrap se autentica con la MISMA cabecera:
+    este script corre DENTRO de la red interna de docker-compose, el mismo
+    perímetro de confianza que nginx -nunca alcanzable desde fuera, ver
+    'expose:' en el servicio open-webui-. /signin auto-aprovisiona la cuenta
+    la primera vez (y la asciende a admin si es la única, igual que hacía el
+    signup por contraseña antes de este modo).
+
+    El body de /signin sigue validándose contra su esquema (SigninForm:
+    email + password obligatorios) ANTES de que el router llegue a mirar la
+    cabecera de confianza -comprobado empíricamente contra una instancia
+    real: un body vacío devuelve 422 "Field required" para ambos campos, sin
+    llegar siquiera a evaluar el SSO. Los valores en sí se ignoran cuando la
+    cabecera de confianza gana la autenticación, así que basta con rellenar
+    el esquema con valores dummy."""
+    signin = _http(
+        "POST", f"{OPENWEBUI_BASE_URL}/api/v1/auths/signin",
+        {"email": BOOTSTRAP_EMAIL, "password": "sooniverse-sso-trusted-header-unused"},
+        extra_headers={TRUSTED_EMAIL_HEADER: BOOTSTRAP_EMAIL},
+    )
+    body = signin.get("json", {})
+    if signin.get("status") == 200 and isinstance(body, dict) and body.get("token"):
+        print("[bootstrap] Autenticado como cuenta técnica vía SSO (cabecera de confianza).")
+        return body["token"]
+
+    raise BootstrapError(
+        f"No se pudo autenticar contra Open WebUI en modo SSO (status={signin.get('status')}): {body}"
+    )
+
+
 def authenticate() -> str:
     """Devuelve un token bearer válido para la cuenta técnica de bootstrap.
-    Intenta signup primero (solo tiene efecto la primera vez: cero usuarios
-    en la instancia, o ENABLE_SIGNUP=true) y cae a signin si ya existe."""
+
+    Sin SSO: intenta signup primero (solo tiene efecto la primera vez: cero
+    usuarios en la instancia, o ENABLE_SIGNUP=true) y cae a signin si ya existe.
+    Con SSO (WEBUI_AUTH_TRUSTED_EMAIL_HEADER definida), ambos endpoints por
+    contraseña están bloqueados -ver _authenticate_trusted_header()."""
+    if TRUSTED_EMAIL_HEADER:
+        return _authenticate_trusted_header()
+
     if not BOOTSTRAP_PASSWORD:
         raise BootstrapError(
             "OPENWEBUI_BOOTSTRAP_PASSWORD no está definida (ver .env.example). "
@@ -134,6 +184,39 @@ def authenticate() -> str:
         f"No se pudo autenticar contra Open WebUI (signup={signup.get('status')}, "
         f"signin={signin.get('status')}). Revisa OPENWEBUI_BOOTSTRAP_EMAIL/PASSWORD."
     )
+
+
+def ensure_default_user_role_is_user(token: str) -> None:
+    """Fuerza 'ui.default_user_role' = 'user' en la config de Open WebUI.
+
+    DEFAULT_USER_ROLE (env var, ver render_gateway_stack.py) solo SIEMBRA esta
+    fila la primerísima vez que arranca la instancia; en cada reinicio
+    posterior Open WebUI lee el valor YA PERSISTIDO en su tabla `config`
+    -ignora la env var por completo- (comprobado empíricamente en un
+    despliegue real: cambiar la env var y recrear el contenedor NO cambió el
+    rol asignado a un usuario nuevo). Con SSO por cabecera de confianza,
+    Django YA es el único gatekeeper (login_required exige cuenta activa
+    antes de que nginx deje pasar la petición), así que dejar 'pending' aquí
+    -el valor de fábrica- bloquearía a cualquier usuario que no fuera el
+    primero jamás creado hasta una aprobación manual dentro del propio panel
+    de admin de Open WebUI. Se corrige en cada corrida del bootstrap -no solo
+    en el primer despliegue- por si la instancia ya tenía el valor viejo
+    persistido de antes de este fix."""
+    current = _http("GET", f"{OPENWEBUI_BASE_URL}/api/v1/auths/admin/config", token=token)
+    if current.get("status") != 200 or not isinstance(current.get("json"), dict):
+        print(f"[WARNING] No se pudo leer la config de admin de Open WebUI: {current}")
+        return
+
+    cfg = dict(current["json"])
+    if cfg.get("DEFAULT_USER_ROLE") == "user":
+        return
+
+    cfg["DEFAULT_USER_ROLE"] = "user"
+    updated = _http("POST", f"{OPENWEBUI_BASE_URL}/api/v1/auths/admin/config", cfg, token=token)
+    if updated.get("status") == 200:
+        print("[bootstrap] ui.default_user_role corregido a 'user' (SSO ya gatekeepea en Django).")
+    else:
+        print(f"[WARNING] No se pudo corregir ui.default_user_role: {updated}")
 
 
 def fetch_litellm_models() -> List[str]:
@@ -242,6 +325,7 @@ def main() -> int:
     try:
         wait_for_openwebui()
         token = authenticate()
+        ensure_default_user_role_is_user(token)
 
         litellm_models = fetch_litellm_models()
         if not litellm_models:

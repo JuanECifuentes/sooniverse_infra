@@ -39,6 +39,12 @@ class ApiKeyRegistry(models.Model):
     updated_at = models.DateTimeField(auto_now=False)
     deactivated_at = models.DateTimeField(null=True, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
+    # 006_workers_y_login.sql: inventario único con LiteLLM + Open WebUI.
+    # 'openwebui' es un espejo de SOLO LECTURA (ingest_openwebui_apikeys()):
+    # nunca se crea/revoca desde el panel, y la clave real nunca llega aquí.
+    ORIGENES = [("litellm", "LiteLLM"), ("openwebui", "Open WebUI")]
+    origen = models.CharField(max_length=16, choices=ORIGENES, default="litellm")
+    openwebui_user_id = models.CharField(max_length=64, null=True, blank=True)
 
     class Meta:
         managed = False
@@ -54,6 +60,12 @@ class ApiKeyRegistry(models.Model):
     @property
     def estado_label(self) -> str:
         return "ACTIVA" if self.is_active else "INACTIVA"
+
+    @property
+    def gestionable(self) -> bool:
+        """Solo las keys de LiteLLM se pueden desactivar/reactivar desde el
+        panel -las de Open WebUI son un espejo de solo lectura."""
+        return self.origen == "litellm"
 
 
 class TokenUsageEvent(models.Model):
@@ -179,6 +191,25 @@ class WorkerNode(models.Model):
     max_num_seqs = models.IntegerField(null=True, blank=True)
     max_num_batched_tokens = models.IntegerField(null=True, blank=True)
     max_model_len = models.IntegerField(null=True, blank=True)
+    # Columnas que ya existían en la tabla (002_infra_state.sql) pero que el
+    # modelo nunca mapeó -sin ellas el panel no podía filtrar por despliegue
+    # activo ni distinguir "worker apagado" de "worker que nunca respondió".
+    deployment_id = models.UUIDField(null=True, blank=True)
+    subnet_id = models.CharField(max_length=64, null=True, blank=True)
+    security_group_id = models.CharField(max_length=64, null=True, blank=True)
+    last_health_check = models.DateTimeField(null=True, blank=True)
+    health_status = models.CharField(max_length=16, default="unknown")
+    # 006_workers_y_login.sql
+    instance_id = models.CharField(max_length=32, null=True, blank=True)
+    ESTADOS_OPERATIVOS = [
+        ("sano", "Sano"),
+        ("degradado", "Degradado"),
+        ("desincronizado", "Desincronizado"),
+        ("apagado", "Apagado"),
+        ("reiniciando", "Reiniciando"),
+        ("desconocido", "Desconocido"),
+    ]
+    estado_operativo = models.CharField(max_length=16, choices=ESTADOS_OPERATIVOS, default="desconocido")
 
     class Meta:
         managed = False
@@ -193,6 +224,42 @@ class WorkerNode(models.Model):
     @property
     def endpoint(self) -> str:
         return f"http://{self.private_ip}:{self.port}/v1"
+
+
+class WorkerAction(models.Model):
+    """Bitácora de acciones ejecutadas desde el panel sobre un worker
+    (comprobar salud, reiniciar vLLM, apagar/arrancar la instancia EC2).
+    Mismo papel que ApiKeyAudit para las API keys."""
+
+    ACCIONES = [
+        ("health", "Comprobar salud"),
+        ("restart", "Reiniciar vLLM"),
+        ("stop", "Apagar"),
+        ("start", "Arrancar"),
+    ]
+    ESTADOS = [("solicitada", "Solicitada"), ("ok", "OK"), ("error", "Error")]
+
+    worker_node = models.ForeignKey(
+        WorkerNode, on_delete=models.DO_NOTHING, db_column="worker_node_id",
+        null=True, blank=True, related_name="acciones",
+    )
+    accion = models.CharField(max_length=16, choices=ACCIONES)
+    estado = models.CharField(max_length=16, choices=ESTADOS, default="solicitada")
+    actor = models.CharField(max_length=254, default="system")
+    source_ip = models.GenericIPAddressField(null=True, blank=True)
+    mensaje = models.CharField(max_length=1000, null=True, blank=True)
+    created_at = models.DateTimeField()
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        db_table = '"sooniverse"."worker_action"'
+        ordering = ["-created_at"]
+        verbose_name = "Acción de worker"
+        verbose_name_plural = "Acciones de worker"
+
+    def __str__(self) -> str:
+        return f"{self.accion} #{self.worker_node_id} ({self.estado})"
 
 
 class UsageHourly(models.Model):

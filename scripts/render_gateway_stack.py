@@ -118,59 +118,20 @@ def _bool_env(value: bool) -> str:
 # =============================================================================
 # nginx
 # =============================================================================
-def render_nginx_conf(config: Dict[str, Any]) -> str:
-    gw = config.get("gateway", {})
-    tls = gw.get("tls", {}) or {}
-    tls_enabled = bool(tls.get("habilitado", False))
-    server_name = tls.get("dominio") or "_"
+def _nginx_locations_block(forwarded_proto: str) -> str:
+    """Bloque de locations compartido entre las variantes del server{} (el
+    combinado 80+443 self-signed, el catch-all 80 y el 443 con dominio real).
+    Solo cambia entre variantes el valor de X-Forwarded-Proto.
 
-    ssl_block = ""
-    listen_443 = ""
-    if tls_enabled:
-        listen_443 = "    listen 443 ssl;\n"
-        ssl_block = (
-            "    ssl_certificate     /etc/nginx/certs/fullchain.pem;\n"
-            "    ssl_certificate_key /etc/nginx/certs/privkey.pem;\n"
-            "    ssl_protocols TLSv1.2 TLSv1.3;\n"
-            "    ssl_ciphers HIGH:!aNULL:!MD5;\n"
-        )
-
-    return f"""{GENERATED_HEADER}
-# Ruteo:
-#   /              -> Open WebUI (chat, WebSocket)
-#   /v1/, /key/... -> LiteLLM Proxy (API OpenAI-compatible + gestión de keys)
-#   /panel/        -> Django (métricas y API keys), /panel/static/ servido
-#                     directamente por nginx desde el volumen compartido
-#   /healthz       -> 200 fijo de nginx, sin depender de ningún upstream
-
-map $http_upgrade $connection_upgrade {{
-    default upgrade;
-    ''      close;
-}}
-
-upstream sooniverse_webui   {{ server open-webui:8080; }}
-upstream sooniverse_litellm {{ server litellm:4000;     }}
-upstream sooniverse_metrics {{ server metrics:8000;     }}
-
-server {{
-    listen 80;
-{listen_443}    server_name {server_name};
-
-    client_max_body_size 100M;
-    proxy_http_version 1.1;
-    proxy_set_header Host              $host;
-    proxy_set_header X-Real-IP         $remote_addr;
-    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto {"https" if tls_enabled else "$scheme"};
-
-    # Streaming de tokens (SSE) y llamadas largas: sin buffering ni timeouts cortos.
-    proxy_buffering           off;
-    proxy_cache               off;
-    proxy_read_timeout        3600s;
-    proxy_send_timeout        3600s;
-    chunked_transfer_encoding on;
-
-{ssl_block}
+    SSO por cabecera de confianza: '/' (el chat) exige sesión de Django antes
+    de proxiar a Open WebUI. 'auth_request' hace una subpetición interna a
+    Django (auth_check); si hay sesión activa, nginx toma la identidad de las
+    cabeceras de RESPUESTA de esa subpetición (auth_request_set) y las reenvía
+    a Open WebUI como petición -Open WebUI, con WEBUI_AUTH_TRUSTED_EMAIL_HEADER
+    configurado, auto-aprovisiona/autentica sin mostrar su propio login (ver
+    docker_images/openwebui/README.md). Sin sesión, Django devuelve 401 y
+    error_page lo convierte en un 302 al login único del panel."""
+    return f"""
     location = /healthz {{
         return 200 "ok\\n";
         add_header Content-Type text/plain;
@@ -189,7 +150,7 @@ server {{
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto {"https" if tls_enabled else "$scheme"};
+        proxy_set_header X-Forwarded-Proto {forwarded_proto};
         proxy_set_header X-Script-Name /panel;
     }}
 
@@ -197,13 +158,162 @@ server {{
         proxy_pass http://sooniverse_litellm;
     }}
 
+    # Subpetición interna de auth_request -nunca alcanzable desde fuera
+    # ('internal;'). Apunta a la ruta REAL del urlconf de Django
+    # (/metrics/auth-check/, sin '/panel': ese prefijo solo lo añade la
+    # location /panel/ de arriba al reescribir, aquí se proxia directo).
+    location = /_auth {{
+        internal;
+        proxy_pass http://sooniverse_metrics/metrics/auth-check/;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto {forwarded_proto};
+    }}
+
+    location @sooniverse_login_redirect {{
+        return 302 /panel/metrics/login/?next=$request_uri;
+    }}
+
     location / {{
+        auth_request /_auth;
+        auth_request_set $sooniverse_email $upstream_http_x_sooniverse_email;
+        auth_request_set $sooniverse_name  $upstream_http_x_sooniverse_name;
+        error_page 401 = @sooniverse_login_redirect;
+
         proxy_pass http://sooniverse_webui;
         proxy_set_header Upgrade    $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
+        # Nunca confiar en una cabecera que traiga el propio cliente -solo la
+        # que puso nginx a partir de la sesión de Django ya verificada.
+        proxy_set_header X-Sooniverse-Email $sooniverse_email;
+        proxy_set_header X-Sooniverse-Name  $sooniverse_name;
+    }}
+"""
+
+
+_NGINX_PROXY_COMMON = """
+    client_max_body_size 100M;
+    proxy_http_version 1.1;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+"""
+
+_NGINX_STREAMING_COMMON = """
+    # Streaming de tokens (SSE) y llamadas largas: sin buffering ni timeouts cortos.
+    proxy_buffering           off;
+    proxy_cache               off;
+    proxy_read_timeout        3600s;
+    proxy_send_timeout        3600s;
+    chunked_transfer_encoding on;
+"""
+
+_ACME_CHALLENGE_LOCATION = """
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+"""
+
+
+def render_nginx_conf(config: Dict[str, Any]) -> str:
+    gw = config.get("gateway", {})
+    tls = gw.get("tls", {}) or {}
+    tls_enabled = bool(tls.get("habilitado", False))
+    modo = tls.get("modo", "self-signed")
+    letsencrypt_mode = tls_enabled and modo == "letsencrypt"
+
+    common_header = f"""{GENERATED_HEADER}
+# Ruteo:
+#   /              -> Open WebUI (chat, WebSocket)
+#   /v1/, /key/... -> LiteLLM Proxy (API OpenAI-compatible + gestión de keys)
+#   /panel/        -> Django (métricas y API keys), /panel/static/ servido
+#                     directamente por nginx desde el volumen compartido
+#   /healthz       -> 200 fijo de nginx, sin depender de ningún upstream
+
+map $http_upgrade $connection_upgrade {{
+    default upgrade;
+    ''      close;
+}}
+
+upstream sooniverse_webui   {{ server open-webui:8080; }}
+upstream sooniverse_litellm {{ server litellm:4000;     }}
+upstream sooniverse_metrics {{ server metrics:8000;     }}
+"""
+
+    if not letsencrypt_mode:
+        # Comportamiento preexistente (tls deshabilitado o modo 'self-signed'):
+        # un único server{} en 80 (+443 si tls.habilitado), sin split de bloques.
+        server_name = tls.get("dominio") or "_"
+        ssl_block = ""
+        listen_443 = ""
+        if tls_enabled:
+            listen_443 = "    listen 443 ssl;\n"
+            ssl_block = (
+                "    ssl_certificate     /etc/nginx/certs/fullchain.pem;\n"
+                "    ssl_certificate_key /etc/nginx/certs/privkey.pem;\n"
+                "    ssl_protocols TLSv1.2 TLSv1.3;\n"
+                "    ssl_ciphers HIGH:!aNULL:!MD5;\n"
+            )
+        forwarded_proto = "https" if tls_enabled else "$scheme"
+
+        return f"""{common_header}
+server {{
+    listen 80;
+{listen_443}    server_name {server_name};
+{_NGINX_PROXY_COMMON}    proxy_set_header X-Forwarded-Proto {forwarded_proto};
+{_NGINX_STREAMING_COMMON}
+{ssl_block}{_nginx_locations_block(forwarded_proto)}}}
+"""
+
+    # --- modo 'letsencrypt': tres server{} -------------------------------------
+    # 1. (opcional) 80/server_name=dominio: solo el reto ACME + 301 a https.
+    # 2. 80 default_server/server_name=_: sirve la app en claro (acceso por IP
+    #    desnuda, y fallback mientras el DNS del dominio no resuelve todavía).
+    # 3. 443/server_name=dominio: la app real, con el certificado de Let's Encrypt.
+    dominio = tls["dominio"]
+    dominio_cfg = gw.get("dominio") or {}
+    redirigir_http = bool(dominio_cfg.get("redirigir_http", True))
+
+    domain_http_block = ""
+    if redirigir_http:
+        domain_http_block = f"""
+server {{
+    listen 80;
+    server_name {dominio};
+{_ACME_CHALLENGE_LOCATION}
+    location / {{
+        return 301 https://$host$request_uri;
     }}
 }}
 """
+
+    catchall_http_block = f"""
+server {{
+    listen 80 default_server;
+    server_name _;
+{_NGINX_PROXY_COMMON}    proxy_set_header X-Forwarded-Proto $scheme;
+{_NGINX_STREAMING_COMMON}
+{_ACME_CHALLENGE_LOCATION}{_nginx_locations_block("$scheme")}}}
+"""
+
+    https_block = f"""
+server {{
+    listen 443 ssl;
+    http2 on;
+    server_name {dominio};
+{_NGINX_PROXY_COMMON}    proxy_set_header X-Forwarded-Proto https;
+{_NGINX_STREAMING_COMMON}
+    ssl_certificate     /etc/letsencrypt/live/{dominio}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{dominio}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+{_nginx_locations_block("https")}}}
+"""
+
+    return f"{common_header}{domain_http_block}{catchall_http_block}{https_block}"
 
 
 # =============================================================================
@@ -220,6 +330,18 @@ def render_docker_compose(config: Dict[str, Any], capabilities_dir: Optional[Pat
     expose_direct = bool(gw.get("exponer_puertos_directos", False))
     tls = gw.get("tls", {}) or {}
     tls_enabled = bool(tls.get("habilitado", False))
+    aws_region = config.get("red_y_aislamiento", {}).get("region", "us-east-1")
+
+    # Clave SSH del bastion, montada en el panel para el botón "Reiniciar" de
+    # la card Pool vLLM (metrics/workers.py). Mismo cálculo de existencia que
+    # TopologyBuilder.build_gateway() para decidir si va en file_mounts -si no
+    # existe todavía en la máquina que corre este render, NO se monta (un bind
+    # mount de un origen inexistente haría que Docker cree un directorio vacío
+    # en su lugar, en vez de fallar limpiamente).
+    cliente_cfg = config.get("cliente", {})
+    gateway_cluster_name = f"sooniverse-{cliente_cfg.get('id', 'default')}-{cliente_cfg.get('entorno', 'prod')}-gw"
+    gateway_ssh_key = Path.home() / ".sky" / "generated" / "ssh-keys" / f"{gateway_cluster_name}.key"
+    ssh_key_volume = "      - ../../.ssh_bastion_key:/app/.ssh/bastion_key:ro\n" if gateway_ssh_key.exists() else ""
 
     litellm_ports = _ports_or_expose(4000, expose_direct)
     webui_ports = _ports_or_expose(8080, expose_direct)
@@ -239,14 +361,45 @@ def render_docker_compose(config: Dict[str, Any], capabilities_dir: Optional[Pat
         f"      {key}: \"{_bool_env(tareas_automaticas_on)}\"" for key in OPEN_WEBUI_TASK_ENV_KEYS
     )
 
+    modo_tls = tls.get("modo", "self-signed")
+    letsencrypt_mode = tls_enabled and modo_tls == "letsencrypt"
+
     proxy_ports = ['      - "80:80"']
     proxy_volumes = [
         "      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro",
         "      - panel_static:/usr/share/nginx/panel-static:ro",
     ]
+    proxy_command = ""
+    certbot_service = ""
     if tls_enabled:
         proxy_ports.append('      - "443:443"')
-        proxy_volumes.append("      - ./nginx/certs:/etc/nginx/certs:ro")
+        if letsencrypt_mode:
+            # Fuera de docker_images/gateway a propósito: ese directorio se
+            # re-sincroniza en cada 'sky launch' (file_mounts), y un rsync sin
+            # --delete no debería borrar los certs, pero tampoco es el sitio
+            # para depender de eso -certbot y renovación viven en un path del
+            # host ajeno al árbol sincronizado.
+            proxy_volumes.append("      - /opt/sooniverse/letsencrypt:/etc/letsencrypt:ro")
+            proxy_volumes.append("      - /opt/sooniverse/certbot-www:/var/www/certbot:ro")
+            # nginx no relee ssl_certificate en caliente: recarga periódica para
+            # tomar el certificado renovado por el sidecar 'certbot' sin caídas.
+            proxy_command = (
+                '    command: ["sh", "-c", '
+                '"while :; do sleep 21600 & wait $!; nginx -s reload; done & nginx -g \'daemon off;\'"]\n'
+            )
+            certbot_service = """
+  certbot:
+    image: certbot/certbot
+    container_name: sooniverse-certbot
+    volumes:
+      - /opt/sooniverse/letsencrypt:/etc/letsencrypt
+      - /opt/sooniverse/certbot-www:/var/www/certbot
+    entrypoint: ["sh", "-c", "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 43200 & wait $!; done"]
+    networks: [gateway_net]
+    restart: unless-stopped
+"""
+        else:
+            proxy_volumes.append("      - ./nginx/certs:/etc/nginx/certs:ro")
     proxy_ports_block = "\n".join(proxy_ports)
     proxy_volumes_block = "\n".join(proxy_volumes)
 
@@ -351,8 +504,28 @@ services:
       ENABLE_SIGNUP: ${{WEBUI_SIGNUP:-false}}
       ENABLE_OLLAMA_API: "False"
       WEBUI_SECRET_KEY: ${{SECRET_KEY:-sooniverse-webui-secret}}
-      DEFAULT_USER_ROLE: "pending"
+      # 'user', no 'pending': con SSO por cabecera de confianza (ver abajo)
+      # Django YA es el único gatekeeper -login_required exige cuenta activa
+      # antes de que nginx deje pasar la petición-. Dejar el default de
+      # fábrica 'pending' aquí bloqueaba a CUALQUIER usuario que no fuera el
+      # primero jamás creado hasta una aprobación manual dentro del propio
+      # panel de admin de Open WebUI -exactamente el segundo punto de
+      # administración que esta unificación de login busca eliminar
+      # (confirmado en una prueba real: un admin de Django autenticado por
+      # SSO quedaba con role=pending en Open WebUI).
+      DEFAULT_USER_ROLE: "user"
       WEBUI_URL: ${{GATEWAY_PUBLIC_URL:-}}
+      # SSO por cabecera de confianza: Django es la única pantalla de login del
+      # clúster (nginx la protege con 'auth_request' antes de proxiar aquí, ver
+      # scripts/render_gateway_stack.py::_nginx_locations_block). Con esto
+      # activo, el frontend de Open WebUI NUNCA muestra su propio formulario
+      # -ver docker_images/openwebui/README.md-. Requiere
+      # 'gateway.exponer_puertos_directos: false' (validado en
+      # generate_infra.py): si el 8080 quedara publicado directo, cualquiera
+      # podría inyectar estas cabeceras y suplantar a un usuario.
+      WEBUI_AUTH_TRUSTED_EMAIL_HEADER: X-Sooniverse-Email
+      WEBUI_AUTH_TRUSTED_NAME_HEADER: X-Sooniverse-Name
+      ENABLE_LOGIN_FORM: "False"
       # Persistencia relacional en el MISMO esquema que LiteLLM y Django (ver
       # docs/03_ESTADO_Y_BD.md). 'webui_data' se mantiene: ficheros subidos y
       # el vector store local (Chroma) no son relacionales y siguen en disco.
@@ -414,6 +587,13 @@ services:
       # ENABLE_SIGNUP=false (backend/open_webui/routers/auths.py).
       OPENWEBUI_BOOTSTRAP_EMAIL: ${{OPENWEBUI_BOOTSTRAP_EMAIL:-bootstrap@sooniverse.internal}}
       OPENWEBUI_BOOTSTRAP_PASSWORD: ${{OPENWEBUI_BOOTSTRAP_PASSWORD}}
+      # MISMO valor que el servicio 'open-webui': con SSO activo, /signup y
+      # /signin por contraseña quedan bloqueados del lado del servidor sin
+      # excepciones -bootstrap_models.py::authenticate() necesita saber el
+      # nombre de esta cabecera para autenticarse él mismo con ella (ver
+      # docker_images/openwebui/README.md). Sin esta línea, el bootstrap de
+      # cada despliegue con dominio/SSO fallaría con 400 en /signin.
+      WEBUI_AUTH_TRUSTED_EMAIL_HEADER: X-Sooniverse-Email
     depends_on:
       open-webui:
         condition: service_healthy
@@ -432,6 +612,7 @@ services:
       DEBUG: ${{DEBUG:-False}}
       ALLOWED_HOSTS: ${{ALLOWED_HOSTS:-*}}
       CSRF_TRUSTED_ORIGINS: ${{CSRF_TRUSTED_ORIGINS:-}}
+      HTTPS_ACTIVO: ${{HTTPS_ACTIVO:-false}}
       FORCE_SCRIPT_NAME: ${{FORCE_SCRIPT_NAME:-/panel}}
       DB_NAME: ${{DB_NAME:-sooniverse}}
       DB_USER: ${{DB_USER:-postgres}}
@@ -442,6 +623,9 @@ services:
       LITELLM_MASTER_KEY: ${{LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}}
       CLIENTE_ID: ${{CLIENTE_ID:-default}}
       ENTORNO: ${{ENTORNO:-prod}}
+      # Región AWS del despliegue -la usan las acciones de worker (apagar/
+      # arrancar la instancia EC2 desde la card Pool vLLM, metrics/workers.py).
+      AWS_REGION: {aws_region}
       # TIENE que ser la misma zona con la que scripts/db_setup.py corta los
       # buckets (sooniverse.app_setting.reporting_timezone). Si el panel
       # renderiza en una zona y la agregación se hizo en otra, los días salen
@@ -456,7 +640,7 @@ services:
       DJANGO_SUPERUSER_EMAIL: ${{DJANGO_SUPERUSER_EMAIL:-admin@sooniverse.co}}
     volumes:
       - panel_static:/app/staticfiles
-{metrics_ports}    depends_on:
+{ssh_key_volume}{metrics_ports}    depends_on:
       - litellm
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -470,13 +654,13 @@ services:
 {proxy_volumes_block}
     ports:
 {proxy_ports_block}
-    depends_on:
+{proxy_command}    depends_on:
       - open-webui
       - litellm
       - metrics
     networks: [gateway_net]
     restart: unless-stopped
-
+{certbot_service}
 networks:
   gateway_net:
     driver: bridge

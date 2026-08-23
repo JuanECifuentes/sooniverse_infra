@@ -133,6 +133,19 @@ def test_invalid_lb_strategy_rejected():
         ConfigValidator.validate(cfg)
 
 
+def test_exponer_puertos_directos_rejected_por_conflicto_con_sso():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["exponer_puertos_directos"] = True
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_exponer_puertos_directos_false_es_valido():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["exponer_puertos_directos"] = False
+    ConfigValidator.validate(cfg)  # no debe lanzar
+
+
 def test_tls_enabled_without_domain_rejected():
     cfg = clone(load_base_config())
     cfg["gateway"]["tls"] = {"habilitado": True}
@@ -140,11 +153,26 @@ def test_tls_enabled_without_domain_rejected():
         ConfigValidator.validate(cfg)
 
 
-def test_tls_enabled_with_unimplemented_mode_rejected():
+def test_tls_enabled_with_unimplemented_acm_mode_rejected():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["tls"] = {"habilitado": True, "dominio": "x.example.com", "modo": "acm"}
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_tls_letsencrypt_without_email_acme_rejected():
     cfg = clone(load_base_config())
     cfg["gateway"]["tls"] = {"habilitado": True, "dominio": "x.example.com", "modo": "letsencrypt"}
     with pytest.raises(ConfigValidationError):
         ConfigValidator.validate(cfg)
+
+
+def test_tls_letsencrypt_with_email_acme_is_valid():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["tls"] = {
+        "habilitado": True, "dominio": "x.example.com", "modo": "letsencrypt", "email_acme": "ops@example.com",
+    }
+    ConfigValidator.validate(cfg)  # no debe lanzar
 
 
 def test_tls_enabled_self_signed_with_domain_is_valid():
@@ -157,6 +185,143 @@ def test_tls_disabled_ignores_domain_requirement():
     cfg = clone(load_base_config())
     cfg["gateway"]["tls"] = {"habilitado": False}
     ConfigValidator.validate(cfg)  # no debe lanzar
+
+
+# -- gateway.dominio (catálogo + derivación hacia tls) -----------------------------
+def _dominio_valido():
+    return {
+        "habilitado": True,
+        "seleccionado": "ia.acme.com",
+        "disponibles": [{"nombre": "ia.acme.com", "email_acme": "ops@acme.com"}],
+    }
+
+
+def test_dominio_habilitado_sin_disponibles_rejected():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["dominio"] = {"habilitado": True, "seleccionado": "ia.acme.com", "disponibles": []}
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_dominio_nombre_invalido_rejected():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["dominio"] = {
+        "habilitado": True,
+        "seleccionado": "no es un dominio",
+        "disponibles": [{"nombre": "no es un dominio", "email_acme": "ops@acme.com"}],
+    }
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_dominio_sin_email_acme_rejected():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["dominio"] = {
+        "habilitado": True,
+        "seleccionado": "ia.acme.com",
+        "disponibles": [{"nombre": "ia.acme.com"}],
+    }
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_dominio_seleccionado_no_coincide_con_disponibles_rejected():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["dominio"] = {
+        "habilitado": True,
+        "seleccionado": "otro.acme.com",
+        "disponibles": [{"nombre": "ia.acme.com", "email_acme": "ops@acme.com"}],
+    }
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_dominio_repetido_en_disponibles_rejected():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["dominio"] = {
+        "habilitado": True,
+        "seleccionado": "ia.acme.com",
+        "disponibles": [
+            {"nombre": "ia.acme.com", "email_acme": "ops@acme.com"},
+            {"nombre": "ia.acme.com", "email_acme": "otro@acme.com"},
+        ],
+    }
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_dominio_habilitado_exige_cidr_abierto():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["dominio"] = _dominio_valido()
+    cfg["red_y_aislamiento"]["cidr_permitido_gateway"] = "203.0.113.0/24"
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_dominio_habilitado_valido_no_lanza():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["dominio"] = _dominio_valido()
+    ConfigValidator.validate(cfg)  # no debe lanzar
+
+
+def test_dominio_deshabilitado_ignora_catalogo_invalido():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["dominio"] = {"habilitado": False, "seleccionado": None, "disponibles": []}
+    ConfigValidator.validate(cfg)  # no debe lanzar
+
+
+def test_load_config_deriva_tls_desde_dominio(tmp_path):
+    import yaml
+    from generate_infra import load_config
+
+    cfg = clone(load_base_config())
+    cfg["gateway"]["dominio"] = _dominio_valido()
+    cfg["gateway"]["tls"] = {"habilitado": False, "modo": "self-signed", "dominio": None}
+
+    config_path = tmp_path / "config_global.yaml"
+    with config_path.open("w", encoding="utf-8") as f:
+        yaml.dump(cfg, f)
+
+    loaded = load_config(str(config_path))
+    assert loaded["gateway"]["tls"]["habilitado"] is True
+    assert loaded["gateway"]["tls"]["modo"] == "letsencrypt"
+    assert loaded["gateway"]["tls"]["dominio"] == "ia.acme.com"
+    assert loaded["gateway"]["tls"]["email_acme"] == "ops@acme.com"
+
+
+def test_dominio_habilitado_ignora_tls_habilitado_false_por_defecto(tmp_path):
+    """El contrato de ejemplo siempre trae 'tls.habilitado: false' como placeholder
+    explícito -no debe hacer falta borrarlo para poder activar 'dominio'."""
+    import yaml
+    from generate_infra import load_config
+
+    cfg = clone(load_base_config())
+    cfg["gateway"]["dominio"] = _dominio_valido()
+    cfg["gateway"]["tls"] = {"habilitado": False, "modo": "self-signed", "dominio": None}
+
+    config_path = tmp_path / "config_global.yaml"
+    with config_path.open("w", encoding="utf-8") as f:
+        yaml.dump(cfg, f)
+
+    loaded = load_config(str(config_path))
+    assert loaded["gateway"]["tls"]["habilitado"] is True
+    assert loaded["gateway"]["tls"]["modo"] == "letsencrypt"
+
+
+def test_dominio_habilitado_con_tls_dominio_contradictorio_rejected(tmp_path):
+    import yaml
+    from generate_infra import load_config
+
+    cfg = clone(load_base_config())
+    cfg["gateway"]["dominio"] = _dominio_valido()
+    cfg["gateway"]["tls"] = {"dominio": "otro-dominio.acme.com"}
+
+    config_path = tmp_path / "config_global.yaml"
+    with config_path.open("w", encoding="utf-8") as f:
+        yaml.dump(cfg, f)
+
+    with pytest.raises(ConfigValidationError):
+        load_config(str(config_path))
 
 
 # -- base_de_datos ----------------------------------------------------------------

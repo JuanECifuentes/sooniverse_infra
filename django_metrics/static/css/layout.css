@@ -427,6 +427,11 @@ span.flatpickr-weekday  { flex: 1; text-align: center; font-size: 11px; padding:
 .l-table-actions    { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
 .l-inline-form      { display: inline; }
 
+/* Card "Pool vLLM": una fila por nodo, con sus acciones debajo */
+.l-worker-row { padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
+.l-worker-row:last-child { border-bottom: none; padding-bottom: 0; }
+.l-worker-row .l-table-actions { justify-content: flex-start; }
+
 /* Card de peticiones: orden por columna, copiar sesión, paginación */
 .l-sort-btn    { display: inline-flex; align-items: center; gap: 5px; background: none; border: none; padding: 0; cursor: pointer; font: inherit; }
 .l-sort-arrow  { width: 6px; height: 6px; display: inline-block; flex: 0 0 6px; }
