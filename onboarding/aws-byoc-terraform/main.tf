@@ -104,7 +104,14 @@ data "aws_iam_policy_document" "sooniverse_permissions" {
       "ec2:DeleteKeyPair",
       "ec2:ImportKeyPair",
       "ec2:DescribeAvailabilityZones",
-      "ec2:DescribeAccountAttributes"
+      "ec2:DescribeAccountAttributes",
+      # Requeridos por el cliente de SkyPilot (no por el código propio de Sooniverse)
+      # para resolver la región/zonas y catálogo de tipos de instancia antes de lanzar:
+      # confirmado empíricamente, 'sky launch' falla con "Failed to retrieve AWS
+      # regions" / catálogo vacío sin estos tres.
+      "ec2:DescribeRegions",
+      "ec2:DescribeInstanceTypeOfferings",
+      "ec2:DescribeNetworkInterfaces"
     ]
     resources = ["*"]
   }
