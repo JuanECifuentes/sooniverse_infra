@@ -72,6 +72,18 @@ gateway:
     - 8080
     - 8000
   load_balancing_strategy: "latency-based-routing"
+  # Dominio propio + HTTPS real (certbot/Let's Encrypt). Ver Manual_Dominio_AWS.md.
+  # Con 'habilitado: true', 'gateway.tls.*' de abajo se deriva automáticamente.
+  dominio:
+    habilitado: false
+    seleccionado: null
+    disponibles: []
+      # - nombre: "ia.example.com"
+      #   email_acme: "ops@example.com"
+    staging: false
+    redirigir_http: true
+    eip_persistente: true
+    esperar_dns_segundos: 300
   tls:
     habilitado: false
     modo: "self-signed"

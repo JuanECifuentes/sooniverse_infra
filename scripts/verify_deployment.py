@@ -74,6 +74,19 @@ class VerificationContext:
     gateway_ip: Optional[str] = None
     sky_available: bool = False
 
+    @property
+    def base_url(self) -> Optional[str]:
+        """Esquema+host efectivos para las comprobaciones HTTP: con dominio
+        propio (TLS real o autofirmado), el único host con el que el
+        certificado puede ser válido es el dominio -no la IP, aunque resuelva
+        a la misma Elastic IP. Sin TLS, sigue siendo la IP por http://."""
+        if not self.gateway_ip:
+            return None
+        tls = (self.config.get("gateway", {}).get("tls") or {})
+        if tls.get("habilitado") and tls.get("dominio"):
+            return f"https://{tls['dominio']}"
+        return f"http://{self.gateway_ip}"
+
 
 def _sky_binary() -> Optional[str]:
     return shutil.which("sky")
@@ -134,10 +147,23 @@ def _cluster_is_up(cluster: str) -> bool:
     return "not found" not in result.stdout.lower()
 
 
+def _insecure_ssl_context_if_https(url: str):
+    """Durante la ventana entre el 'setup' del Gateway y una emisión real de
+    Let's Encrypt (fase 'dominio'), el certificado puede ser el autofirmado de
+    respaldo -verify_deployment.py es diagnóstico, no un cliente de negocio:
+    aquí importa que la ruta responda, no que el certificado sea de confianza
+    (eso lo comprueba una check dedicada, check_domain_certificate_valid)."""
+    if not url.startswith("https://"):
+        return None
+    import ssl
+
+    return ssl._create_unverified_context()
+
+
 def _http_get(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 5) -> Optional[Dict[str, Any]]:
     req = urllib.request.Request(url, headers=headers or {})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_insecure_ssl_context_if_https(url)) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             try:
                 return {"status": resp.status, "json": json.loads(body)}
@@ -151,7 +177,7 @@ def _http_post(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, st
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", **(headers or {})}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_insecure_ssl_context_if_https(url)) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             return {"status": resp.status, "json": json.loads(body)}
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
@@ -301,14 +327,14 @@ def check_worker_has_internet_egress(ctx: VerificationContext) -> CheckResult:
 
 def check_litellm_lists_models(ctx: VerificationContext) -> CheckResult:
     name = "LiteLLM lista los modelos esperados (/v1/models)"
-    if not ctx.gateway_ip:
+    if not ctx.base_url:
         return CheckResult(name, "N/A", "No hay IP de gateway", critical=False)
 
     master_key = _read_env_var("LITELLM_MASTER_KEY")
     headers = {"Authorization": f"Bearer {master_key}"} if master_key else {}
-    # A través de nginx (puerto 80), no del :4000 directo -ese puerto ya no está
-    # publicado al host desde la Fase 5 salvo 'exponer_puertos_directos: true'.
-    resp = _http_get(f"http://{ctx.gateway_ip}/v1/models", headers=headers)
+    # A través de nginx (puerto 80/443), no del :4000 directo -ese puerto ya no
+    # está publicado al host desde la Fase 5 salvo 'exponer_puertos_directos: true'.
+    resp = _http_get(f"{ctx.base_url}/v1/models", headers=headers)
     if resp is None or "error" in resp:
         return CheckResult(name, "FAIL", str(resp.get("error") if resp else "sin respuesta"))
 
@@ -322,12 +348,12 @@ def check_litellm_lists_models(ctx: VerificationContext) -> CheckResult:
 
 def check_litellm_pool_health(ctx: VerificationContext) -> CheckResult:
     name = "El pool tiene tantos endpoints sanos como réplicas"
-    if not ctx.gateway_ip:
+    if not ctx.base_url:
         return CheckResult(name, "N/A", "No hay IP de gateway", critical=False)
 
     master_key = _read_env_var("LITELLM_MASTER_KEY")
     headers = {"Authorization": f"Bearer {master_key}"} if master_key else {}
-    resp = _http_get(f"http://{ctx.gateway_ip}/health", headers=headers, timeout=15)
+    resp = _http_get(f"{ctx.base_url}/health", headers=headers, timeout=15)
     if resp is None or "error" in resp:
         return CheckResult(name, "FAIL", str(resp.get("error") if resp else "sin respuesta"))
 
@@ -341,14 +367,14 @@ def check_litellm_pool_health(ctx: VerificationContext) -> CheckResult:
 
 def check_end_to_end_completion(ctx: VerificationContext) -> CheckResult:
     name = "Petición end-to-end responde (/v1/chat/completions)"
-    if not ctx.gateway_ip or not ctx.config.get("workloads"):
+    if not ctx.base_url or not ctx.config.get("workloads"):
         return CheckResult(name, "N/A", "No hay IP de gateway o workloads", critical=False)
 
     master_key = _read_env_var("LITELLM_MASTER_KEY")
     headers = {"Authorization": f"Bearer {master_key}"} if master_key else {}
     model = ctx.config["workloads"][0].get("nombre_publico", ctx.config["workloads"][0]["id"])
     payload = {"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 16}
-    resp = _http_post(f"http://{ctx.gateway_ip}/v1/chat/completions", payload, headers=headers)
+    resp = _http_post(f"{ctx.base_url}/v1/chat/completions", payload, headers=headers)
     if resp is None or "error" in resp:
         return CheckResult(name, "FAIL", str(resp.get("error") if resp else "sin respuesta"))
     if "choices" not in resp.get("json", {}):
@@ -357,8 +383,8 @@ def check_end_to_end_completion(ctx: VerificationContext) -> CheckResult:
 
 
 def check_nginx_routes(ctx: VerificationContext) -> CheckResult:
-    name = "nginx sirve /, /v1/, /panel/ y /healthz en el puerto 80"
-    if not ctx.gateway_ip:
+    name = "nginx sirve /, /v1/, /panel/ y /healthz"
+    if not ctx.base_url:
         return CheckResult(name, "N/A", "No hay IP de gateway", critical=False)
 
     # /v1/models exige autenticación: sin la master key, un 401 es la prueba de
@@ -370,12 +396,50 @@ def check_nginx_routes(ctx: VerificationContext) -> CheckResult:
     failures = []
     for route in routes:
         headers = auth_headers if route == "/v1/models" else None
-        resp = _http_get(f"http://{ctx.gateway_ip}{route}", headers=headers, timeout=5)
+        resp = _http_get(f"{ctx.base_url}{route}", headers=headers, timeout=5)
         if resp is None or "error" in resp:
             failures.append(route)
     if failures:
         return CheckResult(name, "FAIL", f"Rutas sin respuesta: {failures}")
     return CheckResult(name, "OK", f"{len(routes)} ruta(s) verificadas")
+
+
+def check_domain_certificate_valid(ctx: VerificationContext) -> CheckResult:
+    """12ª comprobación: si hay dominio propio, el certificado servido debe ser
+    válido (no autofirmado de respaldo) y no caducar dentro de 30 días. N/A sin
+    dominio -no hay nada que comprobar, y no es un fallo."""
+    name = "El certificado del dominio es válido y no caduca en <30 días"
+    # ctx.config viene de un yaml.safe_load() plano (ver main()), SIN pasar por
+    # la derivación dominio.habilitado -> tls.* de generate_infra.py::load_config
+    # -leer gateway.tls aquí vería el 'habilitado: false' de fábrica incluso
+    # con un dominio real configurado y desplegado (comprobado empíricamente
+    # contra un despliegue real con dominio: reportaba N/A). Se lee
+    # gateway.dominio directamente, la fuente de verdad que sí rellena el
+    # operador en el contrato.
+    dominio_cfg = (ctx.config.get("gateway", {}).get("dominio") or {})
+    dominio = dominio_cfg.get("seleccionado")
+    if not dominio_cfg.get("habilitado") or not dominio:
+        return CheckResult(name, "N/A", "Sin dominio propio configurado", critical=False)
+
+    import datetime
+    import socket
+    import ssl
+
+    try:
+        ctx_ssl = ssl.create_default_context()
+        with socket.create_connection((dominio, 443), timeout=10) as sock:
+            with ctx_ssl.wrap_socket(sock, server_hostname=dominio) as ssock:
+                cert = ssock.getpeercert()
+    except ssl.SSLCertVerificationError as exc:
+        return CheckResult(name, "FAIL", f"Certificado no confiable (¿todavía autofirmado de respaldo?): {exc}")
+    except (OSError, socket.timeout) as exc:
+        return CheckResult(name, "FAIL", f"No se pudo conectar a {dominio}:443: {exc}")
+
+    not_after = datetime.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
+    dias_restantes = (not_after - datetime.datetime.utcnow()).days
+    if dias_restantes < 30:
+        return CheckResult(name, "FAIL", f"Caduca en {dias_restantes} día(s) ({cert['notAfter']})")
+    return CheckResult(name, "OK", f"Válido, caduca en {dias_restantes} día(s) ({cert['notAfter']})")
 
 
 # LiteLLM tarda 1-4 min en aceptar conexiones cada vez que sync_endpoints.py lo
@@ -473,6 +537,7 @@ CHECKS: List[Callable[[VerificationContext], CheckResult]] = [
     check_end_to_end_completion_retry,
     check_nginx_routes_retry,
     check_db_registers_workers,
+    check_domain_certificate_valid,
 ]
 
 

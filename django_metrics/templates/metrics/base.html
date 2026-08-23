@@ -32,12 +32,16 @@
                        href="{% url 'metrics:capacidad' %}">Capacidad</a>
                     <a class="sv-nav__link {% if seccion == 'apikeys' %}sv-nav__link--active{% endif %}"
                        href="{% url 'metrics:api_keys' %}">API Keys</a>
-                    <a class="sv-nav__link" href="/admin/">Admin</a>
+                    <a class="sv-nav__link" href="{% url 'admin:index' %}">Admin</a>
                 </nav>
 
                 <div class="l-header__meta">
                     <span class="sv-badge sv-badge--info">{{ CLIENTE_ID }}</span>
                     <span class="sv-badge {% if ENTORNO == 'prod' %}sv-badge--success{% else %}sv-badge--muted{% endif %}">{{ ENTORNO }}</span>
+                    <form method="post" action="{% url 'metrics:logout' %}" class="l-inline-form">
+                        {% csrf_token %}
+                        <button type="submit" class="sv-btn sv-btn--ghost sv-btn--sm">Salir</button>
+                    </form>
                 </div>
             </div>
         </header>
@@ -78,6 +82,7 @@
 
     <script src="{% static 'js/multiselect.js' %}"></script>
     <script src="{% static 'js/spinner.js' %}"></script>
+    <script src="{% static 'js/worker-actions.js' %}"></script>
     <script src="{% static 'js/vendor/flatpickr.min.js' %}"></script>
     <script src="{% static 'js/datepicker.js' %}"></script>
     {% block scripts %}{% endblock %}

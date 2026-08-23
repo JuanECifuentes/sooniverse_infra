@@ -2,7 +2,11 @@
 ==============================================================================
 Vistas del panel de Métricas y API Keys
 ==============================================================================
-Todas requieren staff autenticado: el panel expone gestión de credenciales.
+El panel (métricas, capacidad, API Keys, acciones de worker) requiere sesión
+activa Y staff (`panel_login_required`). El chat (Open WebUI, vía nginx
+'auth_request') solo requiere sesión activa -ver `auth_check` más abajo. Django
+es la ÚNICA fuente de login del clúster: `login_view` es la única pantalla de
+login que ve un humano.
 """
 
 from __future__ import annotations
@@ -12,19 +16,33 @@ from datetime import date, timedelta
 
 from django.conf import settings
 from django.contrib import messages
-from django.contrib.admin.views.decorators import staff_member_required
-from django.http import JsonResponse
-from django.shortcuts import redirect, render
+from django.contrib.auth import authenticate
+from django.contrib.auth import login as auth_login
+from django.contrib.auth import logout as auth_logout
+from django.contrib.auth.decorators import user_passes_test
+from django.http import HttpResponse, JsonResponse
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from . import analytics, capacidad as cap_mod, filtros as ft, services
-from .forms import ApiKeyForm
+from .forms import ApiKeyForm, LoginForm
 from .litellm_client import LiteLLMError
-from .models import ApiKeyRegistry, TokenUsageRollup
+from .models import ApiKeyRegistry, TokenUsageRollup, WorkerNode
+from .workers import WorkerActionError
 
 logger = logging.getLogger(__name__)
+
+
+def panel_login_required(view_func):
+    """Reemplaza a `staff_member_required`: ese decorador de Django ignora
+    `settings.LOGIN_URL` (redirige siempre a 'admin:login', hardcodeado en su
+    firma) -con un único login propio en todo el clúster, eso llevaría a un
+    usuario del panel a la pantalla equivocada."""
+    return user_passes_test(
+        lambda u: u.is_active and u.is_staff, login_url="metrics:login"
+    )(view_func)
 
 
 def _actor(request) -> str:
@@ -150,7 +168,7 @@ def _parse_filtros(request):
 # =============================================================================
 # MÓDULO DE MÉTRICAS
 # =============================================================================
-@staff_member_required
+@panel_login_required
 def dashboard(request):
     """
     Panel de consumo de tokens con particiones Diaria / Semanal / Mensual y
@@ -199,7 +217,7 @@ def dashboard(request):
     return render(request, "metrics/dashboard.html", contexto)
 
 
-@staff_member_required
+@panel_login_required
 def serie_json(request):
     """Endpoint JSON de la serie temporal (para integraciones externas).
     Contrato heredado: valores únicos de `api_key`/`modelo` y ventana en `dias`."""
@@ -301,7 +319,7 @@ def _metricas_payload(metricas, api_key_ids, *, ocio=None, filtros_eco=None, com
     return payload
 
 
-@staff_member_required
+@panel_login_required
 @require_POST
 def metrics_api(request):
     """
@@ -435,7 +453,7 @@ def _comparativa(f, granularity):
     }
 
 
-@staff_member_required
+@panel_login_required
 @require_POST
 def lente_api(request):
     """Mapa de calor y perfil horario.
@@ -483,7 +501,7 @@ def lente_api(request):
     return JsonResponse({"lente": lente, "datos": datos, "filtros_eco": f.eco()})
 
 
-@staff_member_required
+@panel_login_required
 def capacidad(request):
     """Techo medido de la infraestructura, margen y proyección.
 
@@ -505,7 +523,7 @@ def capacidad(request):
     })
 
 
-@staff_member_required
+@panel_login_required
 @require_POST
 def capacidad_api(request):
     """Recalcula la ficha de capacidad al cambiar de corrida o de rango."""
@@ -518,7 +536,7 @@ def capacidad_api(request):
     )
 
 
-@staff_member_required
+@panel_login_required
 @require_POST
 def refrescar(request):
     """Fuerza el ETL desde LiteLLM y el recálculo de agregaciones."""
@@ -528,7 +546,8 @@ def refrescar(request):
             request,
             f"Métricas actualizadas: {resultado['eventos_ingeridos']} evento(s) nuevo(s), "
             f"{resultado['filas_agregadas']} fila(s) agregada(s), "
-            f"{resultado['buckets_horarios']} bucket(s) horario(s).",
+            f"{resultado['buckets_horarios']} bucket(s) horario(s), "
+            f"{resultado['keys_openwebui']} API Key(s) de Open WebUI sincronizada(s).",
         )
     except Exception as exc:  # noqa: BLE001 - se reporta al operador en la UI
         logger.exception("Fallo al refrescar métricas")
@@ -541,7 +560,7 @@ def refrescar(request):
 # =============================================================================
 # GESTOR DE API KEYS
 # =============================================================================
-@staff_member_required
+@panel_login_required
 def api_keys(request):
     """Listado, creación y monitoreo de consumo por API Key."""
     modelos_disponibles = services.modelos_unicos()
@@ -561,6 +580,7 @@ def api_keys(request):
                 rpm_limit=datos.get("rpm_limit"),
                 tpm_limit=datos.get("tpm_limit"),
                 duration=duracion,
+                expires_at=vigencia,
                 actor=_actor(request),
                 ip=_ip(request),
             )
@@ -593,7 +613,7 @@ def api_keys(request):
     return render(request, "metrics/apikeys.html", contexto)
 
 
-@staff_member_required
+@panel_login_required
 def api_key_detalle(request, key_id: int):
     """Consumo histórico y auditoría de una API Key concreta.
 
@@ -614,7 +634,7 @@ def api_key_detalle(request, key_id: int):
     return render(request, "metrics/apikey_detail.html", contexto)
 
 
-@staff_member_required
+@panel_login_required
 @require_POST
 def api_key_toggle(request, key_id: int):
     """Desactiva o reactiva una API Key (nunca la borra: preserva el histórico)."""
@@ -628,8 +648,90 @@ def api_key_toggle(request, key_id: int):
             messages.warning(request, f"API Key '{registro.key_alias}' desactivada.")
     except ApiKeyRegistry.DoesNotExist:
         messages.error(request, "La API Key solicitada no existe.")
+    except services.ApiKeyNoGestionableError as exc:
+        messages.error(request, str(exc))
     except Exception as exc:  # noqa: BLE001
         logger.exception("Fallo cambiando el estado de la API Key %s", key_id)
         messages.error(request, f"No se pudo cambiar el estado: {exc}")
 
     return redirect(request.POST.get("next") or reverse("metrics:api_keys"))
+
+
+ACCIONES_WORKER_VALIDAS = ("health", "restart", "stop", "start")
+
+
+@panel_login_required
+@require_POST
+def worker_accion(request, node_id: int, accion: str):
+    """Ejecuta una acción sobre un worker (comprobar salud, reiniciar,
+    apagar/arrancar) desde la card 'Pool vLLM'. Rechaza nodos que no
+    pertenezcan al cliente/entorno de ESTE panel -mismo filtro de prefijo que
+    services.estado_pool()-, para no poder actuar sobre un worker de otro
+    despliegue que comparta la misma base de datos."""
+    if accion not in ACCIONES_WORKER_VALIDAS:
+        messages.error(request, f"Acción desconocida: '{accion}'.")
+        return redirect(request.POST.get("next") or reverse("metrics:dashboard"))
+
+    prefix = f"sooniverse-{settings.CLIENTE_ID}-{settings.ENTORNO}-"
+    worker = get_object_or_404(WorkerNode, pk=node_id, cluster_name__startswith=prefix)
+
+    try:
+        mensaje = services.ejecutar_accion_worker(worker, accion, actor=_actor(request), ip=_ip(request))
+        messages.success(request, mensaje)
+    except WorkerActionError as exc:
+        messages.error(request, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Fallo ejecutando la acción '%s' sobre el worker %s", accion, node_id)
+        messages.error(request, f"Error inesperado: {exc}")
+
+    return redirect(request.POST.get("next") or reverse("metrics:dashboard"))
+
+
+# =============================================================================
+# LOGIN ÚNICO DEL CLÚSTER
+# =============================================================================
+def login_view(request):
+    """Única pantalla de login del clúster (panel + chat). El chat nunca
+    muestra su propio formulario -Open WebUI recibe la identidad ya resuelta
+    vía la cabecera de confianza que inyecta nginx (ver `auth_check` y
+    docker_images/openwebui/README.md)."""
+    next_url = request.POST.get("next") or request.GET.get("next") or reverse("metrics:dashboard")
+    if request.user.is_authenticated:
+        return redirect(next_url)
+
+    error = None
+    form = LoginForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        user = authenticate(
+            request,
+            username=form.cleaned_data["identificador"],
+            password=form.cleaned_data["password"],
+        )
+        if user is not None and user.is_active:
+            auth_login(request, user)
+            return redirect(next_url)
+        error = "Usuario/correo o contraseña incorrectos."
+
+    return render(request, "metrics/login.html", {"form": form, "error": error, "next": next_url})
+
+
+@require_POST
+def logout_view(request):
+    auth_logout(request)
+    return redirect("metrics:login")
+
+
+def auth_check(request):
+    """Endpoint interno para nginx 'auth_request' sobre '/' (el chat). NUNCA se
+    llama desde fuera directamente -la location de nginx que lo expone es
+    'internal;'. 200 con la identidad en cabeceras si hay sesión activa; 401
+    si no -nginx traduce ese 401 en un redirect a login_view (ver
+    docker_images/gateway default.conf). Cuenta activa basta: a diferencia del
+    panel, el chat no exige staff."""
+    if not request.user.is_authenticated or not request.user.is_active:
+        return HttpResponse(status=401)
+
+    resp = HttpResponse(status=200)
+    resp["X-Sooniverse-Email"] = request.user.email or f"{request.user.username}@sooniverse.local"
+    resp["X-Sooniverse-Name"] = request.user.get_full_name() or request.user.username
+    return resp

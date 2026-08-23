@@ -62,9 +62,17 @@ python scripts/generate_infra.py --run --only network            # una sola fase
 - **Lee:** `gateway.*`, `red_y_aislamiento.image_id`.
 - **Llama a:** SkyPilot (que a su vez llama a EC2 `run_instances` en la subred pública, con el SG que ya creamos).
 - **Escribe:** evento `infra_event` (`phase='gateway', action='sky_launch'`).
-- **Tras el launch:** `_gateway_public_ip()` (línea 1065) hace `sky status --ip <cluster>` para capturar la IP pública.
-- **Duración:** 2-5 minutos (arranque de instancia + `setup` script: Docker, dependencias, certificado TLS si aplica).
-- **Puede fallar:** cualquier error de `sky launch` (cuota de instancias, AMI no disponible en la región/AZ, fallo del `setup` script) se propaga como `CalledProcessError`.
+- **Tras el launch:** `_gateway_public_ip()` (línea 1065) hace `sky status --ip <cluster>` para capturar la IP pública. Con `gateway.dominio.habilitado: true`, a continuación `_associate_gateway_eip()` asocia la Elastic IP reservada en la fase `network` a la instancia recién lanzada, refresca la caché de IP de SkyPilot (`sky status --refresh`) y verifica `sky exec <gw> true` -si esto falla, la fase aborta con un error explícito, porque TODAS las fases siguientes dependen de `sky exec` contra este mismo Gateway.
+- **Duración:** 2-5 minutos (arranque de instancia + `setup` script: Docker, dependencias, certificado TLS -autofirmado, o Let's Encrypt con fallback automático a autofirmado si el DNS todavía no resuelve, ver Fase 3.5-).
+- **Puede fallar:** cualquier error de `sky launch` (cuota de instancias, AMI no disponible en la región/AZ, fallo del `setup` script) se propaga como `CalledProcessError`; un fallo asociando la Elastic IP levanta `GatewayEipAssociationError` y aborta el despliegue.
+
+## Fase 3.5 — `dominio` (best-effort, nunca aborta el despliegue)
+
+- **Función:** `run_dominio_phase()` (`scripts/generate_infra.py`), invocada solo si `gateway.dominio.habilitado: true`.
+- **Qué hace:** resuelve el registro DNS A del dominio elegido (`socket.getaddrinfo`) y lo compara con la IP del Gateway (ya la Elastic IP, tras la fase `gateway`). Si no coincide, sondea cada 15s hasta agotar `gateway.dominio.esperar_dns_segundos` (default 300s). Si sigue sin coincidir, imprime un `[WARNING]` con el registro A exacto que falta y **continúa el despliegue en HTTP** -nunca aborta, para no quemar el límite de 5 intentos/hora de Let's Encrypt reintentando contra un DNS que el operador todavía no configuró.
+- **Si el DNS coincide:** emite/renueva el certificado real vía `sky exec <gw> 'docker run certbot/certbot certonly --webroot ...'` (nginx ya está arriba desde la fase `gateway`, sirviendo `/.well-known/acme-challenge/` desde el volumen `certbot-www`) y recarga nginx (`docker compose exec proxy nginx -s reload`).
+- **Por qué existe como fase separada de `gateway`:** el `setup` script de la fase `gateway` (que corre ANTES de que nginx esté arriba) ya intenta un primer certbot en modo `--standalone`; si el DNS todavía no resolvía en ese momento (el operador puede crear el registro A *entre* `--only network` y el resto del despliegue, ver `Manual_Dominio_AWS.md`), cae a un autofirmado de respaldo para que nginx pueda arrancar. Esta fase reintenta la emisión real en cuanto el DNS esté listo, sin necesitar un redeploy completo (`--run --only dominio`).
+- **Puede fallar (sin abortar el despliegue):** cualquier fallo de certbot vía `sky exec` se registra como `[WARNING]` (`infra_event`, `phase='dominio'`); el certificado autofirmado de respaldo sigue sirviendo hasta la siguiente corrida exitosa.
 
 ## Fase 4 — `bastion` (implícita, al principio de la fase `workers`)
 
@@ -137,6 +145,8 @@ operador          generate_infra.py         PostgreSQL            AwsNetworkMana
    │                     │◀──NetworkOutputs (vpc/sg reales)────────────────│                    │                    │
    │                     │──sky launch gateway────────────────────────────────────────────────▶│                    │
    │                     │◀──gateway_ip────────────────────────────────────────────────────────│                    │
+   │                     │──(si dominio) asocia Elastic IP + sky status --refresh──────────────▶│                    │
+   │                     │──(si dominio) fase 'dominio': verifica DNS + certbot vía sky exec────▶│                    │
    │                     │──regenera bastion con gateway_ip                                     │                   │
    │                     │──sky launch workers (subred privada, vía bastion)───────────────────▶│                   │
    │                     │──sync_endpoints.py --apply──────────────────────────────────────────────────────────────▶│
@@ -157,7 +167,7 @@ operador          generate_infra.py         PostgreSQL            AwsNetworkMana
 **Orden de fases (`PHASE_ORDER`, `scripts/generate_infra.py:1356`):**
 
 ```
-network → gateway → workers → endpoints → capabilities → capacidad → verify
+network → gateway → dominio → workers → endpoints → capabilities → capacidad → verify
 ```
 
 `--only` acepta `all` o cualquiera de esos nombres; sus `choices` se derivan de `PHASE_ORDER` (`["all", *PHASE_ORDER]`), así que añadir una fase nueva solo exige tocar esa lista y no se pueden desincronizar.

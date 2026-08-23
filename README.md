@@ -24,6 +24,10 @@ modo legado (VPC/SGs creados a mano, ver `Manual_VPC_SecurityGroup.md` como anex
 histórico). Ver `docs/00_ARQUITECTURA.md` para el detalle completo y las decisiones
 de diseño.
 
+Para desplegar con un dominio propio y HTTPS (certbot/Let's Encrypt) en vez de
+la IP efímera por defecto, ver **[`Manual_Dominio_AWS.md`](Manual_Dominio_AWS.md)**
+— el único paso manual que exige es crear el registro DNS A antes de desplegar.
+
 ### 1.1 Topología de red
 
 ```
@@ -306,11 +310,18 @@ No se almacena contenido de conversaciones en ningún punto del pipeline:
 
 ## 6. Panel de Métricas y API Keys (Django)
 
+Django es la **única fuente de login del clúster** (panel + chat). Un usuario staff entra en
+`/metrics/login/` y accede al panel; cualquier usuario activo (staff o no) que abra el chat pasa
+transparentemente por esa misma sesión (SSO por cabecera de confianza vía nginx `auth_request`,
+ver `docker_images/openwebui/README.md`) — Open WebUI nunca muestra su propio formulario.
+
 | Ruta | Función |
 |---|---|
+| `/metrics/login/` | Login único (usuario o correo). |
 | `/metrics/` | Consumo de tokens con particiones **Diaria · Semanal · Mensual** y filtro por API Key, modelo y ventana. |
 | `/metrics/serie.json` | La misma serie en JSON para integraciones externas. |
-| `/metrics/api-keys/` | Alta, listado y desactivación/reactivación de API Keys con su consumo. |
+| `/metrics/workers/<id>/<accion>/` | Acciones sobre un worker (comprobar salud, reiniciar vLLM, apagar/arrancar) desde la card "Pool vLLM". |
+| `/metrics/api-keys/` | Alta, listado y desactivación/reactivación de API Keys de LiteLLM, más el espejo de solo lectura de las de Open WebUI. |
 | `/metrics/api-keys/<id>/` | Detalle: serie propia, cuotas, últimas peticiones y auditoría. |
 | `/admin/` | Django admin sobre las mismas tablas. |
 | `/healthz/` | Healthcheck del contenedor. |

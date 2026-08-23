@@ -22,4 +22,12 @@ urlpatterns = [
     path("api-keys/", views.api_keys, name="api_keys"),
     path("api-keys/<int:key_id>/", views.api_key_detalle, name="api_key_detalle"),
     path("api-keys/<int:key_id>/estado/", views.api_key_toggle, name="api_key_toggle"),
+
+    # Acciones sobre workers (card "Pool vLLM")
+    path("workers/<int:node_id>/<slug:accion>/", views.worker_accion, name="worker_accion"),
+
+    # Login único del clúster (panel + chat, ver views.py::auth_check)
+    path("login/", views.login_view, name="login"),
+    path("logout/", views.logout_view, name="logout"),
+    path("auth-check/", views.auth_check, name="auth_check"),
 ]

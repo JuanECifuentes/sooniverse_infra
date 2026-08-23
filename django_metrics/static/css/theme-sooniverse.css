@@ -442,11 +442,33 @@ a:hover {
     background-color: var(--negative-soft);
     border-color: var(--negative-border);
 }
+.sv-badge--warning {
+    color: var(--warning);
+    background-color: var(--warning-soft);
+    border-color: var(--warning-border);
+}
 
 /* Punto de estado */
 .sv-dot { border-radius: var(--radius-pill); }
-.sv-dot--on  { background-color: var(--positive); }
-.sv-dot--off { background-color: var(--negative); }
+.sv-dot--on    { background-color: var(--positive); }
+.sv-dot--off   { background-color: var(--negative); }
+.sv-dot--warn  { background-color: var(--warning); }
+.sv-dot--muted { background-color: var(--text-muted); }
+
+/* Diálogo de confirmación (acciones destructivas: nunca window.confirm()) */
+.sv-dialog {
+    background-color: var(--surface-3);
+    color: var(--text-primary);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-2);
+    padding: 20px;
+    max-width: 420px;
+    width: calc(100% - 32px);
+}
+.sv-dialog::backdrop {
+    background-color: rgba(0, 0, 0, 0.55);
+}
 
 /* ----------------------------------------------------------------------------
    10. FORMULARIOS

@@ -30,8 +30,9 @@ import argparse
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import yaml
@@ -72,6 +73,45 @@ def _sky_down(cluster: str) -> bool:
     return True
 
 
+def _wait_for_instances_terminated(clusters: List[str], region: str, timeout: int = 180) -> None:
+    """Espera a que las instancias EC2 de estos clústeres SkyPilot lleguen a
+    'terminated' antes de tocar la capa de red.
+
+    'sky down' vuelve en cuanto AWS ACEPTA la petición de terminación, no
+    cuando la instancia realmente desaparece -de 'shutting-down' a
+    'terminated' pasan según AWS varios segundos-. Sin esta espera, el ENI de
+    la instancia sigue "in-use" cuando el paso [3/3] intenta borrar los
+    Security Groups/subredes/VPC, y falla con DependencyViolation
+    (confirmado en una destrucción real: los 4 fallos fueron por un ENI que
+    tardó en soltarse, no un problema real de tags/propiedad)."""
+    try:
+        import boto3
+    except ImportError:
+        return
+
+    ec2 = boto3.client("ec2", region_name=region)
+    filtro_valores = [c for cluster in clusters for c in (cluster, f"{cluster}-*")]
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        pendientes = []
+        for tag_key in ("ray-cluster-name", "skypilot-cluster-name"):
+            resp = ec2.describe_instances(
+                Filters=[
+                    {"Name": f"tag:{tag_key}", "Values": filtro_valores},
+                    {"Name": "instance-state-name", "Values": ["shutting-down"]},
+                ]
+            )
+            for reservation in resp.get("Reservations", []):
+                pendientes.extend(i["InstanceId"] for i in reservation.get("Instances", []))
+        if not pendientes:
+            return
+        print(f"[ESPERA] {len(pendientes)} instancia(s) todavía terminando ({pendientes}); "
+              f"esperando antes de tocar la red...")
+        time.sleep(10)
+    print(f"[WARNING] Timeout ({timeout}s) esperando a que las instancias terminen; "
+          "la limpieza de red podría fallar por dependencias -reintenta 'destroy_infra.py --yes'.")
+
+
 def load_config(config_path: Path) -> Dict[str, Any]:
     with config_path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
@@ -100,9 +140,9 @@ def confirm_destructive_action(client_id: str, environment: str, args: argparse.
 # contra TODAS las filas no borradas de sooniverse.infra_resource, sin
 # importar a qué deployment_id pertenezcan.
 # =============================================================================
-def _region_known_aws_ids(region: str) -> Dict[str, str]:
-    """Devuelve {aws_id: status_del_deployment} para todo lo registrado en la
-    BD en esa región y que no esté marcado 'deleted'."""
+def _region_known_aws_ids(region: str) -> Dict[str, Tuple[str, str]]:
+    """Devuelve {aws_id: (status_del_deployment, state_del_recurso)} para todo lo
+    registrado en la BD en esa región y que no esté marcado 'deleted'."""
     from db_setup import connect, resolve_db_config
 
     conn = connect(resolve_db_config(REPO_ROOT / ".env"))
@@ -110,16 +150,32 @@ def _region_known_aws_ids(region: str) -> Dict[str, str]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT r.aws_id, d.status
+                SELECT r.aws_id, d.status, r.state
                 FROM sooniverse.infra_resource r
                 JOIN sooniverse.infra_deployment d ON d.deployment_id = r.deployment_id
                 WHERE r.region = %s AND r.state != 'deleted' AND r.aws_id IS NOT NULL
                 """,
                 (region,),
             )
-            return {row[0]: row[1] for row in cur.fetchall()}
+            return {row[0]: (row[1], row[2]) for row in cur.fetchall()}
     finally:
         conn.close()
+
+
+def _is_orphan(known: Dict[str, Tuple[str, str]], aws_id: str) -> Tuple[bool, Optional[str]]:
+    """True si `aws_id` debe reportarse como huérfano, y el status a mostrar.
+
+    Un recurso con `state='adopted'` (p.ej. la Elastic IP del Gateway con
+    `gateway.dominio.eip_persistente: true`) NUNCA es huérfano aunque su
+    deployment padre ya esté 'destroyed'/'error': quedó vivo en AWS A PROPÓSITO,
+    no porque el destroy se lo haya saltado. Ver AwsNetworkManager.destroy()."""
+    info = known.get(aws_id)
+    if info is None:
+        return True, None
+    status, state = info
+    if state == "adopted":
+        return False, status
+    return status in ("destroyed", "error"), status
 
 
 def scan_orphans(region: str) -> List[Dict[str, Any]]:
@@ -129,25 +185,35 @@ def scan_orphans(region: str) -> List[Dict[str, Any]]:
     ec2 = boto3.client("ec2", region_name=region)
     known = _region_known_aws_ids(region)
 
+    # 'describe_nat_gateways' es distinto del resto: AWS sigue devolviendo un
+    # NAT ya destruido durante un buen rato con state='deleted' -a diferencia
+    # de una VPC/subred/IGW ya borrada, que simplemente deja de aparecer-.
+    # Sin este filtro, un NAT correctamente destruido por
+    # AwsNetworkManager.destroy() se reportaba como huérfano para siempre
+    # hasta que AWS lo purgara de su API (confirmado en una destrucción real).
+    nat_filters = [
+        {"Name": f"tag:{TAG_MANAGED}", "Values": ["true"]},
+        {"Name": "state", "Values": ["pending", "failed", "available", "deleting"]},
+    ]
     checks = [
-        (ec2.describe_vpcs, "Vpcs", "VpcId"),
-        (ec2.describe_subnets, "Subnets", "SubnetId"),
-        (ec2.describe_internet_gateways, "InternetGateways", "InternetGatewayId"),
-        (ec2.describe_nat_gateways, "NatGateways", "NatGatewayId"),
-        (ec2.describe_security_groups, "SecurityGroups", "GroupId"),
-        (ec2.describe_route_tables, "RouteTables", "RouteTableId"),
-        (ec2.describe_vpc_endpoints, "VpcEndpoints", "VpcEndpointId"),
+        (ec2.describe_vpcs, "Vpcs", "VpcId", None),
+        (ec2.describe_subnets, "Subnets", "SubnetId", None),
+        (ec2.describe_internet_gateways, "InternetGateways", "InternetGatewayId", None),
+        (ec2.describe_nat_gateways, "NatGateways", "NatGatewayId", nat_filters),
+        (ec2.describe_security_groups, "SecurityGroups", "GroupId", None),
+        (ec2.describe_route_tables, "RouteTables", "RouteTableId", None),
+        (ec2.describe_vpc_endpoints, "VpcEndpoints", "VpcEndpointId", None),
     ]
 
     orphans: List[Dict[str, Any]] = []
-    for fn, list_key, id_key in checks:
-        resp = fn(Filters=[{"Name": f"tag:{TAG_MANAGED}", "Values": ["true"]}])
+    for fn, list_key, id_key, extra_filters in checks:
+        resp = fn(Filters=extra_filters or [{"Name": f"tag:{TAG_MANAGED}", "Values": ["true"]}])
         for item in resp.get(list_key, []):
             aws_id = item.get(id_key)
             if not aws_id:
                 continue
-            status = known.get(aws_id)
-            if status is None or status in ("destroyed", "error"):
+            is_orphan, status = _is_orphan(known, aws_id)
+            if is_orphan:
                 tags = {t["Key"]: t["Value"] for t in item.get("Tags", [])}
                 orphans.append({
                     "aws_id": aws_id, "type": list_key, "name": tags.get("Name", ""),
@@ -159,8 +225,8 @@ def scan_orphans(region: str) -> List[Dict[str, Any]]:
         alloc_id = addr.get("AllocationId")
         if not alloc_id:
             continue
-        status = known.get(alloc_id)
-        if status is None or status in ("destroyed", "error"):
+        is_orphan, status = _is_orphan(known, alloc_id)
+        if is_orphan:
             tags = {t["Key"]: t["Value"] for t in addr.get("Tags", [])}
             orphans.append({
                 "aws_id": alloc_id, "type": "Addresses", "name": tags.get("Name", ""),
@@ -262,6 +328,9 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
 
         print("\n--- [2/3] Nodo Gateway (sky down) ---")
         _sky_down(builder.gateway_cluster)
+
+        clusters = [builder.worker_cluster(wl["id"]) for wl in config["workloads"]] + [builder.gateway_cluster]
+        _wait_for_instances_terminated(clusters, red["region"])
     elif only in ("all",):
         print("\n--- (dry-run) Se ejecutaría 'sky down' de workers y gateway ---")
         for wl in config["workloads"]:
@@ -291,13 +360,21 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
     report = mgr.destroy(dry_run=args.dry_run, force=args.force)
 
     if args.dry_run:
+        kept_ids = {item.aws_id for item in report.kept_persistent}
         for item in mgr.plan_destroy():
+            if item.aws_id in kept_ids:
+                print(f"  [{item.delete_order:>3}] {item.component:<14} {item.aws_id or '(sin id)'} "
+                      f"[CONSERVADO] gateway.dominio.eip_persistente=true")
+                continue
             print(f"  [{item.delete_order:>3}] {item.component:<14} {item.aws_id or '(sin id)'} "
                   f"managed_by_us={item.managed_by_us}")
         return 0
 
     print(f"\n[REPORTE] Éxitos: {len(report.succeeded)} | Fallos: {len(report.failed)} | "
-          f"Omitidos (no nuestros): {len(report.skipped_not_ours)}")
+          f"Omitidos (no nuestros): {len(report.skipped_not_ours)} | "
+          f"Conservados (dominio.eip_persistente): {len(report.kept_persistent)}")
+    for item in report.kept_persistent:
+        print(f"  [CONSERVADO] {item.component} {item.aws_id} (gateway.dominio.eip_persistente=true)")
     for failure in report.failed:
         item = failure["item"]
         print(f"  [FALLO] {item.component} {item.aws_id}: {failure['error']}")
