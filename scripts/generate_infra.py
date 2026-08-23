@@ -1583,13 +1583,20 @@ def _run_sky(args: List[str], env: Optional[Dict[str, str]] = None) -> None:
     subprocess.run(cmd, check=True, env=merged_env)
 
 
-def _gateway_public_ip(cluster: str) -> Optional[str]:
+def _sky_env(aws_profile: Optional[str] = None) -> Optional[Dict[str, str]]:
+    """Entorno para subprocess.run([sky, ...]) que fuerza AWS_PROFILE cuando el
+    cliente es BYOC (ver comentario en la fase [GATEWAY] de generate_infra)."""
+    return {**os.environ, "AWS_PROFILE": aws_profile} if aws_profile else None
+
+
+def _gateway_public_ip(cluster: str, aws_profile: Optional[str] = None) -> Optional[str]:
     sky = _sky_binary()
     if not sky:
         return None
     try:
         out = subprocess.run(
-            [sky, "status", "--ip", cluster], check=True, capture_output=True, text=True
+            [sky, "status", "--ip", cluster], check=True, capture_output=True, text=True,
+            env=_sky_env(aws_profile),
         )
         ip = out.stdout.strip().splitlines()[-1].strip()
         return ip or None
@@ -1648,10 +1655,11 @@ def _associate_gateway_eip(
 
     ec2.associate_address(AllocationId=allocation_id, InstanceId=instance_id, AllowReassociation=True)
 
+    sky_env = _sky_env(aws_profile)
     sky = _sky_binary()
     if sky:
         restart = subprocess.run(
-            [sky, "start", "-y", cluster], capture_output=True, text=True, timeout=300
+            [sky, "start", "-y", cluster], capture_output=True, text=True, timeout=300, env=sky_env,
         )
         if restart.returncode != 0:
             raise GatewayEipAssociationError(
@@ -1659,7 +1667,7 @@ def _associate_gateway_eip(
                 f"SkyPilot reconozca la IP nueva) falló: {restart.stderr.strip() or restart.stdout.strip()}"
             )
 
-    new_ip = _gateway_public_ip(cluster)
+    new_ip = _gateway_public_ip(cluster, aws_profile=aws_profile)
     if not new_ip:
         raise GatewayEipAssociationError(
             f"La Elastic IP se asoció a {instance_id}, pero 'sky status --ip {cluster}' no devolvió "
@@ -1682,7 +1690,7 @@ def _associate_gateway_eip(
                 "[ -f \"$p\" ] && [ ! -L \"$p\" ] && rm -f \"$p\"; "
                 "done; true",
             ],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=120, env=sky_env,
         )
         # '.env' no se deja solo borrado: fases posteriores en ESTA MISMA
         # corrida (sync_endpoints.py -> 'docker compose --env-file .env
@@ -1697,12 +1705,13 @@ def _associate_gateway_eip(
                 f"rm -f {remote_env} && cat > {remote_env} <<'SOONIVERSE_ENV_EOF'\n"
                 f"{payload}\nSOONIVERSE_ENV_EOF\n"
             )
-            subprocess.run([sky, "exec", cluster, script], capture_output=True, text=True, timeout=120)
+            subprocess.run([sky, "exec", cluster, script], capture_output=True, text=True, timeout=120,
+                            env=sky_env)
 
     sky = _sky_binary()
     if sky:
         check = subprocess.run(
-            [sky, "exec", cluster, "true"], capture_output=True, text=True, timeout=120
+            [sky, "exec", cluster, "true"], capture_output=True, text=True, timeout=120, env=sky_env,
         )
         if check.returncode != 0:
             raise GatewayEipAssociationError(
@@ -1806,7 +1815,8 @@ def run_dominio_phase(
 
     try:
         result = subprocess.run(
-            [sky, "exec", gateway_cluster, remote_cmd], capture_output=True, text=True, timeout=180
+            [sky, "exec", gateway_cluster, remote_cmd], capture_output=True, text=True, timeout=180,
+            env=_sky_env(config["red_y_aislamiento"].get("aws_profile")),
         )
     except subprocess.TimeoutExpired:
         print("[WARNING] 'sky exec' del certbot excedió el tiempo de espera (180s).")
@@ -2047,6 +2057,13 @@ def deploy(
             dump_yaml(gw_cfg, gw_cfg_path)
             gateway_env["SKYPILOT_CONFIG"] = str(gw_cfg_path)
             print(f"[INFO] SkyPilot usará {gw_cfg_path.name} (misma VPC que los workers)")
+        if red.get("aws_profile"):
+            # BYOC: sin esto, SkyPilot resuelve credenciales AWS con la cadena por
+            # defecto (la cuenta de Sooniverse) y lanzaría el gateway ahí en vez de
+            # en la cuenta del cliente, aunque la VPC/SGs ya existan correctamente
+            # en la cuenta del cliente (creados por AwsNetworkManager con este mismo
+            # aws_profile).
+            gateway_env["AWS_PROFILE"] = red["aws_profile"]
 
         t0 = time.monotonic()
         _run_sky(
@@ -2073,7 +2090,7 @@ def deploy(
                 raise
 
     if artefactos.get("gateway") and not dry_run:
-        gateway_ip = _gateway_public_ip(builder.gateway_cluster)
+        gateway_ip = _gateway_public_ip(builder.gateway_cluster, aws_profile=red.get("aws_profile"))
         print(f"[INFO] IP pública del Gateway: {gateway_ip or 'no disponible'}")
 
     # --- FASE: dominio (DNS + certbot; best-effort, nunca aborta) ---------------
@@ -2114,6 +2131,8 @@ def deploy(
             dump_yaml(sky_cfg, cfg_path)
             worker_env["SKYPILOT_CONFIG"] = str(cfg_path)
             print(f"[INFO] SkyPilot usará {cfg_path.name} (use_internal_ips + bastion)")
+        if red.get("aws_profile"):
+            worker_env["AWS_PROFILE"] = red["aws_profile"]  # BYOC, ver comentario en fase [GATEWAY]
 
         for wl in config["workloads"]:
             cluster = builder.worker_cluster(wl["id"])
