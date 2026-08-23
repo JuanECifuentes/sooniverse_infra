@@ -17,8 +17,11 @@ Cada recurso que sigue lo crea y destruye `scripts/aws_network.py::AwsNetworkMan
 | 9 | SG gateway | Entrada pública controlada (22/80/443, +4000/8000/8080 si `exponer_puertos_directos`) | `sg-gateway` | VPC | Gratis |
 | 10 | SG workers | Entrada SOLO por referencia al SG del gateway (SG→SG) | `sg-workers` | VPC, SG gateway | Gratis |
 | 11 | VPC Endpoint S3 (gateway) | Reduce tráfico por NAT hacia S3 | `vpce-s3` | VPC, route tables privadas | Gratis |
+| 12 | Elastic IP del Gateway (`gateway.dominio.habilitado: true`) | IP fija para el registro DNS A del dominio propio -sin ella, un `sky launch` cambiaría la IP del Gateway y rompería el DNS | `eip-gateway` | — | ~\$0.005 |
 
 **Coste dominante:** NAT Gateway + su EIP, ~\$0.05/hora ≈ \$36/mes, **corriendo esté o no en uso**. Es la razón de ser de `destroy_infra.py` y de `--scan-orphans`.
+
+**La Elastic IP del Gateway (`eip-gateway`) es diferente al resto de esta tabla**: se busca por `(cliente, entorno)`, no por `deployment_id` (`AwsNetworkManager.ensure_gateway_eip()`, `scripts/aws_network.py`), porque con `gateway.dominio.eip_persistente: true` (default) debe sobrevivir a un `destroy_infra.py` y re-etiquetarse al `deployment_id` del siguiente despliegue -si no, el registro DNS A tendría que actualizarse a mano en cada ciclo destroy+redeploy. `destroy_infra.py` la conserva (no la libera) en ese caso, marcándola `state='adopted'` para que `--scan-orphans` no la reporte como huérfana pese a que su despliegue original ya esté `destroyed`. Ver `Manual_Dominio_AWS.md`.
 
 ## Cálculo de CIDR (determinista)
 
@@ -53,7 +56,7 @@ Si el operador prefiere fijar los CIDR a mano, `red_y_aislamiento.subredes.publi
 |---|---|---|---|---|
 | In | TCP | 22 | `cidr_admin_ssh` | Siempre (con `[WARNING]` ruidoso si es `0.0.0.0/0`) |
 | In | TCP | 80 | `cidr_permitido_gateway` | Siempre |
-| In | TCP | 443 | `cidr_permitido_gateway` | Solo si `gateway.tls.habilitado` |
+| In | TCP | 443 | `cidr_permitido_gateway` | Solo si `gateway.tls.habilitado` (derivado a `true` automáticamente con `gateway.dominio.habilitado: true`, que además exige `cidr_permitido_gateway: "0.0.0.0/0"` -HTTP-01 de Let's Encrypt lo necesita, ver `Manual_Dominio_AWS.md`) |
 | In | TCP | 4000, 8000, 8080 | `cidr_permitido_gateway` | Solo si `gateway.exponer_puertos_directos: true` |
 | Out | all | all | `0.0.0.0/0` | Siempre |
 

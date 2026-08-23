@@ -105,8 +105,28 @@ services:
       ENABLE_SIGNUP: ${WEBUI_SIGNUP:-false}
       ENABLE_OLLAMA_API: "False"
       WEBUI_SECRET_KEY: ${SECRET_KEY:-sooniverse-webui-secret}
-      DEFAULT_USER_ROLE: "pending"
+      # 'user', no 'pending': con SSO por cabecera de confianza (ver abajo)
+      # Django YA es el único gatekeeper -login_required exige cuenta activa
+      # antes de que nginx deje pasar la petición-. Dejar el default de
+      # fábrica 'pending' aquí bloqueaba a CUALQUIER usuario que no fuera el
+      # primero jamás creado hasta una aprobación manual dentro del propio
+      # panel de admin de Open WebUI -exactamente el segundo punto de
+      # administración que esta unificación de login busca eliminar
+      # (confirmado en una prueba real: un admin de Django autenticado por
+      # SSO quedaba con role=pending en Open WebUI).
+      DEFAULT_USER_ROLE: "user"
       WEBUI_URL: ${GATEWAY_PUBLIC_URL:-}
+      # SSO por cabecera de confianza: Django es la única pantalla de login del
+      # clúster (nginx la protege con 'auth_request' antes de proxiar aquí, ver
+      # scripts/render_gateway_stack.py::_nginx_locations_block). Con esto
+      # activo, el frontend de Open WebUI NUNCA muestra su propio formulario
+      # -ver docker_images/openwebui/README.md-. Requiere
+      # 'gateway.exponer_puertos_directos: false' (validado en
+      # generate_infra.py): si el 8080 quedara publicado directo, cualquiera
+      # podría inyectar estas cabeceras y suplantar a un usuario.
+      WEBUI_AUTH_TRUSTED_EMAIL_HEADER: X-Sooniverse-Email
+      WEBUI_AUTH_TRUSTED_NAME_HEADER: X-Sooniverse-Name
+      ENABLE_LOGIN_FORM: "False"
       # Persistencia relacional en el MISMO esquema que LiteLLM y Django (ver
       # docs/03_ESTADO_Y_BD.md). 'webui_data' se mantiene: ficheros subidos y
       # el vector store local (Chroma) no son relacionales y siguen en disco.
@@ -175,6 +195,13 @@ services:
       # ENABLE_SIGNUP=false (backend/open_webui/routers/auths.py).
       OPENWEBUI_BOOTSTRAP_EMAIL: ${OPENWEBUI_BOOTSTRAP_EMAIL:-bootstrap@sooniverse.internal}
       OPENWEBUI_BOOTSTRAP_PASSWORD: ${OPENWEBUI_BOOTSTRAP_PASSWORD}
+      # MISMO valor que el servicio 'open-webui': con SSO activo, /signup y
+      # /signin por contraseña quedan bloqueados del lado del servidor sin
+      # excepciones -bootstrap_models.py::authenticate() necesita saber el
+      # nombre de esta cabecera para autenticarse él mismo con ella (ver
+      # docker_images/openwebui/README.md). Sin esta línea, el bootstrap de
+      # cada despliegue con dominio/SSO fallaría con 400 en /signin.
+      WEBUI_AUTH_TRUSTED_EMAIL_HEADER: X-Sooniverse-Email
     depends_on:
       open-webui:
         condition: service_healthy
@@ -193,6 +220,7 @@ services:
       DEBUG: ${DEBUG:-False}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
       CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
+      HTTPS_ACTIVO: ${HTTPS_ACTIVO:-false}
       FORCE_SCRIPT_NAME: ${FORCE_SCRIPT_NAME:-/panel}
       DB_NAME: ${DB_NAME:-sooniverse}
       DB_USER: ${DB_USER:-postgres}
@@ -203,6 +231,9 @@ services:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}
       CLIENTE_ID: ${CLIENTE_ID:-default}
       ENTORNO: ${ENTORNO:-prod}
+      # Región AWS del despliegue -la usan las acciones de worker (apagar/
+      # arrancar la instancia EC2 desde la card Pool vLLM, metrics/workers.py).
+      AWS_REGION: us-east-1
       # TIENE que ser la misma zona con la que scripts/db_setup.py corta los
       # buckets (sooniverse.app_setting.reporting_timezone). Si el panel
       # renderiza en una zona y la agregación se hizo en otra, los días salen
@@ -217,6 +248,7 @@ services:
       DJANGO_SUPERUSER_EMAIL: ${DJANGO_SUPERUSER_EMAIL:-admin@sooniverse.co}
     volumes:
       - panel_static:/app/staticfiles
+      - ../../.ssh_bastion_key:/app/.ssh/bastion_key:ro
     expose:
       - "8000"
     depends_on:
@@ -232,12 +264,26 @@ services:
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       - panel_static:/usr/share/nginx/panel-static:ro
+      - /opt/sooniverse/letsencrypt:/etc/letsencrypt:ro
+      - /opt/sooniverse/certbot-www:/var/www/certbot:ro
     ports:
       - "80:80"
+      - "443:443"
+    command: ["sh", "-c", "while :; do sleep 21600 & wait $!; nginx -s reload; done & nginx -g 'daemon off;'"]
     depends_on:
       - open-webui
       - litellm
       - metrics
+    networks: [gateway_net]
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot
+    container_name: sooniverse-certbot
+    volumes:
+      - /opt/sooniverse/letsencrypt:/etc/letsencrypt
+      - /opt/sooniverse/certbot-www:/var/www/certbot
+    entrypoint: ["sh", "-c", "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 43200 & wait $!; done"]
     networks: [gateway_net]
     restart: unless-stopped
 

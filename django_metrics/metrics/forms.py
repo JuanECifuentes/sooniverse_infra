@@ -1,8 +1,25 @@
-"""Formularios del gestor de API Keys."""
+"""Formularios del gestor de API Keys y del login unificado."""
 
 from datetime import date
 
 from django import forms
+
+
+class LoginForm(forms.Form):
+    """Login único del clúster (panel + chat vía SSO). Acepta usuario o correo
+    indistintamente -ver metrics/auth_backends.py::UsernameOrEmailBackend."""
+
+    identificador = forms.CharField(
+        label="Usuario o correo", max_length=254,
+        widget=forms.TextInput(attrs={
+            "class": "sv-input", "placeholder": "usuario o correo", "autocomplete": "username",
+            "autofocus": True,
+        }),
+    )
+    password = forms.CharField(
+        label="Contraseña",
+        widget=forms.PasswordInput(attrs={"class": "sv-input", "autocomplete": "current-password"}),
+    )
 
 
 class ApiKeyForm(forms.Form):

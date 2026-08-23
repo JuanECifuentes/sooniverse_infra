@@ -73,9 +73,23 @@ gateway:
   # Estrategia de balanceo de LiteLLM sobre los workers vLLM.
   # latency-based-routing | simple-shuffle (round-robin ponderado) | least-busy | usage-based-routing
   load_balancing_strategy: "latency-based-routing"
+  # Dominio propio + HTTPS real (certbot/Let's Encrypt), solo AWS por ahora.
+  # Ver Manual_Dominio_AWS.md para el paso manual (crear el registro DNS A) antes
+  # de activar esto. Con 'habilitado: true', 'gateway.tls.*' de abajo se deriva
+  # automáticamente (no lo edites a mano mientras uses este catálogo).
+  dominio:
+    habilitado: true            # false -> comportamiento actual (IP efímera, HTTP)
+    seleccionado: "ia.sooniverse.co"           # debe coincidir con un 'nombre' de 'disponibles'
+    disponibles:               # catálogo de dominios ya registrados por el cliente
+      - nombre: "ia.sooniverse.co"
+        email_acme: "contacto@sooniverse.co"     # obligatorio: avisos de caducidad de Let's Encrypt
+    staging: false                # true -> directorio de pruebas de Let's Encrypt (sin límites)
+    redirigir_http: true          # 301 de http://dominio -> https://dominio
+    eip_persistente: true         # la EIP del Gateway sobrevive a destroy_infra.py
+    esperar_dns_segundos: 300     # 0 = no esperar; >0 = sondea el registro A antes de emitir el certificado
   tls:
-    habilitado: false
-    modo: "self-signed"        # self-signed (implementado) | letsencrypt | acm (hooks documentados, no implementados)
+    habilitado: false             # DERIVADO si 'dominio.habilitado: true' -no editar a mano en ese caso
+    modo: "self-signed"        # self-signed (implementado) | letsencrypt (implementado, vía 'dominio') | acm (no implementado)
     dominio: null              # requerido si habilitado: true (usado como CN del cert y server_name de nginx)
   litellm:
     master_key_env: "LITELLM_MASTER_KEY"   # Nombre de la var de entorno con la master key

@@ -140,6 +140,7 @@
                 <tr>
                     <th>Alias</th>
                     <th>Estado</th>
+                    <th>Origen</th>
                     <th>Prefijo</th>
                     <th>Responsable</th>
                     <th class="sv-num">Peticiones</th>
@@ -163,6 +164,13 @@
                                 <span class="sv-badge sv-badge--danger"><span class="sv-dot sv-dot--off"></span>Inactiva</span>
                             {% endif %}
                         </td>
+                        <td>
+                            {% if fila.origen == "openwebui" %}
+                                <span class="sv-badge sv-badge--muted">Open WebUI</span>
+                            {% else %}
+                                <span class="sv-badge sv-badge--info">LiteLLM</span>
+                            {% endif %}
+                        </td>
                         <td class="sv-mono">{{ fila.key_prefix|default:"—" }}</td>
                         <td class="sv-mono">{{ fila.owner_email|default:"—" }}</td>
                         <td class="sv-num">{{ fila.peticiones|intcomma }}</td>
@@ -172,23 +180,27 @@
                             {% if fila.ultimo_uso %}{{ fila.ultimo_uso|date:"d/m/Y H:i" }}{% else %}nunca{% endif %}
                         </td>
                         <td class="sv-num">
-                            <div class="l-table-actions">
-                                <form method="post" action="{% url 'metrics:api_key_toggle' fila.id %}" class="l-inline-form" data-spinner-submit>
-                                    {% csrf_token %}
-                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
-                                    {% if fila.is_active %}
-                                        <input type="hidden" name="accion" value="desactivar">
-                                        <button type="submit" class="sv-btn sv-btn--danger sv-btn--sm">Desactivar</button>
-                                    {% else %}
-                                        <input type="hidden" name="accion" value="reactivar">
-                                        <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm">Reactivar</button>
-                                    {% endif %}
-                                </form>
-                            </div>
+                            {% if fila.origen == "openwebui" %}
+                                <span class="sv-help">Solo lectura</span>
+                            {% else %}
+                                <div class="l-table-actions">
+                                    <form method="post" action="{% url 'metrics:api_key_toggle' fila.id %}" class="l-inline-form" data-spinner-submit>
+                                        {% csrf_token %}
+                                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                        {% if fila.is_active %}
+                                            <input type="hidden" name="accion" value="desactivar">
+                                            <button type="submit" class="sv-btn sv-btn--danger sv-btn--sm">Desactivar</button>
+                                        {% else %}
+                                            <input type="hidden" name="accion" value="reactivar">
+                                            <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm">Reactivar</button>
+                                        {% endif %}
+                                    </form>
+                                </div>
+                            {% endif %}
                         </td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="8" class="sv-help">Aún no hay API Keys registradas. Crea la primera arriba.</td></tr>
+                    <tr><td colspan="9" class="sv-help">Aún no hay API Keys registradas. Crea la primera arriba.</td></tr>
                 {% endfor %}
             </tbody>
         </table>

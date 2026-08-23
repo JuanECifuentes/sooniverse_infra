@@ -182,6 +182,23 @@ def test_destroy_refuses_resources_with_mismatched_tags(manager):
     assert still_there
 
 
+def test_destroy_treats_already_deleted_resource_as_success_not_mismatch(manager):
+    """Bug real confirmado en una destrucción real: un Security Group que AWS
+    ya había borrado en cascada (junto con la VPC) se reportaba como
+    '[Omitido] tags no coinciden -> revisar manualmente', una falsa alarma
+    -el recurso simplemente ya no existe, no es de otro deployment."""
+    outputs = manager.provision()
+    manager.ec2.delete_security_group(GroupId=outputs.sg_workers_id)
+
+    report = manager.destroy()
+
+    assert not report.failed
+    skipped_ids = {item.aws_id for item in report.skipped_not_ours}
+    assert outputs.sg_workers_id not in skipped_ids
+    succeeded_ids = {item.aws_id for item in report.succeeded}
+    assert outputs.sg_workers_id in succeeded_ids
+
+
 def test_destroy_refuses_resources_not_managed_by_us():
     with mock_aws():
         state = InMemoryInfraStateStore()
@@ -220,3 +237,100 @@ def test_scan_orphans_detects_untracked_tagged_resources(manager):
     orphans = manager.scan_orphans()
     orphan_ids = {o["aws_id"] for o in orphans}
     assert orphan_vpc_id in orphan_ids
+
+
+# -- gateway.dominio: Elastic IP dedicada del Gateway ------------------------------
+def test_ensure_gateway_eip_is_idempotent():
+    with mock_aws():
+        state = InMemoryInfraStateStore()
+        spec = make_spec(gateway_eip=True, gateway_eip_persistent=True)
+        mgr = AwsNetworkManager(spec, state=state, session=boto3.Session(region_name=REGION))
+
+        alloc_id_1, ip_1 = mgr.ensure_gateway_eip()
+        alloc_id_2, ip_2 = mgr.ensure_gateway_eip()
+
+        assert alloc_id_1 == alloc_id_2
+        assert ip_1 == ip_2
+        addresses = mgr.ec2.describe_addresses(AllocationIds=[alloc_id_1])["Addresses"]
+        assert len(addresses) == 1
+
+
+def test_provision_reserves_gateway_eip_when_enabled():
+    with mock_aws():
+        state = InMemoryInfraStateStore()
+        spec = make_spec(gateway_eip=True, gateway_eip_persistent=True)
+        mgr = AwsNetworkManager(spec, state=state, session=boto3.Session(region_name=REGION))
+        outputs = mgr.provision()
+
+        assert outputs.gateway_eip_allocation_id is not None
+        assert outputs.gateway_eip_public_ip is not None
+
+
+def test_provision_without_gateway_eip_flag_does_not_reserve_one():
+    with mock_aws():
+        state = InMemoryInfraStateStore()
+        spec = make_spec(gateway_eip=False)
+        mgr = AwsNetworkManager(spec, state=state, session=boto3.Session(region_name=REGION))
+        outputs = mgr.provision()
+
+        assert outputs.gateway_eip_allocation_id is None
+        # El NAT sí reserva su propia EIP (comportamiento preexistente) -lo que NO
+        # debe existir es una con component='eip-gateway'.
+        addresses = mgr.ec2.describe_addresses(Filters=[{"Name": "tag:sooniverse:component", "Values": ["eip-gateway"]}])
+        assert addresses["Addresses"] == []
+
+
+def test_destroy_keeps_persistent_gateway_eip():
+    with mock_aws():
+        state = InMemoryInfraStateStore()
+        spec = make_spec(gateway_eip=True, gateway_eip_persistent=True)
+        mgr = AwsNetworkManager(spec, state=state, session=boto3.Session(region_name=REGION))
+        outputs = mgr.provision()
+
+        report = mgr.destroy()
+
+        assert report.ok, report.failed
+        kept_ids = {item.aws_id for item in report.kept_persistent}
+        assert outputs.gateway_eip_allocation_id in kept_ids
+        # Sigue existiendo de verdad en AWS -no se liberó.
+        addresses = mgr.ec2.describe_addresses(AllocationIds=[outputs.gateway_eip_allocation_id])["Addresses"]
+        assert len(addresses) == 1
+
+
+def test_destroy_dry_run_reports_persistent_gateway_eip_as_kept():
+    """Bug real: destroy(dry_run=True) no aplicaba el chequeo de
+    eip_persistente -a diferencia de la corrida real-, así que
+    'destroy_infra.py --dry-run' no podía confirmar lo que el propio manual
+    de despliegue pide verificar antes de una destrucción real: que la EIP
+    del Gateway aparece como conservada."""
+    with mock_aws():
+        state = InMemoryInfraStateStore()
+        spec = make_spec(gateway_eip=True, gateway_eip_persistent=True)
+        mgr = AwsNetworkManager(spec, state=state, session=boto3.Session(region_name=REGION))
+        outputs = mgr.provision()
+
+        report = mgr.destroy(dry_run=True)
+
+        kept_ids = {item.aws_id for item in report.kept_persistent}
+        assert outputs.gateway_eip_allocation_id in kept_ids
+        # dry-run: nada se muta de verdad.
+        addresses = mgr.ec2.describe_addresses(AllocationIds=[outputs.gateway_eip_allocation_id])["Addresses"]
+        assert len(addresses) == 1
+
+
+def test_destroy_releases_non_persistent_gateway_eip():
+    from botocore.exceptions import ClientError
+
+    with mock_aws():
+        state = InMemoryInfraStateStore()
+        spec = make_spec(gateway_eip=True, gateway_eip_persistent=False)
+        mgr = AwsNetworkManager(spec, state=state, session=boto3.Session(region_name=REGION))
+        outputs = mgr.provision()
+
+        report = mgr.destroy()
+
+        assert report.ok, report.failed
+        succeeded_ids = {item.aws_id for item in report.succeeded}
+        assert outputs.gateway_eip_allocation_id in succeeded_ids
+        with pytest.raises(ClientError):
+            mgr.ec2.describe_addresses(AllocationIds=[outputs.gateway_eip_allocation_id])

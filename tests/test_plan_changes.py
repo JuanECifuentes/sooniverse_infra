@@ -99,6 +99,30 @@ def test_load_balancing_strategy_change_is_in_place():
     assert all(c.classification == IN_PLACE for c in plan.changes)
 
 
+def test_gateway_tls_change_is_in_place():
+    old = load_base_config()
+    new = clone(old)
+    new["gateway"]["tls"] = {"habilitado": True, "modo": "self-signed", "dominio": "x.example.com"}
+
+    plan = plan_changes(old, new)
+    assert not plan.is_no_op
+    assert all(c.classification == IN_PLACE for c in plan.changes)
+
+
+def test_gateway_dominio_change_is_in_place():
+    old = load_base_config()
+    new = clone(old)
+    new["gateway"]["dominio"] = {
+        "habilitado": True,
+        "seleccionado": "ia.acme.com",
+        "disponibles": [{"nombre": "ia.acme.com", "email_acme": "ops@acme.com"}],
+    }
+
+    plan = plan_changes(old, new)
+    assert not plan.is_no_op
+    assert all(c.classification == IN_PLACE for c in plan.changes)
+
+
 def test_replicas_change_recreates_that_cluster():
     old = load_base_config()
     new = clone(old)
