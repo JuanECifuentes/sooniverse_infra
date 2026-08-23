@@ -194,7 +194,10 @@ def check_private_route_to_nat(ctx: VerificationContext) -> CheckResult:
         return CheckResult(name, "N/A", "No hay route tables privadas registradas", critical=False)
 
     import boto3
-    ec2 = boto3.client("ec2", region_name=ctx.config["red_y_aislamiento"]["region"])
+    ec2 = boto3.Session(
+        profile_name=ctx.config["red_y_aislamiento"].get("aws_profile"),
+        region_name=ctx.config["red_y_aislamiento"]["region"],
+    ).client("ec2")
     ok = True
     for rt_id in private_rt_ids:
         try:
@@ -216,7 +219,10 @@ def check_public_route_to_igw(ctx: VerificationContext) -> CheckResult:
         return CheckResult(name, "N/A", "No hay route table pública registrada", critical=False)
 
     import boto3
-    ec2 = boto3.client("ec2", region_name=ctx.config["red_y_aislamiento"]["region"])
+    ec2 = boto3.Session(
+        profile_name=ctx.config["red_y_aislamiento"].get("aws_profile"),
+        region_name=ctx.config["red_y_aislamiento"]["region"],
+    ).client("ec2")
     ok = True
     for rt_id in public_rt_ids:
         rt = ec2.describe_route_tables(RouteTableIds=[rt_id])["RouteTables"][0]
@@ -235,7 +241,10 @@ def check_workers_no_public_ip(ctx: VerificationContext) -> CheckResult:
         return CheckResult(name, "N/A", "No hay subredes privadas registradas", critical=False)
 
     import boto3
-    ec2 = boto3.client("ec2", region_name=ctx.config["red_y_aislamiento"]["region"])
+    ec2 = boto3.Session(
+        profile_name=ctx.config["red_y_aislamiento"].get("aws_profile"),
+        region_name=ctx.config["red_y_aislamiento"]["region"],
+    ).client("ec2")
     resp = ec2.describe_instances(
         Filters=[
             {"Name": "subnet-id", "Values": private_subnet_ids},
@@ -259,7 +268,10 @@ def check_workers_sg_no_open_cidr(ctx: VerificationContext) -> CheckResult:
         return CheckResult(name, "N/A", "No hay SG de workers registrado", critical=False)
 
     import boto3
-    ec2 = boto3.client("ec2", region_name=ctx.config["red_y_aislamiento"]["region"])
+    ec2 = boto3.Session(
+        profile_name=ctx.config["red_y_aislamiento"].get("aws_profile"),
+        region_name=ctx.config["red_y_aislamiento"]["region"],
+    ).client("ec2")
     sg = ec2.describe_security_groups(GroupIds=[sg_id])["SecurityGroups"][0]
     worker_ports = {wl["puerto"] for wl in ctx.config["workloads"]}
 

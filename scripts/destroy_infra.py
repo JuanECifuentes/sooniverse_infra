@@ -27,6 +27,7 @@ Uso:
 """
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -55,14 +56,20 @@ def _sky_binary() -> Optional[str]:
     return shutil.which("sky")
 
 
-def _sky_down(cluster: str) -> bool:
-    """`sky down -y <cluster>`. Devuelve True si tuvo éxito o el clúster ya no existía."""
+def _sky_down(cluster: str, aws_profile: Optional[str] = None) -> bool:
+    """`sky down -y <cluster>`. Devuelve True si tuvo éxito o el clúster ya no existía.
+
+    `aws_profile` (BYOC): SkyPilot resuelve credenciales AWS con la cadena estándar
+    de boto3, así que sin AWS_PROFILE en el entorno terminaría intentando destruir
+    el clúster con las credenciales por defecto (la cuenta de Sooniverse), no las
+    del cliente dueño del clúster."""
     sky = _sky_binary()
     if not sky:
         print("[ERROR] El comando 'sky' no está en el PATH.")
         return False
-    print(f"[EXEC] {sky} down -y {cluster}")
-    result = subprocess.run([sky, "down", "-y", cluster], capture_output=True, text=True)
+    env = {**os.environ, "AWS_PROFILE": aws_profile} if aws_profile else None
+    print(f"[EXEC] {sky} down -y {cluster}" + (f" (AWS_PROFILE={aws_profile})" if aws_profile else ""))
+    result = subprocess.run([sky, "down", "-y", cluster], capture_output=True, text=True, env=env)
     if result.returncode != 0:
         stderr = (result.stderr or "").lower()
         if "does not exist" in stderr or "no existing cluster" in stderr:
@@ -73,7 +80,9 @@ def _sky_down(cluster: str) -> bool:
     return True
 
 
-def _wait_for_instances_terminated(clusters: List[str], region: str, timeout: int = 180) -> None:
+def _wait_for_instances_terminated(
+    clusters: List[str], region: str, aws_profile: Optional[str] = None, timeout: int = 180
+) -> None:
     """Espera a que las instancias EC2 de estos clústeres SkyPilot lleguen a
     'terminated' antes de tocar la capa de red.
 
@@ -89,7 +98,7 @@ def _wait_for_instances_terminated(clusters: List[str], region: str, timeout: in
     except ImportError:
         return
 
-    ec2 = boto3.client("ec2", region_name=region)
+    ec2 = boto3.Session(profile_name=aws_profile, region_name=region).client("ec2")
     filtro_valores = [c for cluster in clusters for c in (cluster, f"{cluster}-*")]
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
@@ -178,11 +187,11 @@ def _is_orphan(known: Dict[str, Tuple[str, str]], aws_id: str) -> Tuple[bool, Op
     return status in ("destroyed", "error"), status
 
 
-def scan_orphans(region: str) -> List[Dict[str, Any]]:
+def scan_orphans(region: str, aws_profile: Optional[str] = None) -> List[Dict[str, Any]]:
     import boto3
     from aws_network import TAG_MANAGED
 
-    ec2 = boto3.client("ec2", region_name=region)
+    ec2 = boto3.Session(profile_name=aws_profile, region_name=region).client("ec2")
     known = _region_known_aws_ids(region)
 
     # 'describe_nat_gateways' es distinto del resto: AWS sigue devolviendo un
@@ -246,11 +255,11 @@ def print_orphans(orphans: List[Dict[str, Any]]) -> None:
         print(f"{o['type']:<20} {o['aws_id']:<24} {o['name']:<40} {o['deployment_status']}")
 
 
-def purge_orphans(orphans: List[Dict[str, Any]], region: str) -> None:
+def purge_orphans(orphans: List[Dict[str, Any]], region: str, aws_profile: Optional[str] = None) -> None:
     import boto3
     from aws_network import DELETE_ORDER
 
-    ec2 = boto3.client("ec2", region_name=region)
+    ec2 = boto3.Session(profile_name=aws_profile, region_name=region).client("ec2")
     ordered = sorted(orphans, key=lambda o: DELETE_ORDER.get(_component_of(o), 999))
 
     for o in ordered:
@@ -324,13 +333,13 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
         print("\n--- [1/3] Workers vLLM (sky down) ---")
         for wl in config["workloads"]:
             cluster = builder.worker_cluster(wl["id"])
-            _sky_down(cluster)
+            _sky_down(cluster, aws_profile=red.get("aws_profile"))
 
         print("\n--- [2/3] Nodo Gateway (sky down) ---")
-        _sky_down(builder.gateway_cluster)
+        _sky_down(builder.gateway_cluster, aws_profile=red.get("aws_profile"))
 
         clusters = [builder.worker_cluster(wl["id"]) for wl in config["workloads"]] + [builder.gateway_cluster]
-        _wait_for_instances_terminated(clusters, red["region"])
+        _wait_for_instances_terminated(clusters, red["region"], aws_profile=red.get("aws_profile"))
     elif only in ("all",):
         print("\n--- (dry-run) Se ejecutaría 'sky down' de workers y gateway ---")
         for wl in config["workloads"]:
@@ -406,13 +415,14 @@ def main() -> int:
 
     if args.scan_orphans:
         region = config["red_y_aislamiento"]["region"]
-        orphans = scan_orphans(region)
+        aws_profile = config["red_y_aislamiento"].get("aws_profile")
+        orphans = scan_orphans(region, aws_profile=aws_profile)
         print_orphans(orphans)
         if args.purge_orphans:
             if not args.yes:
                 print("[ABORTADO] --purge-orphans requiere --yes.")
                 return 1
-            purge_orphans(orphans, region)
+            purge_orphans(orphans, region, aws_profile=aws_profile)
         return 0
 
     try:

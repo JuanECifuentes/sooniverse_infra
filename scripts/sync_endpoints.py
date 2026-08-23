@@ -139,13 +139,18 @@ def cluster_names(config: Dict[str, Any]) -> Dict[str, str]:
 
 def worker_env(config: Dict[str, Any]) -> Dict[str, str]:
     """Los clústeres worker viven bajo la config de cliente con use_internal_ips."""
+    env: Dict[str, str] = {}
     if SKY_WORKERS_CONFIG.exists():
-        return {"SKYPILOT_CONFIG": str(SKY_WORKERS_CONFIG)}
-    return {}
+        env["SKYPILOT_CONFIG"] = str(SKY_WORKERS_CONFIG)
+    aws_profile = config["red_y_aislamiento"].get("aws_profile")
+    if aws_profile:
+        env["AWS_PROFILE"] = aws_profile
+    return env
 
 
-def _gateway_public_ip(gateway_cluster: str) -> Optional[str]:
-    out = _sky_out(["status", "--ip", gateway_cluster])
+def _gateway_public_ip(gateway_cluster: str, aws_profile: Optional[str] = None) -> Optional[str]:
+    env = {"AWS_PROFILE": aws_profile} if aws_profile else None
+    out = _sky_out(["status", "--ip", gateway_cluster], env=env)
     lines = [l.strip() for l in out.strip().splitlines() if IPV4_RE.match(l.strip())]
     return lines[-1] if lines else None
 
@@ -162,7 +167,7 @@ def refresh_bastion_config(config: Dict[str, Any], gateway_cluster: str) -> None
     if not red.get("workers_en_subred_privada", True):
         return  # sin subred privada no hay bastion que mantener al día
 
-    gateway_ip = _gateway_public_ip(gateway_cluster)
+    gateway_ip = _gateway_public_ip(gateway_cluster, aws_profile=red.get("aws_profile"))
     if not gateway_ip:
         print(f"[WARNING] No se pudo obtener la IP pública de '{gateway_cluster}'; "
               "se usará el bastion existente (si lo hay) sin refrescar.")
@@ -238,7 +243,9 @@ def discover_via_python_api(cluster: str) -> List[str]:
 _SKYPILOT_CLUSTER_TAG_KEYS = ("ray-cluster-name", "skypilot-cluster-name")
 
 
-def discover_via_describe_instances(cluster: str, region: str) -> List[Dict[str, str]]:
+def discover_via_describe_instances(
+    cluster: str, region: str, aws_profile: Optional[str] = None
+) -> List[Dict[str, str]]:
     """4º método (el más fiable: no depende del estado interno de SkyPilot).
 
     Busca instancias EC2 en ejecución con tag de clúster = `cluster` y toma su
@@ -250,7 +257,7 @@ def discover_via_describe_instances(cluster: str, region: str) -> List[Dict[str,
         return []
 
     try:
-        ec2 = boto3.client("ec2", region_name=region)
+        ec2 = boto3.Session(profile_name=aws_profile, region_name=region).client("ec2")
         for tag_key in _SKYPILOT_CLUSTER_TAG_KEYS:
             resp = ec2.describe_instances(
                 Filters=[
@@ -298,13 +305,15 @@ def discover_via_status_ip(cluster: str, env: Dict[str, str]) -> List[str]:
     return [line.strip() for line in out.splitlines() if IPV4_RE.match(line.strip())]
 
 
-def discover_worker_ips(cluster: str, env: Dict[str, str], region: str) -> List[Dict[str, str]]:
+def discover_worker_ips(
+    cluster: str, env: Dict[str, str], region: str, aws_profile: Optional[str] = None
+) -> List[Dict[str, str]]:
     """Devuelve una lista de {"ip": ..., "subnet_id": ... | None, "instance_id": ... | None}.
     `subnet_id`/`instance_id` solo se conocen vía el método describe_instances
     (los otros tres solo dan la IP)."""
     for label, fn in (
         ("python-api", lambda: [{"ip": ip, "subnet_id": None, "instance_id": None} for ip in discover_via_python_api(cluster)]),
-        ("describe-instances", lambda: discover_via_describe_instances(cluster, region)),
+        ("describe-instances", lambda: discover_via_describe_instances(cluster, region, aws_profile)),
         ("run-logs", lambda: [{"ip": ip, "subnet_id": None, "instance_id": None} for ip in discover_via_logs(cluster, env)]),
         ("status--ip", lambda: [{"ip": ip, "subnet_id": None, "instance_id": None} for ip in discover_via_status_ip(cluster, env)]),
     ):
@@ -411,7 +420,7 @@ def build_endpoints(config: Dict[str, Any]) -> List[Dict[str, Any]]:
         # declarado; solo antes del primer sondeo (recién desplegado) no hay
         # fila todavía y se usa 'capacidades' del contrato como arranque.
         capacidades = effective_caps.get(model_public_name) or wl.get("capacidades", {})
-        for found in discover_worker_ips(cluster, env, region):
+        for found in discover_worker_ips(cluster, env, region, aws_profile=config["red_y_aislamiento"].get("aws_profile")):
             ip = found["ip"]
             healthy = check_worker_health(ip, wl["puerto"], names["__gateway__"])
             if not healthy:

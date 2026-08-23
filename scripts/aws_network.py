@@ -236,19 +236,19 @@ class AwsNetworkManager:
         boto_config = BotoConfig(retries={"max_attempts": 10, "mode": "adaptive"})
         # Aislamiento de credenciales por cliente (Fase 6): red_y_aislamiento.aws_profile
         # selecciona un perfil de ~/.aws/credentials o ~/.aws/config. Si se pasa una
-        # `session` explícita (tests con moto, o el futuro modo BYOC con AssumeRole de
-        # abajo), esta gana sobre `aws_profile`.
+        # `session` explícita (tests con moto), esta gana sobre `aws_profile`.
         #
-        # Hook futuro (NO implementado): modo BYOC vía AssumeRole + External ID, para que
-        # el cliente final apruebe el acceso desde SU cuenta AWS sin compartir credenciales
-        # permanentes con nosotros:
-        #   sts = boto3.client("sts")
-        #   creds = sts.assume_role(
-        #       RoleArn=f"arn:aws:iam::{cliente_account_id}:role/SooniverseDeployRole",
-        #       RoleSessionName=f"sooniverse-{spec.client_id}-{spec.environment}",
-        #       ExternalId=cliente_external_id,  # mitiga el "confused deputy problem"
-        #   )["Credentials"]
-        #   session = boto3.Session(aws_access_key_id=creds["AccessKeyId"], ...)
+        # Modo BYOC (AssumeRole + External ID, probado end-to-end -ver docs/05_MULTICLIENTE.md
+        # §5): `aws_profile` puede apuntar a un perfil de ~/.aws/config que sea a su vez una
+        # cadena de asunción de rol (role_arn + source_profile + external_id). boto3 resuelve
+        # esa cadena solo, con refresco automático de credenciales temporales -no hace falta
+        # ningún `sts.assume_role()` manual aquí. El cliente crea el rol en SU cuenta con
+        # `onboarding/aws-byoc-terraform/`; Sooniverse nunca ve credenciales permanentes suyas.
+        #
+        # Importante: SkyPilot (sky launch/down/start/exec) resuelve credenciales con la
+        # cadena estándar de boto3 y NO hereda este `aws_profile` automáticamente -cualquier
+        # invocación del binario `sky` debe recibir `AWS_PROFILE=spec.aws_profile` en el
+        # entorno del subproceso (ver `_sky_env()` en generate_infra.py).
         self._session = session or boto3.Session(profile_name=spec.aws_profile, region_name=spec.region)
         self.ec2 = self._session.client("ec2", region_name=spec.region, config=boto_config)
 
