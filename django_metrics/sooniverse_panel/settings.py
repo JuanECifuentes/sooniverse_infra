@@ -153,8 +153,19 @@ STORAGES = {
     },
 }
 
-LOGIN_URL = "/admin/login/"
-LOGIN_REDIRECT_URL = "/metrics/"
+# Django es la única fuente de login del clúster (panel + chat, ver
+# metrics/views.py::login_view y el SSO por cabecera de confianza documentado
+# en docker_images/openwebui/README.md). Nombre de URL, no ruta literal: así
+# 'redirect_to_login()' aplica FORCE_SCRIPT_NAME/SCRIPT_NAME automáticamente
+# (con una ruta hardcodeada como "/admin/login/" no lo hacía).
+LOGIN_URL = "metrics:login"
+LOGIN_REDIRECT_URL = "metrics:dashboard"
+LOGOUT_REDIRECT_URL = "metrics:login"
+
+AUTHENTICATION_BACKENDS = [
+    "metrics.auth_backends.UsernameOrEmailBackend",
+    "django.contrib.auth.backends.ModelBackend",
+]
 
 # -----------------------------------------------------------------------------
 # Integración con LiteLLM Proxy
@@ -166,6 +177,9 @@ LITELLM_TIMEOUT = int(_env("LITELLM_TIMEOUT", "30"))
 # Contexto de tenancy heredado del contrato de infraestructura
 CLIENTE_ID = _env("CLIENTE_ID", "default")
 ENTORNO = _env("ENTORNO", "prod")
+# Región AWS del despliegue -la usan las acciones de worker (apagar/arrancar
+# la instancia EC2 desde la card Pool vLLM, metrics/workers.py).
+AWS_REGION = _env("AWS_REGION", "us-east-1")
 
 # -----------------------------------------------------------------------------
 # Analítica de ritmo de uso y capacidad
@@ -191,6 +205,16 @@ X_FRAME_OPTIONS = "DENY"
 SESSION_COOKIE_HTTPONLY = True
 USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# Con dominio propio (HTTPS real, ver gateway.dominio en config_global.yaml) las
+# cookies deben marcarse Secure; en dev local (HTTP puro) NO, o el navegador
+# las descarta y el login/CSRF dejan de funcionar por completo.
+_HTTPS_ACTIVO = _env("HTTPS_ACTIVO", "false").lower() == "true"
+CSRF_COOKIE_SECURE = _HTTPS_ACTIVO
+SESSION_COOKIE_SECURE = _HTTPS_ACTIVO
+if _HTTPS_ACTIVO:
+    SECURE_HSTS_SECONDS = 3600
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = False
 
 LOGGING = {
     "version": 1,

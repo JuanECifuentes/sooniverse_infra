@@ -254,7 +254,9 @@ def discover_via_describe_instances(cluster: str, region: str) -> List[Dict[str,
         for tag_key in _SKYPILOT_CLUSTER_TAG_KEYS:
             resp = ec2.describe_instances(
                 Filters=[
-                    {"Name": f"tag:{tag_key}", "Values": [cluster]},
+                    # SkyPilot etiqueta la instancia como '<cluster>-<sufijo hash>',
+                    # nunca el nombre exacto de clúster -de ahí el comodín.
+                    {"Name": f"tag:{tag_key}", "Values": [cluster, f"{cluster}-*"]},
                     {"Name": "instance-state-name", "Values": ["running"]},
                 ]
             )
@@ -263,7 +265,11 @@ def discover_via_describe_instances(cluster: str, region: str) -> List[Dict[str,
                 for instance in reservation.get("Instances", []):
                     ip = instance.get("PrivateIpAddress")
                     if ip:
-                        found.append({"ip": ip, "subnet_id": instance.get("SubnetId")})
+                        found.append({
+                            "ip": ip,
+                            "subnet_id": instance.get("SubnetId"),
+                            "instance_id": instance.get("InstanceId"),
+                        })
             if found:
                 return found
     except Exception:  # noqa: BLE001 - boto3 no configurado o sin permisos -> cae al siguiente método
@@ -293,13 +299,14 @@ def discover_via_status_ip(cluster: str, env: Dict[str, str]) -> List[str]:
 
 
 def discover_worker_ips(cluster: str, env: Dict[str, str], region: str) -> List[Dict[str, str]]:
-    """Devuelve una lista de {"ip": ..., "subnet_id": ... | None}. `subnet_id` solo
-    se conoce vía el método describe_instances (los otros tres solo dan la IP)."""
+    """Devuelve una lista de {"ip": ..., "subnet_id": ... | None, "instance_id": ... | None}.
+    `subnet_id`/`instance_id` solo se conocen vía el método describe_instances
+    (los otros tres solo dan la IP)."""
     for label, fn in (
-        ("python-api", lambda: [{"ip": ip, "subnet_id": None} for ip in discover_via_python_api(cluster)]),
+        ("python-api", lambda: [{"ip": ip, "subnet_id": None, "instance_id": None} for ip in discover_via_python_api(cluster)]),
         ("describe-instances", lambda: discover_via_describe_instances(cluster, region)),
-        ("run-logs", lambda: [{"ip": ip, "subnet_id": None} for ip in discover_via_logs(cluster, env)]),
-        ("status--ip", lambda: [{"ip": ip, "subnet_id": None} for ip in discover_via_status_ip(cluster, env)]),
+        ("run-logs", lambda: [{"ip": ip, "subnet_id": None, "instance_id": None} for ip in discover_via_logs(cluster, env)]),
+        ("status--ip", lambda: [{"ip": ip, "subnet_id": None, "instance_id": None} for ip in discover_via_status_ip(cluster, env)]),
     ):
         found = fn()
         if found:
@@ -418,6 +425,7 @@ def build_endpoints(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "accelerator": wl.get("accelerator"),
                 "ip": ip,
                 "subnet_id": found.get("subnet_id"),
+                "instance_id": found.get("instance_id"),
                 "port": wl["puerto"],
                 "weight": wl.get("peso_balanceo", 1),
                 "max_model_len": frac.get("max_model_len"),
@@ -593,15 +601,30 @@ def register_in_db(endpoints: List[Dict[str, Any]], cluster_of: Dict[str, str], 
 
     net_ctx = _current_network_context(config)
 
+    # Todos los clústeres worker DECLARADOS en el contrato -no solo los
+    # descubiertos en ESTA corrida. Bug real corregido en esta iteración: el
+    # reset previo solo alcanzaba a `{ep["cluster"] for ep in endpoints}`, así
+    # que (a) un clúster que desaparece POR COMPLETO de una corrida se quedaba
+    # is_healthy=TRUE para siempre (nunca volvía a aparecer en `endpoints`, así
+    # que nunca entraba en el UPDATE), y (b) con `endpoints == []` el `if
+    # clusters:` ni siquiera ejecutaba el UPDATE, dejando toda la tabla con
+    # datos obsoletos sin ninguna señal de desincronización.
+    expected_clusters = sorted({v for k, v in cluster_names(config).items() if k != "__gateway__"})
+
     try:
         with conn.cursor() as cur:
-            clusters = sorted({ep["cluster"] for ep in endpoints})
-            if clusters:
-                # Los nodos que ya no aparecen quedan marcados como no saludables.
+            if expected_clusters:
+                # No pisa 'apagado': ese estado lo fija deliberadamente el panel
+                # (stop-instances vía el botón "Apagar") y una instancia parada
+                # desaparece por completo de discover_via_describe_instances,
+                # así que sin esta excepción cada sincronización posterior lo
+                # reetiquetaría como 'desincronizado' -perdiendo la distinción
+                # entre "apagado a propósito" y "se cayó solo".
                 cur.execute(
-                    "UPDATE sooniverse.worker_node SET is_healthy = FALSE, health_status = 'unknown' "
-                    "WHERE cluster_name = ANY(%s)",
-                    (clusters,),
+                    "UPDATE sooniverse.worker_node "
+                    "SET is_healthy = FALSE, health_status = 'unknown', estado_operativo = 'desincronizado' "
+                    "WHERE cluster_name = ANY(%s) AND estado_operativo IS DISTINCT FROM 'apagado'",
+                    (expected_clusters,),
                 )
 
             for rank, ep in enumerate(endpoints):
@@ -611,9 +634,9 @@ def register_in_db(endpoints: List[Dict[str, Any]], cluster_of: Dict[str, str], 
                     INSERT INTO sooniverse.worker_node
                         (cluster_name, node_rank, private_ip, port, model_name, accelerator,
                          is_healthy, last_seen_at, deployment_id, subnet_id, security_group_id,
-                         last_health_check, health_status,
+                         last_health_check, health_status, estado_operativo, instance_id,
                          instance_type, gpu_count, max_num_seqs, max_num_batched_tokens, max_model_len)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, NOW(), %s,
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, NOW(), %s, %s, %s,
                             %s, %s, %s, %s, %s)
                     ON CONFLICT (cluster_name, private_ip, port) DO UPDATE SET
                         node_rank          = EXCLUDED.node_rank,
@@ -626,6 +649,8 @@ def register_in_db(endpoints: List[Dict[str, Any]], cluster_of: Dict[str, str], 
                         security_group_id  = COALESCE(EXCLUDED.security_group_id, sooniverse.worker_node.security_group_id),
                         last_health_check  = NOW(),
                         health_status      = EXCLUDED.health_status,
+                        estado_operativo   = EXCLUDED.estado_operativo,
+                        instance_id        = COALESCE(EXCLUDED.instance_id, sooniverse.worker_node.instance_id),
                         instance_type      = COALESCE(EXCLUDED.instance_type, sooniverse.worker_node.instance_type),
                         gpu_count          = COALESCE(EXCLUDED.gpu_count, sooniverse.worker_node.gpu_count),
                         max_num_seqs       = COALESCE(EXCLUDED.max_num_seqs, sooniverse.worker_node.max_num_seqs),
@@ -635,7 +660,7 @@ def register_in_db(endpoints: List[Dict[str, Any]], cluster_of: Dict[str, str], 
                     """,
                     (ep["cluster"], rank, ep["ip"], ep["port"], ep["model_public_name"], ep.get("accelerator"),
                      healthy, net_ctx["deployment_id"], ep.get("subnet_id"), net_ctx["security_group_id"],
-                     "healthy" if healthy else "unhealthy",
+                     "healthy" if healthy else "unhealthy", "sano" if healthy else "degradado", ep.get("instance_id"),
                      ep.get("instance_type"), ep.get("gpu_count"),
                      ep.get("max_num_seqs"), ep.get("max_num_batched_tokens"), ep.get("max_model_len")),
                 )

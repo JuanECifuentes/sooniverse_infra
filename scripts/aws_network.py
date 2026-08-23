@@ -55,6 +55,7 @@ DELETE_ORDER = {
     "sg-gateway": 11,
     "vpce-s3": 20,
     "nat": 30,
+    "eip-gateway": 35,
     "eip": 40,
     "rtb-private": 50,
     "rtb-public": 51,
@@ -112,6 +113,12 @@ class NetworkSpec:
     nat_timeout_seconds: int = 300
     extra_tags: Optional[Dict[str, str]] = None
     aws_profile: Optional[str] = None  # perfil de credenciales (~/.aws/credentials) por cliente
+    # Dominio propio (gateway.dominio.*): reserva una Elastic IP DEDICADA para el
+    # Gateway -a diferencia del resto de la red, se busca por (cliente, entorno)
+    # y no por deployment_id, porque debe sobrevivir a un destroy + redeploy.
+    gateway_eip: bool = False
+    gateway_eip_persistent: bool = True
+    gateway_domain: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.nat_mode not in ("single", "per-az", "none"):
@@ -148,6 +155,8 @@ class NetworkOutputs:
     sg_workers_id: str
     sg_workers_name: str
     managed_by_us: bool = True
+    gateway_eip_allocation_id: Optional[str] = None
+    gateway_eip_public_ip: Optional[str] = None
 
 
 @dataclass
@@ -161,6 +170,7 @@ class PlannedDeletion:
     name: Optional[str]
     delete_order: int
     managed_by_us: bool
+    attributes: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -174,6 +184,9 @@ class DestroyReport:
     failed: List[Dict[str, Any]] = field(default_factory=list)
     skipped_not_ours: List[PlannedDeletion] = field(default_factory=list)
     manual_actions_required: List[str] = field(default_factory=list)
+    # EIP del Gateway conservada a propósito (gateway.dominio.eip_persistente: true)
+    # -no es un fallo ni un "no es nuestro", es una decisión deliberada.
+    kept_persistent: List[PlannedDeletion] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -480,6 +493,50 @@ class AwsNetworkManager:
 
         return nat_ids, eip_ids
 
+    def ensure_gateway_eip(self) -> Tuple[str, str]:
+        """Reserva (o reutiliza) una Elastic IP DEDICADA al Gateway, para que un
+        registro DNS A no se rompa entre 'sky launch's (SkyPilot asigna una IP
+        pública efímera por defecto) ni entre un destroy y el siguiente despliegue
+        (con 'gateway.dominio.eip_persistente: true').
+
+        A diferencia de todo el resto de esta clase, se busca por (client_id,
+        environment) y NO por deployment_id: debe sobrevivir a la recreación del
+        deployment_id tras un destroy_infra.py, así que en cada llamada se
+        re-etiqueta al deployment_id ACTUAL (puede venir de un ciclo anterior)."""
+        name = self._name("eip-gateway")
+        existing = self.ec2.describe_addresses(
+            Filters=[
+                {"Name": f"tag:{TAG_CLIENT}", "Values": [self.spec.client_id]},
+                {"Name": f"tag:{TAG_ENV}", "Values": [self.spec.environment]},
+                {"Name": f"tag:{TAG_COMPONENT}", "Values": ["eip-gateway"]},
+            ]
+        ).get("Addresses", [])
+
+        if existing:
+            addr = existing[0]
+            alloc_id = addr["AllocationId"]
+            public_ip = addr["PublicIp"]
+            self.ec2.create_tags(Resources=[alloc_id], Tags=self._tags("eip-gateway", name))
+            self._record(
+                "eip-gateway", "eip-gateway", alloc_id,
+                attributes={"public_ip": public_ip, "persistente": self.spec.gateway_eip_persistent},
+            )
+            logger.info("[RED] Elastic IP del Gateway reutilizada: %s (%s)", public_ip, alloc_id)
+            return alloc_id, public_ip
+
+        resp = self.ec2.allocate_address(
+            Domain="vpc",
+            TagSpecifications=self._tag_specs("elastic-ip", "eip-gateway", name),
+        )
+        alloc_id = resp["AllocationId"]
+        public_ip = resp["PublicIp"]
+        self._record(
+            "eip-gateway", "eip-gateway", alloc_id,
+            attributes={"public_ip": public_ip, "persistente": self.spec.gateway_eip_persistent},
+        )
+        logger.info("[RED] Elastic IP del Gateway reservada: %s (%s)", public_ip, alloc_id)
+        return alloc_id, public_ip
+
     def ensure_route_tables(
         self,
         vpc_id: str,
@@ -735,6 +792,10 @@ class AwsNetworkManager:
             )
             self.ensure_vpc_endpoints(vpc_id, private_rt_ids)
             sg_gateway_id, sg_workers_id = self.ensure_security_groups(vpc_id)
+            gateway_eip_alloc_id: Optional[str] = None
+            gateway_eip_public_ip: Optional[str] = None
+            if self.spec.gateway_eip:
+                gateway_eip_alloc_id, gateway_eip_public_ip = self.ensure_gateway_eip()
         except Exception as exc:
             self.state.set_deployment_status(self.deployment_id, "error", error=str(exc))
             self.state.log_event(self.deployment_id, "network", "provision", "error", message=str(exc))
@@ -761,6 +822,8 @@ class AwsNetworkManager:
             sg_workers_id=sg_workers_id,
             sg_workers_name=self._name("workers"),
             managed_by_us=True,
+            gateway_eip_allocation_id=gateway_eip_alloc_id,
+            gateway_eip_public_ip=gateway_eip_public_ip,
         )
 
     def adopt_existing(self, vpc_name_or_id: str) -> NetworkOutputs:
@@ -823,13 +886,23 @@ class AwsNetworkManager:
                     name=(res.get("attributes") or {}).get("name"),
                     delete_order=res["delete_order"],
                     managed_by_us=res.get("managed_by_us", True),
+                    attributes=res.get("attributes"),
                 )
             )
         return plan
 
-    def _tags_match_deployment(self, resource_type: str, aws_id: str) -> bool:
+    def _tags_match_deployment(self, resource_type: str, aws_id: str) -> Optional[bool]:
         """Segunda condición del mecanismo de propiedad: los tags AWS reales deben
-        seguir apuntando a este deployment_id antes de borrar."""
+        seguir apuntando a este deployment_id antes de borrar.
+
+        Devuelve None (no False) si el recurso YA NO EXISTE -distinto de "sus
+        tags no coinciden": lo primero significa "nada que borrar, ya está
+        limpio" y lo segundo "podría ser de otro cliente/deployment, no
+        toques". Antes ambos casos devolvían False por igual y destroy()
+        reportaba un recurso YA BORRADO como '[Omitido] tags no coinciden ->
+        revisar manualmente', una falsa alarma confirmada en una destrucción
+        real (Security Group que AWS ya había limpiado en cascada junto con
+        la VPC)."""
         describers = {
             "vpc": (self.ec2.describe_vpcs, "VpcIds", "Vpcs"),
             "subnet-public": (self.ec2.describe_subnets, "SubnetIds", "Subnets"),
@@ -842,7 +915,7 @@ class AwsNetworkManager:
             "sg-workers": (self.ec2.describe_security_groups, "GroupIds", "SecurityGroups"),
             "vpce-s3": (self.ec2.describe_vpc_endpoints, "VpcEndpointIds", "VpcEndpoints"),
         }
-        if resource_type == "eip":
+        if resource_type in ("eip", "eip-gateway"):
             resp = self.ec2.describe_addresses(AllocationIds=[aws_id])
             items = resp.get("Addresses", [])
         else:
@@ -851,12 +924,14 @@ class AwsNetworkManager:
                 return False
             try:
                 resp = fn(**{id_kwarg: [aws_id]})
-            except ClientError:
+            except ClientError as exc:
+                if "NotFound" in exc.response.get("Error", {}).get("Code", ""):
+                    return None
                 return False
             items = resp.get(list_key, [])
 
         if not items:
-            return False
+            return None
         tags = {t["Key"]: t["Value"] for t in items[0].get("Tags", [])}
         return tags.get(TAG_DEPLOYMENT) == self.deployment_id and tags.get(TAG_MANAGED) == "true"
 
@@ -870,6 +945,18 @@ class AwsNetworkManager:
 
         if dry_run:
             for item in plan:
+                if (
+                    item.component == "eip-gateway"
+                    and (item.attributes or {}).get("persistente", True)
+                    and not force
+                ):
+                    report.kept_persistent.append(item)
+                    logger.info(
+                        "[DESTROY] (dry-run) EIP del Gateway se conservaría "
+                        "(gateway.dominio.eip_persistente=true): %s",
+                        item.aws_id,
+                    )
+                    continue
                 logger.info(
                     "[DESTROY] (dry-run) %s %s id=%s orden=%s managed_by_us=%s",
                     item.resource_type, item.component, item.aws_id, item.delete_order, item.managed_by_us,
@@ -881,11 +968,36 @@ class AwsNetworkManager:
         for item in plan:
             if not item.aws_id:
                 continue
+            if (
+                item.component == "eip-gateway"
+                and (item.attributes or {}).get("persistente", True)
+                and not force
+            ):
+                report.kept_persistent.append(item)
+                # state='adopted' (no 'deleted'): sigue existiendo en AWS a propósito.
+                # destroy_infra.py::scan_orphans() trata 'adopted' como "no es un
+                # huérfano" aunque el deployment padre ya esté 'destroyed'.
+                self.state.mark_resource_state(self.deployment_id, item.aws_id, "adopted")
+                logger.info(
+                    "[DESTROY] EIP del Gateway conservada (gateway.dominio.eip_persistente=true): %s",
+                    item.aws_id,
+                )
+                continue
             if not item.managed_by_us and not force:
                 report.skipped_not_ours.append(item)
                 logger.warning("[DESTROY] Omitido (managed_by_us=False): %s %s", item.component, item.aws_id)
                 continue
-            if not self._tags_match_deployment(item.resource_type, item.aws_id):
+            tags_match = self._tags_match_deployment(item.resource_type, item.aws_id)
+            if tags_match is None:
+                # Ya no existe en AWS -nada que borrar, no es una alarma-. Puede
+                # pasar por un borrado en cascada (p.ej. AWS limpia SGs propios
+                # de la VPC al borrarla) o un reintento tras un fallo parcial
+                # anterior que sí llegó a completarse del lado de AWS.
+                self.state.mark_resource_state(self.deployment_id, item.aws_id, "deleted")
+                report.succeeded.append(item)
+                logger.info("[DESTROY] %s (%s) ya no existía; nada que borrar.", item.component, item.aws_id)
+                continue
+            if not tags_match:
                 report.skipped_not_ours.append(item)
                 logger.warning(
                     "[DESTROY] Omitido: los tags AWS de %s (%s) no coinciden con deployment_id=%s. "
@@ -931,7 +1043,7 @@ class AwsNetworkManager:
         elif component == "nat":
             self.ec2.delete_nat_gateway(NatGatewayId=aws_id)
             self._wait("nat_gateway_deleted", NatGatewayIds=[aws_id], timeout=self.spec.nat_timeout_seconds)
-        elif component == "eip":
+        elif component in ("eip", "eip-gateway"):
             self.ec2.release_address(AllocationId=aws_id)
         elif component in ("rtb-public", "rtb-private"):
             rt = self.ec2.describe_route_tables(RouteTableIds=[aws_id])["RouteTables"][0]

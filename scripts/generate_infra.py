@@ -128,6 +128,9 @@ class ConfigValidator:
     # Tope de cordura para max_num_seqs: por encima, casi seguro es un error de
     # tecleo y el worker moriría por OOM en el arranque.
     MAX_NUM_SEQS_LIMITE = 1024
+    # FQDN simple, sin wildcard: usado tanto por 'gateway.dominio.disponibles[].nombre'
+    # como (indirectamente) por 'gateway.tls.dominio' una vez derivado.
+    _FQDN_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$", re.IGNORECASE)
 
     @classmethod
     def validate(cls, config: Dict[str, Any]) -> None:
@@ -284,6 +287,21 @@ class ConfigValidator:
         if not puertos or not isinstance(puertos, list) or not all(isinstance(p, int) for p in puertos):
             raise ConfigValidationError("'gateway.puertos_publicos' debe ser una lista de enteros.")
 
+        # El login único del clúster es SSO por cabecera de confianza: nginx
+        # inyecta la identidad ya verificada por Django hacia Open WebUI
+        # (WEBUI_AUTH_TRUSTED_EMAIL_HEADER), y Open WebUI confía en ella sin
+        # volver a pedir contraseña. Si el puerto 8080 quedara publicado
+        # directo (exponer_puertos_directos: true), cualquiera podría
+        # alcanzarlo saltándose nginx e inyectar esa cabecera él mismo,
+        # suplantando a cualquier usuario -ver docker_images/openwebui/README.md.
+        if gw.get("exponer_puertos_directos", False):
+            raise ConfigValidationError(
+                "'gateway.exponer_puertos_directos: true' es incompatible con el login único "
+                "por SSO (cabecera de confianza) del clúster: expondría el puerto 8080 de Open "
+                "WebUI sin pasar por nginx, permitiendo suplantar a cualquier usuario. Déjalo en "
+                "'false' (el default)."
+            )
+
         strategy = gw.get("load_balancing_strategy", "latency-based-routing")
         if strategy not in cls.ALLOWED_LB_STRATEGIES:
             raise ConfigValidationError(
@@ -295,19 +313,26 @@ class ConfigValidator:
         if not isinstance(tls, dict):
             raise ConfigValidationError("'gateway.tls' debe ser un mapa.")
         if tls.get("habilitado", False):
-            if tls.get("modo", "self-signed") not in cls.ALLOWED_TLS_MODOS:
+            modo_tls = tls.get("modo", "self-signed")
+            if modo_tls not in cls.ALLOWED_TLS_MODOS:
                 raise ConfigValidationError(
-                    f"'gateway.tls.modo' inválido: '{tls.get('modo')}'. Permitidos: {cls.ALLOWED_TLS_MODOS}"
+                    f"'gateway.tls.modo' inválido: '{modo_tls}'. Permitidos: {cls.ALLOWED_TLS_MODOS}"
                 )
-            if tls.get("modo", "self-signed") != "self-signed":
+            if modo_tls == "acm":
                 raise ConfigValidationError(
-                    f"'gateway.tls.modo: {tls.get('modo')}' no está implementado todavía "
-                    "(solo 'self-signed'); usa ese modo o pon 'tls.habilitado: false'."
+                    "'gateway.tls.modo: acm' no está implementado todavía (requiere un ALB); "
+                    "usa 'self-signed' o 'letsencrypt', o pon 'tls.habilitado: false'."
                 )
             if not tls.get("dominio"):
                 raise ConfigValidationError(
                     "'gateway.tls.dominio' es obligatorio cuando 'gateway.tls.habilitado: true' "
                     "(se usa como CN del certificado y server_name de nginx)."
+                )
+            if modo_tls == "letsencrypt" and not tls.get("email_acme"):
+                raise ConfigValidationError(
+                    "'gateway.tls.email_acme' es obligatorio con 'gateway.tls.modo: letsencrypt' "
+                    "(Let's Encrypt lo usa solo para avisos de caducidad). Se rellena solo si "
+                    "usas el catálogo 'gateway.dominio.disponibles[].email_acme' -ver Manual_Dominio_AWS.md."
                 )
 
         owui = gw.get("open_webui") or {}
@@ -320,6 +345,70 @@ class ConfigValidator:
                     f"'gateway.open_webui.{campo}' inválido: '{valor}'. "
                     f"Permitidos: {cls.ALLOWED_OPEN_WEBUI_OVERRIDES}"
                 )
+
+        cls._validate_dominio(config)
+
+    @classmethod
+    def _validate_dominio(cls, config: Dict[str, Any]) -> None:
+        """Valida 'gateway.dominio' (catálogo + selector) y sus dos reglas cruzadas.
+        No deriva nada aquí -la derivación hacia 'gateway.tls' ocurre en
+        load_config(), DESPUÉS de que esta validación pase, para que el resto del
+        código (nginx, SG, resources.ports, report) siga leyendo solo 'tls.*'."""
+        gw = config.get("gateway", {})
+        dominio_cfg = gw.get("dominio") or {}
+        if not isinstance(dominio_cfg, dict):
+            raise ConfigValidationError("'gateway.dominio' debe ser un mapa.")
+        if not dominio_cfg.get("habilitado", False):
+            return
+
+        disponibles = dominio_cfg.get("disponibles") or []
+        if not isinstance(disponibles, list) or not disponibles:
+            raise ConfigValidationError(
+                "'gateway.dominio.disponibles' debe tener al menos un dominio cuando "
+                "'gateway.dominio.habilitado: true' (ver Manual_Dominio_AWS.md)."
+            )
+
+        nombres = set()
+        for entrada in disponibles:
+            if not isinstance(entrada, dict) or not entrada.get("nombre"):
+                raise ConfigValidationError(
+                    "Cada entrada de 'gateway.dominio.disponibles' debe tener 'nombre'."
+                )
+            nombre = entrada["nombre"]
+            if not cls._FQDN_RE.match(nombre):
+                raise ConfigValidationError(
+                    f"'gateway.dominio.disponibles': '{nombre}' no es un nombre de dominio válido "
+                    "(sin wildcard, ej. 'ia.acme.com')."
+                )
+            email = entrada.get("email_acme")
+            if not email or "@" not in email:
+                raise ConfigValidationError(
+                    f"'gateway.dominio.disponibles': el dominio '{nombre}' necesita 'email_acme' "
+                    "válido (avisos de caducidad de Let's Encrypt)."
+                )
+            if nombre in nombres:
+                raise ConfigValidationError(
+                    f"'gateway.dominio.disponibles': el dominio '{nombre}' está repetido."
+                )
+            nombres.add(nombre)
+
+        seleccionado = dominio_cfg.get("seleccionado")
+        if not seleccionado or seleccionado not in nombres:
+            raise ConfigValidationError(
+                f"'gateway.dominio.seleccionado' ('{seleccionado}') debe coincidir con el 'nombre' "
+                f"de una entrada de 'gateway.dominio.disponibles': {sorted(nombres)}"
+            )
+
+        # Regla cruzada: HTTP-01 exige que Let's Encrypt pueda alcanzar el puerto 80
+        # desde cualquier IP -sus validadores no viven en un rango predecible.
+        red = config.get("red_y_aislamiento", {}) or {}
+        cidr_publico = red.get("cidr_permitido_gateway", "0.0.0.0/0")
+        if cidr_publico != "0.0.0.0/0":
+            raise ConfigValidationError(
+                "'gateway.dominio.habilitado: true' exige "
+                "'red_y_aislamiento.cidr_permitido_gateway: \"0.0.0.0/0\"': los validadores HTTP-01 "
+                "de Let's Encrypt no viven en un rango de IP predecible. Ver Manual_Dominio_AWS.md §8."
+            )
 
     @classmethod
     def _validate_base_de_datos(cls, config: Dict[str, Any]) -> None:
@@ -638,6 +727,48 @@ else
 fi
 """
 
+# Certificado real (modo 'letsencrypt'). Los certs viven en /opt/sooniverse,
+# FUERA de {remote_root}/docker_images/gateway -ese árbol se re-sincroniza en
+# cada 'sky launch' (file_mounts) y no es el sitio para depender de que un
+# rsync sin --delete no los borre.
+#
+# certbot corre en modo --standalone: en este punto del 'setup' Docker Compose
+# todavía no arrancó (eso pasa en el 'run', después), así que el puerto 80
+# está libre y certbot puede quedárselo un instante para el reto HTTP-01.
+#
+# Si el DNS todavía no resuelve al Gateway (el operador puede no haber creado
+# el registro A todavía, ver Manual_Dominio_AWS.md), certbot falla rápido y
+# cae al autofirmado de RESPALDO -nginx SIEMPRE debe poder arrancar. La fase
+# 'dominio' (después de que el Gateway esté arriba) reintenta la emisión real
+# vía webroot en cuanto el DNS resuelva, sin necesitar un redeploy completo.
+TLS_LETSENCRYPT_SETUP = """
+sudo mkdir -p /opt/sooniverse/letsencrypt /opt/sooniverse/certbot-www
+sudo chown -R "$(id -u):$(id -g)" /opt/sooniverse
+if [ ! -f /opt/sooniverse/letsencrypt/live/{tls_domain}/fullchain.pem ]; then
+    echo "===> TLS letsencrypt: intentando emitir el certificado para {tls_domain} (modo standalone)"
+    sudo docker run --rm -p 80:80 \\
+        -v /opt/sooniverse/letsencrypt:/etc/letsencrypt \\
+        certbot/certbot certonly --standalone --non-interactive --agree-tos \\
+        -m {email_acme} -d {tls_domain} --keep-until-expiring {staging_flag} \\
+        || echo "===> certbot standalone falló (¿el DNS todavía no resuelve a este Gateway?); se usará un autofirmado de respaldo."
+fi
+if [ ! -f /opt/sooniverse/letsencrypt/live/{tls_domain}/fullchain.pem ]; then
+    echo "===> TLS letsencrypt: generando autofirmado de RESPALDO ({tls_domain}) -se reemplaza solo en cuanto el DNS resuelva (fase 'dominio')"
+    mkdir -p /opt/sooniverse/letsencrypt/live/{tls_domain}
+    openssl req -x509 -nodes -days 825 -newkey rsa:2048 \\
+        -keyout /opt/sooniverse/letsencrypt/live/{tls_domain}/privkey.pem \\
+        -out /opt/sooniverse/letsencrypt/live/{tls_domain}/fullchain.pem \\
+        -subj "/CN={tls_domain}" \\
+        -addext "subjectAltName=DNS:{tls_domain}" 2>/dev/null || \\
+    openssl req -x509 -nodes -days 825 -newkey rsa:2048 \\
+        -keyout /opt/sooniverse/letsencrypt/live/{tls_domain}/privkey.pem \\
+        -out /opt/sooniverse/letsencrypt/live/{tls_domain}/fullchain.pem \\
+        -subj "/CN={tls_domain}"
+else
+    echo "===> TLS letsencrypt: certificado ya existe (real o de respaldo), se reutiliza."
+fi
+"""
+
 GATEWAY_RUN_SCRIPT = """
 set -euo pipefail
 cd {remote_root}
@@ -661,6 +792,23 @@ echo "===> [GATEWAY] Cliente ${{CLIENTE_ID}} (${{ENTORNO}})"
 # ---------------------------------------------------------------------------
 sed -i '/^CLIENTE_ID=/d;/^ENTORNO=/d' .env
 {{ echo "CLIENTE_ID=${{CLIENTE_ID}}"; echo "ENTORNO=${{ENTORNO}}"; }} >> .env
+
+# ---------------------------------------------------------------------------
+# 0.5 Con dominio propio (TLS_ENABLED=true + TLS_DOMAIN no vacío), fija
+#     ALLOWED_HOSTS/CSRF_TRUSTED_ORIGINS en .env -sin esto, con HTTPS real
+#     TODOS los POST del panel Django fallan por CSRF (Django 4+ exige el
+#     origen cualificado con esquema; CSRF_TRUSTED_ORIGINS viene vacío por
+#     defecto, ver .env.example). Mismo patrón sed+append que CLIENTE_ID/ENTORNO.
+# ---------------------------------------------------------------------------
+if [ "${{TLS_ENABLED}}" = "true" ] && [ -n "${{TLS_DOMAIN}}" ]; then
+    PUBLIC_IP_PRE="$(curl -s --max-time 5 ifconfig.me || true)"
+    sed -i '/^ALLOWED_HOSTS=/d;/^CSRF_TRUSTED_ORIGINS=/d;/^HTTPS_ACTIVO=/d' .env
+    {{
+        echo "ALLOWED_HOSTS=${{TLS_DOMAIN}},${{PUBLIC_IP_PRE}},localhost"
+        echo "CSRF_TRUSTED_ORIGINS=https://${{TLS_DOMAIN}}"
+        echo "HTTPS_ACTIVO=true"
+    }} >> .env
+fi
 
 # ---------------------------------------------------------------------------
 # 1. Inicialización opcional de la base de datos (flag AUTO_INIT_DB del contrato)
@@ -690,18 +838,24 @@ python3 scripts/render_litellm_config.py \
 #    GATEWAY_PUBLIC_URL se calcula aquí (la instancia se conoce su propia IP
 #    pública vía metadata/ifconfig.me) y se exporta para que Open WebUI genere
 #    enlaces absolutos correctos sin que el generador tenga que reinyectarla
-#    después de 'sky launch'.
+#    después de 'sky launch'. Con dominio propio, usa https://<dominio> en vez
+#    de la IP -incluso si el certificado real todavía no se emitió (el setup
+#    ya dejó un autofirmado de respaldo, así que https:// siempre responde).
 # ---------------------------------------------------------------------------
 PUBLIC_IP="$(curl -s --max-time 5 ifconfig.me || true)"
-export GATEWAY_PUBLIC_URL="http://${{PUBLIC_IP}}"
+if [ "${{TLS_ENABLED}}" = "true" ] && [ -n "${{TLS_DOMAIN}}" ]; then
+    export GATEWAY_PUBLIC_URL="https://${{TLS_DOMAIN}}"
+else
+    export GATEWAY_PUBLIC_URL="http://${{PUBLIC_IP}}"
+fi
 
 cd {remote_root}/docker_images/gateway
 sudo -E docker compose --env-file {remote_root}/.env up -d --build
 sudo docker compose ps
 
 echo "===> Gateway operativo (nginx como única puerta de entrada):"
-echo "     Chat / API / Panel -> http://${{PUBLIC_IP}}/  |  /v1/  |  /panel/"
-echo "     Salud de nginx      -> http://${{PUBLIC_IP}}/healthz"
+echo "     Chat / API / Panel -> ${{GATEWAY_PUBLIC_URL}}/  |  /v1/  |  /panel/"
+echo "     Salud de nginx      -> ${{GATEWAY_PUBLIC_URL}}/healthz"
 """
 
 
@@ -787,6 +941,12 @@ class TopologyBuilder:
             ),
             # Lista de endpoints vLLM en JSON; se rellena tras aprovisionar los workers.
             "WORKER_ENDPOINTS": json.dumps(worker_endpoints or []),
+            # Dominio propio (derivado de gateway.dominio en load_config()): usado por
+            # el 'run' script para construir GATEWAY_PUBLIC_URL con https y el dominio
+            # real en vez de 'http://<IP efímera>', y para escribir ALLOWED_HOSTS /
+            # CSRF_TRUSTED_ORIGINS en .env antes de levantar el stack.
+            "TLS_ENABLED": str(tls_enabled).lower(),
+            "TLS_DOMAIN": tls_cfg.get("dominio") or "",
         }
 
         file_mounts = {
@@ -799,17 +959,38 @@ class TopologyBuilder:
             f"{REMOTE_ROOT}/.env": "./.env",
         }
 
+        # Clave SSH que SkyPilot genera LOCALMENTE (máquina del operador/CI que
+        # corre 'sky launch', nunca en el propio Gateway) para el bastion hacia
+        # los workers -ver ssh_proxy_command en build_sky_workers_config(). El
+        # panel Django (que SÍ vive en el Gateway) la necesita para el botón
+        # "Reiniciar" de la card Pool vLLM (metrics/workers.py). Si todavía no
+        # existe (primer 'sky launch' de este clúster: SkyPilot la genera como
+        # efecto secundario de esa misma corrida, no antes), el botón queda
+        # deshabilitado hasta el siguiente '--only gateway'.
+        gateway_ssh_key = Path.home() / ".sky" / "generated" / "ssh-keys" / f"{self.gateway_cluster}.key"
+        if gateway_ssh_key.exists():
+            file_mounts[f"{REMOTE_ROOT}/.ssh_bastion_key"] = str(gateway_ssh_key)
+
         schema_dir = self.db.get("schema_dir", "database")
 
         tls_setup = ""
-        if tls_enabled and tls_cfg.get("modo", "self-signed") == "self-signed":
+        tls_modo = tls_cfg.get("modo", "self-signed")
+        if tls_enabled and tls_modo == "self-signed":
             tls_setup = TLS_SELF_SIGNED_SETUP.format(
                 remote_root=REMOTE_ROOT, tls_domain=tls_cfg.get("dominio") or "sooniverse.local",
+            )
+        elif tls_enabled and tls_modo == "letsencrypt":
+            dominio_cfg = self.gateway.get("dominio") or {}
+            tls_setup = TLS_LETSENCRYPT_SETUP.format(
+                remote_root=REMOTE_ROOT,
+                tls_domain=tls_cfg["dominio"],
+                email_acme=tls_cfg["email_acme"],
+                staging_flag="--staging" if dominio_cfg.get("staging", False) else "",
             )
         elif tls_enabled:
             tls_setup = (
                 f'echo "===> TLS modo \'{tls_cfg.get("modo")}\' no implementado todavía; '
-                'usa self-signed o deja tls.habilitado: false."'
+                'usa self-signed, letsencrypt, o deja tls.habilitado: false."'
             )
 
         return {
@@ -960,6 +1141,42 @@ HEADER = (
 )
 
 
+def _derive_tls_from_dominio(config: Dict[str, Any]) -> None:
+    """Con 'gateway.dominio.habilitado: true', deriva 'gateway.tls.*' a partir del
+    catálogo -así el resto del código (nginx, SG, resources.ports, el reporte
+    final) sigue leyendo solo 'tls.*' sin saber nada de 'dominio'. Se llama
+    DESPUÉS de ConfigValidator.validate(), que ya garantizó que el catálogo es
+    válido y que 'seleccionado' existe en 'disponibles'.
+
+    'tls.modo'/'tls.habilitado' NO se tratan como contradicción: el contrato de
+    ejemplo siempre trae 'tls: {habilitado: false, modo: self-signed, dominio:
+    null}' como placeholder explícito (no ausente), así que exigir borrarlo antes
+    de activar 'dominio' sería frágil. Solo se falla si 'tls.dominio' apunta a un
+    dominio DISTINTO del seleccionado -esa sí es una señal inequívoca de que el
+    operador quiso fijarlo a mano para otra cosa."""
+    gw = config.setdefault("gateway", {})
+    dominio_cfg = gw.get("dominio") or {}
+    if not dominio_cfg.get("habilitado", False):
+        return
+
+    seleccionado = dominio_cfg["seleccionado"]
+    entrada = next(e for e in dominio_cfg["disponibles"] if e["nombre"] == seleccionado)
+    email_acme = entrada["email_acme"]
+
+    tls = gw.setdefault("tls", {})
+    if tls.get("dominio") not in (None, seleccionado):
+        raise ConfigValidationError(
+            f"'gateway.tls.dominio' ('{tls.get('dominio')}') no coincide con "
+            f"'gateway.dominio.seleccionado' ('{seleccionado}'). Con "
+            "'gateway.dominio.habilitado: true' no fijes 'gateway.tls.dominio' a mano: se deriva solo."
+        )
+
+    tls["habilitado"] = True
+    tls["modo"] = "letsencrypt"
+    tls["dominio"] = seleccionado
+    tls["email_acme"] = email_acme
+
+
 def load_config(config_path: str) -> Dict[str, Any]:
     path = Path(config_path)
     if not path.exists():
@@ -969,6 +1186,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
         config = yaml.safe_load(f)
 
     ConfigValidator.validate(config)
+    _derive_tls_from_dominio(config)
     return config
 
 
@@ -992,6 +1210,7 @@ def build_network_spec_from_config(config: Dict[str, Any]) -> "Any":
     endpoints = red.get("vpc_endpoints") or {}
     subredes = red.get("subredes") or {}
     tls = gw.get("tls") or {}
+    dominio = gw.get("dominio") or {}
 
     worker_ports = sorted({wl["puerto"] for wl in config["workloads"]})
 
@@ -1014,6 +1233,9 @@ def build_network_spec_from_config(config: Dict[str, Any]) -> "Any":
         nat_timeout_seconds=nat.get("timeout_segundos", 300),
         extra_tags=red.get("tags_obligatorios") or {},
         aws_profile=red.get("aws_profile"),
+        gateway_eip=bool(dominio.get("habilitado", False)),
+        gateway_eip_persistent=bool(dominio.get("eip_persistente", True)),
+        gateway_domain=dominio.get("seleccionado") if dominio.get("habilitado") else None,
     )
 
 
@@ -1055,6 +1277,9 @@ def load_network_outputs_from_state(config: Dict[str, Any], state: Any, deployme
         attrs = row.get("attributes") or {}
         return attrs.get("name") or f"sooniverse-{cliente['id']}-{cliente['entorno']}-{fallback_suffix}"
 
+    eip_gw_row = first("eip-gateway")
+    eip_gw_attrs = (eip_gw_row or {}).get("attributes") or {}
+
     return NetworkOutputs(
         deployment_id=deployment_id,
         vpc_id=vpc_row["aws_id"],
@@ -1074,6 +1299,8 @@ def load_network_outputs_from_state(config: Dict[str, Any], state: Any, deployme
         sg_workers_id=sg_wk_row["aws_id"],
         sg_workers_name=resolved_name(sg_wk_row, "workers"),
         managed_by_us=True,
+        gateway_eip_allocation_id=(eip_gw_row or {}).get("aws_id"),
+        gateway_eip_public_ip=eip_gw_attrs.get("public_ip"),
     )
 
 
@@ -1258,6 +1485,25 @@ def plan_changes(current_snapshot: Optional[Dict[str, Any]], new_config: Dict[st
             )
         )
 
+    old_tls = old_gw.get("tls", {}) or {}
+    new_tls = new_gw.get("tls", {}) or {}
+    old_dominio = old_gw.get("dominio", {}) or {}
+    new_dominio = new_gw.get("dominio", {}) or {}
+    if old_tls != new_tls or old_dominio != new_dominio:
+        # No es 'recreate-cluster' (no toca clústeres SkyPilot) ni 'requires-destroy'
+        # (no toca vpc_cidr/azs/nat), pero SÍ exige re-correr la fase 'network' -el
+        # diff de SG que abre/revoca el 443 vive ahí (aws_network.py::
+        # _sync_ingress_cidr_rules)- y luego 'gateway'/'dominio' para que nginx y el
+        # certificado reflejen el cambio. Esa guía va en el campo, no en un
+        # atributo aparte: ChangePlan no tiene 'notes', y summary() solo imprime
+        # FieldChange.__str__().
+        plan.changes.append(
+            FieldChange(
+                "gateway.tls/gateway.dominio (re-correr --only network, luego gateway+dominio)",
+                {"tls": old_tls, "dominio": old_dominio}, {"tls": new_tls, "dominio": new_dominio}, IN_PLACE,
+            )
+        )
+
     old_workloads = {wl["id"]: wl for wl in current_snapshot.get("workloads", []) or []}
     new_workloads = {wl["id"]: wl for wl in new_config.get("workloads", []) or []}
 
@@ -1351,9 +1597,240 @@ def _gateway_public_ip(cluster: str) -> Optional[str]:
         return None
 
 
+class GatewayEipAssociationError(RuntimeError):
+    """Fallo asociando la Elastic IP del Gateway a la instancia recién lanzada."""
+
+
+def _associate_gateway_eip(
+    cluster: str, allocation_id: str, region: str, aws_profile: Optional[str] = None
+) -> str:
+    """Asocia la Elastic IP reservada en la fase 'network' (gateway.dominio.
+    habilitado: true) a la instancia EC2 del Gateway recién lanzada, y reconcilia
+    el estado local de SkyPilot -asociar una EIP le cambia la IP pública de la
+    instancia, y SkyPilot sigue intentando conectarse por SSH con la IP vieja
+    hasta que se reconcilia, lo que 'sky status --refresh' NO logra por sí solo
+    (falla el chequeo de salud contra la IP vieja y deja el clúster en estado
+    'INIT' en vez de detectar la nueva IP -comprobado empíricamente). 'sky start'
+    sí reconoce y adopta la IP nueva del proveedor. Verifica con 'sky exec <gw>
+    true' antes de devolver, porque TODAS las fases siguientes (endpoints,
+    capabilities, capacidad, verify) dependen de 'sky exec' contra este mismo
+    Gateway."""
+    import boto3
+
+    session = boto3.Session(profile_name=aws_profile) if aws_profile else boto3.Session()
+    ec2 = session.client("ec2", region_name=region)
+
+    instance_id = None
+    for tag_key in ("ray-cluster-name", "skypilot-cluster-name"):
+        resp = ec2.describe_instances(
+            Filters=[
+                # SkyPilot etiqueta la instancia como '<cluster>-<sufijo hash>'
+                # (p.ej. 'sooniverse-acme-prod-gw-97e585e4'), nunca el nombre
+                # exacto de clúster -de ahí el comodín.
+                {"Name": f"tag:{tag_key}", "Values": [cluster, f"{cluster}-*"]},
+                {"Name": "instance-state-name", "Values": ["running"]},
+            ]
+        )
+        for reservation in resp.get("Reservations", []):
+            for instance in reservation.get("Instances", []):
+                instance_id = instance.get("InstanceId")
+                break
+            if instance_id:
+                break
+        if instance_id:
+            break
+
+    if not instance_id:
+        raise GatewayEipAssociationError(
+            f"No se encontró la instancia EC2 del clúster '{cluster}' para asociar la Elastic IP "
+            f"del Gateway ({allocation_id}). El despliegue continuaría con una IP efímera."
+        )
+
+    ec2.associate_address(AllocationId=allocation_id, InstanceId=instance_id, AllowReassociation=True)
+
+    sky = _sky_binary()
+    if sky:
+        restart = subprocess.run(
+            [sky, "start", "-y", cluster], capture_output=True, text=True, timeout=300
+        )
+        if restart.returncode != 0:
+            raise GatewayEipAssociationError(
+                f"La Elastic IP se asoció a {instance_id}, pero 'sky start {cluster}' (para que "
+                f"SkyPilot reconozca la IP nueva) falló: {restart.stderr.strip() or restart.stdout.strip()}"
+            )
+
+    new_ip = _gateway_public_ip(cluster)
+    if not new_ip:
+        raise GatewayEipAssociationError(
+            f"La Elastic IP se asoció a {instance_id}, pero 'sky status --ip {cluster}' no devolvió "
+            "ninguna IP tras reconciliar con 'sky start'."
+        )
+
+    if sky:
+        # 'sky start' sincroniza sus file_mounts de un solo archivo (.env,
+        # config_global.yaml, la clave SSH del bastion) escribiéndolos como
+        # archivo real en vez de symlink -a diferencia de 'sky launch' sobre un
+        # clúster ya arriba, que sí symlinkea-. Un 'sky launch' posterior sobre
+        # este mismo clúster falla entonces con "Failed mounting because path
+        # exists". Se limpian aquí los remanentes para dejar el símlink limpio
+        # de cara al siguiente 'sky launch' (comprobado empíricamente).
+        subprocess.run(
+            [
+                sky, "exec", cluster,
+                "for f in config_global.yaml .ssh_bastion_key; do "
+                "p=/home/ubuntu/sooniverse_infra/$f; "
+                "[ -f \"$p\" ] && [ ! -L \"$p\" ] && rm -f \"$p\"; "
+                "done; true",
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        # '.env' no se deja solo borrado: fases posteriores en ESTA MISMA
+        # corrida (sync_endpoints.py -> 'docker compose --env-file .env
+        # restart litellm') lo necesitan presente YA, no en el próximo 'sky
+        # launch'. Se reescribe con el contenido local actual -nunca con la
+        # caché de un 'sky launch' anterior, que puede estar desactualizada.
+        env_path = REPO_ROOT / ".env"
+        if env_path.exists():
+            payload = env_path.read_text(encoding="utf-8")
+            remote_env = "/home/ubuntu/sooniverse_infra/.env"
+            script = (
+                f"rm -f {remote_env} && cat > {remote_env} <<'SOONIVERSE_ENV_EOF'\n"
+                f"{payload}\nSOONIVERSE_ENV_EOF\n"
+            )
+            subprocess.run([sky, "exec", cluster, script], capture_output=True, text=True, timeout=120)
+
+    sky = _sky_binary()
+    if sky:
+        check = subprocess.run(
+            [sky, "exec", cluster, "true"], capture_output=True, text=True, timeout=120
+        )
+        if check.returncode != 0:
+            raise GatewayEipAssociationError(
+                f"La Elastic IP se asoció ({new_ip}) pero 'sky exec {cluster} true' falló tras el "
+                f"refresh: {check.stderr.strip() or check.stdout.strip()}"
+            )
+
+    return new_ip
+
+
+def _resolve_a_record(domain: str) -> Optional[str]:
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(domain, None, family=socket.AF_INET)
+        return infos[0][4][0] if infos else None
+    except socket.gaierror:
+        return None
+
+
+def run_dominio_phase(
+    config: Dict[str, Any],
+    gateway_cluster: str,
+    gateway_ip: str,
+    state: Optional[Any] = None,
+    deployment_id: Optional[str] = None,
+) -> None:
+    """Fase 'dominio': verifica que el registro DNS A del dominio elegido resuelva
+    a la IP del Gateway, y si es así, emite/renueva el certificado Let's Encrypt
+    (certbot, modo webroot -nginx ya está arriba desde la fase 'gateway') y
+    recarga nginx. Best-effort en TODO: nunca aborta el despliegue, solo avisa
+    -igual que 'endpoints'/'capabilities'/'capacidad'/'verify'."""
+    dominio_cfg = (config.get("gateway", {}).get("dominio") or {})
+    dominio = dominio_cfg["seleccionado"]
+    espera = int(dominio_cfg.get("esperar_dns_segundos", 300))
+
+    resuelto = _resolve_a_record(dominio)
+    t0 = time.monotonic()
+    while resuelto != gateway_ip and (time.monotonic() - t0) < espera:
+        time.sleep(15)
+        resuelto = _resolve_a_record(dominio)
+
+    if resuelto != gateway_ip:
+        print(
+            f"[WARNING] '{dominio}' resuelve a '{resuelto or '(sin resolver)'}', no a la IP del Gateway "
+            f"({gateway_ip}). No se emite el certificado en esta corrida -el despliegue sigue en HTTP. "
+            "Crea/corrige el registro A (ver Manual_Dominio_AWS.md) y vuelve a correr: "
+            "python scripts/generate_infra.py --run --only dominio"
+        )
+        if state and deployment_id:
+            state.log_event(deployment_id, "dominio", "verify_dns", "warning",
+                             message=f"{dominio} -> {resuelto or '(sin resolver)'}, esperado {gateway_ip}")
+        return
+
+    print(f"[DOMINIO] '{dominio}' resuelve correctamente a {gateway_ip}. Emitiendo/renovando certificado...")
+
+    tls_cfg = config.get("gateway", {}).get("tls") or {}
+    email = tls_cfg.get("email_acme") or next(
+        (e["email_acme"] for e in dominio_cfg.get("disponibles", []) if e["nombre"] == dominio), None
+    )
+    if not email:
+        print(f"[WARNING] No hay 'email_acme' para '{dominio}'; se omite la emisión del certificado.")
+        return
+
+    staging_flag = "--staging" if dominio_cfg.get("staging", False) else ""
+    # Si el DNS no resolvía todavía en el arranque, el setup del Gateway dejó un
+    # autofirmado de RESPALDO exactamente en live/{dominio} (ver
+    # TLS_LETSENCRYPT_SETUP), y a veces junto a un renewal/{dominio}.conf VACÍO
+    # (0 bytes -no es un lineage válido de certbot, solo un residuo de un
+    # intento fallido anterior). certbot detecta cualquiera de los dos como
+    # "ya existe" y, según el caso, o se niega a emitir ("live directory
+    # exists") o crea un lineage duplicado con sufijo '-0001' en vez de
+    # reutilizar el nombre -comprobado empíricamente en ambos casos. 'test -s'
+    # (existe Y pesa >0) distingue un renewal.conf real de uno vacío; se limpia
+    # también cualquier '-0001' que haya quedado de un intento previo así.
+    limpiar_respaldo = (
+        f"if sudo test -d /opt/sooniverse/letsencrypt/live/{dominio} "
+        f"&& ! sudo test -s /opt/sooniverse/letsencrypt/renewal/{dominio}.conf; then "
+        f"sudo rm -rf /opt/sooniverse/letsencrypt/live/{dominio} "
+        f"/opt/sooniverse/letsencrypt/archive/{dominio} "
+        f"/opt/sooniverse/letsencrypt/renewal/{dominio}.conf; fi; "
+        f"sudo rm -rf /opt/sooniverse/letsencrypt/live/{dominio}-0001 "
+        f"/opt/sooniverse/letsencrypt/archive/{dominio}-0001 "
+        f"/opt/sooniverse/letsencrypt/renewal/{dominio}-0001.conf"
+    )
+    remote_cmd = (
+        f"{limpiar_respaldo} "
+        "&& sudo docker run --rm "
+        "-v /opt/sooniverse/letsencrypt:/etc/letsencrypt "
+        "-v /opt/sooniverse/certbot-www:/var/www/certbot "
+        "certbot/certbot certonly --webroot -w /var/www/certbot --non-interactive --agree-tos "
+        f"--cert-name {dominio} -m {email} -d {dominio} --keep-until-expiring {staging_flag} "
+        f"&& cd {REMOTE_ROOT}/docker_images/gateway "
+        "&& sudo docker compose exec -T proxy nginx -s reload"
+    )
+
+    sky = _sky_binary()
+    if not sky:
+        print("[WARNING] 'sky' no está en el PATH; no se pudo emitir el certificado.")
+        return
+
+    try:
+        result = subprocess.run(
+            [sky, "exec", gateway_cluster, remote_cmd], capture_output=True, text=True, timeout=180
+        )
+    except subprocess.TimeoutExpired:
+        print("[WARNING] 'sky exec' del certbot excedió el tiempo de espera (180s).")
+        if state and deployment_id:
+            state.log_event(deployment_id, "dominio", "certbot", "warning", message="timeout")
+        return
+
+    if result.returncode != 0:
+        detalle = (result.stderr.strip() or result.stdout.strip())[-500:]
+        print(f"[WARNING] certbot falló (código {result.returncode}): {detalle}")
+        if state and deployment_id:
+            state.log_event(deployment_id, "dominio", "certbot", "warning", message=detalle)
+    else:
+        print(f"[OK] Certificado Let's Encrypt emitido/renovado y nginx recargado para '{dominio}'.")
+        if state and deployment_id:
+            state.log_event(deployment_id, "dominio", "certbot", "ok", message=dominio)
+
+
 # 'capacidad' va después de 'capabilities' (el modelo ya está caliente, el pool
 # sincronizado y las capacidades efectivas aplicadas) y antes de 'verify'.
-PHASE_ORDER = ["network", "gateway", "workers", "endpoints", "capabilities", "capacidad", "verify"]
+# 'dominio' va justo después de 'gateway' (necesita el Gateway ya levantado y
+# con su Elastic IP asociada -sky exec funcionando-) y antes de 'workers' (no
+# depende de ellos ni ellos de él).
+PHASE_ORDER = ["network", "gateway", "dominio", "workers", "endpoints", "capabilities", "capacidad", "verify"]
 
 # Compatibilidad con los valores antiguos de --only (antes de la Fase 3).
 _ONLY_LEGACY_ALIASES = {"all": set(PHASE_ORDER), "gateway": {"gateway"}, "workers": {"workers"}}
@@ -1531,6 +2008,12 @@ def deploy(
                 print(f"[RED] VPC={network_outputs.vpc_id} ({network_outputs.vpc_name}) "
                       f"SG-gateway={network_outputs.sg_gateway_id} SG-workers={network_outputs.sg_workers_id} "
                       f"({time.monotonic() - t0:.1f}s)")
+                if network_outputs.gateway_eip_public_ip:
+                    print(
+                        f"[RED] Elastic IP del Gateway reservada: {network_outputs.gateway_eip_public_ip} "
+                        f"({network_outputs.gateway_eip_allocation_id}) -crea el registro DNS A con esta "
+                        "IP antes de continuar. Ver Manual_Dominio_AWS.md."
+                    )
                 builder.apply_network_outputs(network_outputs)
 
                 # El render de manifiestos depende de los IDs reales de red: regenerarlos ahora.
@@ -1574,9 +2057,41 @@ def deploy(
             state.log_event(deployment_id, "gateway", "sky_launch", "ok",
                              message=builder.gateway_cluster, duration_ms=int((time.monotonic() - t0) * 1000))
 
+        net_outputs = getattr(builder, "_network_outputs", None)
+        eip_alloc_id = getattr(net_outputs, "gateway_eip_allocation_id", None)
+        if eip_alloc_id:
+            try:
+                associated_ip = _associate_gateway_eip(
+                    builder.gateway_cluster, eip_alloc_id, red["region"], red.get("aws_profile"),
+                )
+                print(f"[GATEWAY] Elastic IP asociada: {associated_ip}")
+                if state and deployment_id:
+                    state.log_event(deployment_id, "gateway", "associate_eip", "ok", message=associated_ip)
+            except GatewayEipAssociationError as exc:
+                if state and deployment_id:
+                    state.log_event(deployment_id, "gateway", "associate_eip", "error", message=str(exc))
+                raise
+
     if artefactos.get("gateway") and not dry_run:
         gateway_ip = _gateway_public_ip(builder.gateway_cluster)
         print(f"[INFO] IP pública del Gateway: {gateway_ip or 'no disponible'}")
+
+    # --- FASE: dominio (DNS + certbot; best-effort, nunca aborta) ---------------
+    dominio_cfg_top = (config.get("gateway", {}).get("dominio") or {})
+    if "dominio" in phases and dry_run:
+        if dominio_cfg_top.get("habilitado", False):
+            print(f"\n--- [DOMINIO] --dry-run: se verificaría el DNS de "
+                  f"'{dominio_cfg_top.get('seleccionado')}' y se emitiría/renovaría el certificado ---")
+        else:
+            print("\n--- [DOMINIO] --dry-run: 'gateway.dominio.habilitado: false' -> [SKIP] ---")
+    elif "dominio" in phases:
+        print("\n--- [DOMINIO] Dominio propio + certificado (Let's Encrypt) ---")
+        if not dominio_cfg_top.get("habilitado", False):
+            print("[SKIP] 'gateway.dominio.habilitado: false' -> IP efímera, HTTP.")
+        elif not gateway_ip:
+            print("[WARNING] Sin IP del Gateway disponible (¿corriste antes la fase 'gateway'?); se omite.")
+        else:
+            run_dominio_phase(config, builder.gateway_cluster, gateway_ip, state, deployment_id)
 
     # --- FASE: workers (regenera el bastion con la IP real del gateway) --------
     if "workers" in phases and dry_run:
@@ -1719,12 +2234,18 @@ def deploy(
 
     if gateway_ip:
         gw_cfg_final = config.get("gateway", {})
-        scheme = "https" if (gw_cfg_final.get("tls", {}) or {}).get("habilitado") else "http"
+        tls_cfg_final = gw_cfg_final.get("tls", {}) or {}
+        scheme = "https" if tls_cfg_final.get("habilitado") else "http"
+        # Con dominio propio, el host de las URLs es el dominio (el único con el
+        # que el certificado es válido) -no la IP, aunque sea la misma Elastic IP.
+        host = tls_cfg_final.get("dominio") if scheme == "https" else gateway_ip
         print("\n" + "=" * 74)
-        print(f" Chat (Open WebUI) : {scheme}://{gateway_ip}/")
-        print(f" API (LiteLLM)     : {scheme}://{gateway_ip}/v1")
-        print(f" Panel (Django)    : {scheme}://{gateway_ip}/panel/")
-        print(f" Salud (nginx)     : {scheme}://{gateway_ip}/healthz")
+        print(f" Chat (Open WebUI) : {scheme}://{host}/")
+        print(f" API (LiteLLM)     : {scheme}://{host}/v1")
+        print(f" Panel (Django)    : {scheme}://{host}/panel/")
+        print(f" Salud (nginx)     : {scheme}://{host}/healthz")
+        if scheme == "https":
+            print(f" Acceso directo por IP (sin certificado válido): http://{gateway_ip}/")
         if gw_cfg_final.get("exponer_puertos_directos"):
             print(" [exponer_puertos_directos=true] También alcanzables: "
                   f":4000 (LiteLLM), :8080 (Open WebUI), :8000 (Django)")

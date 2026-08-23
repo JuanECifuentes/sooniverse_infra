@@ -63,3 +63,30 @@ desde fuente reutiliza esta misma carpeta: cambiar el `FROM` por un `FROM node:.
 El volumen `webui_data:/app/backend/data` se mantiene: ficheros subidos por los usuarios y el vector
 store local (Chroma) de RAG siguen en disco, atados a la instancia del gateway. Solo lo relacional
 (usuarios, chats, modelos, configuración) vive en `sooniverse.*`. Ver `docs/04_DESTRUCCION.md`.
+
+## Login único del clúster (SSO por cabecera de confianza)
+
+Desde esta iteración, Django es la ÚNICA pantalla de login del clúster (panel + chat). Open WebUI
+**nunca** muestra su propio formulario: nginx protege `/` con `auth_request` contra
+`GET /metrics/auth-check/` de Django; si hay sesión activa, inyecta `X-Sooniverse-Email` /
+`X-Sooniverse-Name` en la petición a Open WebUI, que las lee vía `WEBUI_AUTH_TRUSTED_EMAIL_HEADER` /
+`WEBUI_AUTH_TRUSTED_NAME_HEADER` (soporte nativo de Open WebUI desde antes de esta iteración —
+confirmado contra el código fuente del tag fijado en el `Dockerfile`, `backend/open_webui/routers/
+auths.py::signin`, sin necesidad de ningún patch). El frontend detecta el flag
+`config.features.auth_trusted_header` y llama a `signInHandler()` automáticamente al cargar — el
+usuario nunca ve una pantalla de login de Open WebUI.
+
+**Efecto colateral importante, verificado contra el código fuente:** con `WEBUI_AUTH_TRUSTED_EMAIL_
+HEADER` activo, `/api/v1/auths/signin` **rechaza incondicionalmente** cualquier intento sin esa
+cabecera (incluido email+password), y `/api/v1/auths/signup` queda bloqueado por
+`ENABLE_LOGIN_FORM: "False"`. Por eso `overlay/sooniverse/bootstrap_models.py::authenticate()` NO usa
+la cuenta técnica por contraseña en este modo: se autentica con la MISMA cabecera de confianza,
+llamando a `/signin` con `X-Sooniverse-Email: <OPENWEBUI_BOOTSTRAP_EMAIL>` — seguro porque ese script
+corre dentro de la red interna de docker-compose, el mismo perímetro de confianza que nginx (el
+puerto 8080 de `open-webui` nunca está publicado al host; `scripts/generate_infra.py` rechaza el
+contrato si `gateway.exponer_puertos_directos: true` intentara publicarlo).
+
+Un usuario nuevo autenticado vía SSO se auto-aprovisiona en Open WebUI (mismo mecanismo que un signup
+normal) con `DEFAULT_USER_ROLE: "pending"` — necesita que un admin de Open WebUI lo promueva a `user`
+antes de poder chatear, salvo que sea el primer usuario de la instancia (asciende a `admin`
+automáticamente; en la práctica ese primer puesto ya lo ocupa la cuenta técnica de bootstrap).

@@ -9,16 +9,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
+from django.conf import settings
 from django.db import connection, transaction
 from django.db.models import Count, Max, Q, Sum
 from django.utils import timezone
 
+from . import workers as workers_mod
 from .litellm_client import LiteLLMClient, LiteLLMError
-from .models import ApiKeyAudit, ApiKeyRegistry, TokenUsageEvent, TokenUsageRollup, WorkerNode
+from .models import ApiKeyAudit, ApiKeyRegistry, TokenUsageEvent, TokenUsageRollup, WorkerAction, WorkerNode
+from .workers import WorkerActionError
 
 logger = logging.getLogger(__name__)
 
@@ -443,7 +446,7 @@ def resumen_api_keys(solo_activas: bool = False) -> List[Dict[str, Any]]:
         ).values(
             "id", "key_alias", "key_prefix", "cliente_id", "entorno", "is_active",
             "owner_email", "descripcion", "max_budget_usd", "rpm_limit", "tpm_limit",
-            "created_at", "deactivated_at", "expires_at",
+            "created_at", "deactivated_at", "expires_at", "origen",
             "consumo_total", "consumo_prompt", "consumo_completion",
             "gasto", "peticiones", "ultimo_uso",
         )
@@ -451,24 +454,124 @@ def resumen_api_keys(solo_activas: bool = False) -> List[Dict[str, Any]]:
 
 
 def estado_pool() -> Dict[str, Any]:
-    """Salud del pool de workers vLLM detrás del balanceador."""
-    nodos = list(WorkerNode.objects.all())
+    """Salud del pool de workers vLLM detrás del balanceador.
+
+    Filtra por el cliente/entorno de ESTE panel (prefijo del nombre de clúster,
+    igual que `scripts/sync_endpoints.py::cluster_names`) -sin esto, filas de
+    despliegues ya destruidos de OTRO cliente/entorno se pintaban como nodos
+    vivos: `worker_node` nunca borra filas, solo las marca `is_healthy=false`.
+
+    `estado_operativo` se RECALCULA aquí en cada carga en vez de confiar
+    ciegamente en lo que dejó la última corrida de `sync_endpoints.py`: si
+    nadie ha vuelto a sincronizar en `2 x METRICS_REFRESH_INTERVAL`, el dato es
+    viejo aunque diga 'sano' -eso es justo lo que 'desincronizado' debe
+    capturar. La excepción es 'apagado' (parada deliberada desde el panel, ver
+    `workers.py::apagar_worker`): esa sí es una lectura fresca y correcta -un
+    nodo apagado a propósito no reaparece en ninguna sincronización futura
+    hasta que se arranque, así que "antiguo" y "apagado" son cosas distintas.
+    """
+    prefix = f"sooniverse-{settings.CLIENTE_ID}-{settings.ENTORNO}-"
+    nodos = list(WorkerNode.objects.filter(cluster_name__startswith=prefix))
     cliente = LiteLLMClient()
+
+    litellm_ok = cliente.is_reachable()
+    healthy_endpoints: set = set()
+    unhealthy_endpoints: set = set()
+    if litellm_ok:
+        try:
+            health = cliente.health()
+            healthy_endpoints = {e.get("api_base") for e in health.get("healthy_endpoints", [])}
+            unhealthy_endpoints = {e.get("api_base") for e in health.get("unhealthy_endpoints", [])}
+        except LiteLLMError as exc:
+            logger.warning("No se pudo leer /health de LiteLLM: %s", exc)
+
+    umbral_frescura = timedelta(seconds=2 * settings.METRICS_REFRESH_INTERVAL)
+    ahora = timezone.now()
+
+    for nodo in nodos:
+        if nodo.estado_operativo == "apagado":
+            continue
+        obsoleto = not nodo.last_seen_at or (ahora - nodo.last_seen_at) > umbral_frescura
+        if obsoleto:
+            nodo.estado_operativo = "desincronizado"
+        elif not nodo.is_healthy or nodo.endpoint in unhealthy_endpoints:
+            nodo.estado_operativo = "degradado"
+        elif litellm_ok and nodo.endpoint not in healthy_endpoints:
+            # LiteLLM alcanzable pero no reconoce este endpoint en absoluto
+            # -nunca se sincronizó litellm_config.yaml con él, o se retiró.
+            nodo.estado_operativo = "degradado"
+        else:
+            nodo.estado_operativo = "sano"
 
     estado = {
         "nodos": nodos,
         "nodos_totales": len(nodos),
-        "nodos_sanos": sum(1 for n in nodos if n.is_healthy),
-        "litellm_ok": cliente.is_reachable(),
+        "nodos_sanos": sum(1 for n in nodos if n.estado_operativo == "sano"),
+        "litellm_ok": litellm_ok,
         "modelos": [],
+        # Degradación explícita: si falta la clave SSH o boto3/el permiso IAM,
+        # los botones correspondientes se deshabilitan en la plantilla en vez
+        # de fallar al pulsarlos.
+        "restart_disponible": workers_mod.restart_disponible(),
+        "ec2_disponible": workers_mod.ec2_disponible(),
     }
-    if estado["litellm_ok"]:
+    if litellm_ok:
         try:
             estado["modelos"] = cliente.models()
         except LiteLLMError as exc:
             logger.warning("No se pudieron listar los modelos de LiteLLM: %s", exc)
 
     return estado
+
+
+def _worker_audit(worker_node: Optional[WorkerNode], accion: str, estado: str, actor: str,
+                   mensaje: str = "", ip: Optional[str] = None) -> WorkerAction:
+    return WorkerAction.objects.create(
+        worker_node=worker_node,
+        accion=accion,
+        estado=estado,
+        actor=actor or "system",
+        source_ip=ip,
+        mensaje=mensaje or None,
+        created_at=timezone.now(),
+        finished_at=timezone.now() if estado != "solicitada" else None,
+    )
+
+
+# Estado que deja cada acción exitosa en 'sano en tránsito': el siguiente
+# sync_endpoints.py lo corrige a 'sano'/'degradado'/'desincronizado' según lo
+# que de verdad encuentre. 'health' no muta nada -es de solo diagnóstico.
+_ESTADO_TRAS_ACCION = {"restart": "reiniciando", "stop": "apagado", "start": "reiniciando"}
+
+
+def ejecutar_accion_worker(worker: WorkerNode, accion: str, actor: str, ip: Optional[str] = None) -> str:
+    """Orquesta una acción sobre un worker: registra la auditoría, delega la
+    mecánica a `workers.py`, y actualiza `estado_operativo` en éxito. Deja que
+    `WorkerActionError` se propague -la vista decide el mensaje al usuario."""
+    if accion not in ("health", "restart", "stop", "start"):
+        raise WorkerActionError(f"Acción desconocida: {accion}")
+
+    try:
+        if accion == "health":
+            mensaje = workers_mod.comprobar_salud(worker)
+        elif accion == "restart":
+            mensaje = workers_mod.reiniciar_vllm(worker)
+        elif accion == "stop":
+            mensaje = workers_mod.apagar_worker(worker, settings.AWS_REGION)
+        else:
+            mensaje = workers_mod.arrancar_worker(worker, settings.AWS_REGION)
+    except WorkerActionError as exc:
+        _worker_audit(worker, accion, "error", actor, str(exc), ip)
+        raise
+
+    _worker_audit(worker, accion, "ok", actor, mensaje, ip)
+
+    nuevo_estado = _ESTADO_TRAS_ACCION.get(accion)
+    if nuevo_estado:
+        worker.estado_operativo = nuevo_estado
+        worker.save(update_fields=["estado_operativo"])
+
+    return mensaje
 
 
 def refrescar_metricas(since_hours: int = 48, since_days: int = 90) -> Dict[str, int]:
@@ -497,11 +600,17 @@ def refrescar_metricas(since_hours: int = 48, since_days: int = 90) -> Dict[str,
         agregados = cur.fetchone()[0]
         cur.execute("SELECT sooniverse.refresh_usage_hourly(%s, %s)", [horas_dias, zona])
         horarios = cur.fetchone()[0]
+        # Inventario único de API Keys (006_workers_y_login.sql): mantiene el
+        # espejo de solo lectura de las keys de Open WebUI al día. Fail-soft
+        # en la propia función SQL si Open WebUI aún no migró su esquema.
+        cur.execute("SELECT sooniverse.ingest_openwebui_apikeys()")
+        keys_openwebui = cur.fetchone()[0]
 
     return {
         "eventos_ingeridos": ingeridos,
         "filas_agregadas": agregados,
         "buckets_horarios": horarios,
+        "keys_openwebui": keys_openwebui,
     }
 
 
@@ -531,6 +640,7 @@ def crear_api_key(
     rpm_limit: Optional[int] = None,
     tpm_limit: Optional[int] = None,
     duration: Optional[str] = None,
+    expires_at: Optional[date] = None,
     actor: str = "system",
     ip: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -570,7 +680,13 @@ def crear_api_key(
         allowed_models=modelos or [],
         created_at=ahora,
         updated_at=ahora,
-        expires_at=None,
+        # Antes siempre quedaba en NULL aunque el operador eligiera una
+        # vigencia en el formulario -'duration' solo viajaba a LiteLLM (que
+        # calcula su propio vencimiento interno), nunca se reflejaba aquí.
+        expires_at=(
+            timezone.make_aware(datetime.combine(expires_at, datetime.min.time()))
+            if expires_at else None
+        ),
     )
 
     _audit(registro, "created", actor, {
@@ -584,9 +700,19 @@ def crear_api_key(
     return {"registro": registro, "key_plaintext": key_plaintext}
 
 
+class ApiKeyNoGestionableError(Exception):
+    """Se intentó desactivar/reactivar una key que no es de LiteLLM (p.ej. un
+    espejo de solo lectura de Open WebUI, ver ApiKeyRegistry.gestionable)."""
+
+
 @transaction.atomic
 def desactivar_api_key(key_id: int, actor: str = "system", ip: Optional[str] = None) -> ApiKeyRegistry:
     registro = ApiKeyRegistry.objects.get(pk=key_id)
+    if not registro.gestionable:
+        raise ApiKeyNoGestionableError(
+            f"La API Key '{registro.key_alias}' es un espejo de Open WebUI: no se puede "
+            "desactivar desde el panel."
+        )
 
     if registro.litellm_token_hash:
         try:
@@ -607,6 +733,11 @@ def desactivar_api_key(key_id: int, actor: str = "system", ip: Optional[str] = N
 @transaction.atomic
 def reactivar_api_key(key_id: int, actor: str = "system", ip: Optional[str] = None) -> ApiKeyRegistry:
     registro = ApiKeyRegistry.objects.get(pk=key_id)
+    if not registro.gestionable:
+        raise ApiKeyNoGestionableError(
+            f"La API Key '{registro.key_alias}' es un espejo de Open WebUI: no se puede "
+            "reactivar desde el panel."
+        )
 
     if registro.litellm_token_hash:
         try:
