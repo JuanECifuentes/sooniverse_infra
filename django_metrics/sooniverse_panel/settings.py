@@ -174,6 +174,17 @@ LITELLM_BASE_URL = _env("LITELLM_BASE_URL", "http://litellm:4000").rstrip("/")
 LITELLM_MASTER_KEY = _env("LITELLM_MASTER_KEY", "")
 LITELLM_TIMEOUT = int(_env("LITELLM_TIMEOUT", "30"))
 
+# Host público que ve el usuario final (https://<dominio> o http://<IP
+# efímera del Gateway>), calculado en GATEWAY_RUN_SCRIPT (scripts/generate_infra.py)
+# y persistido en .env. Solo para MOSTRAR al operador dónde apuntar sus
+# llamadas (cabecera del panel, /apikeys/): LITELLM_BASE_URL de arriba es un
+# hostname interno de Docker ('http://litellm:4000'), inalcanzable e
+# ilegible fuera de la red del propio Gateway -nunca lo uses para esto,
+# aunque sea tentador reutilizarlo. Sin dominio propio ni IP conocida
+# todavía (primer render, antes de 'sky launch'), cae al valor interno para
+# no dejar la UI con una URL vacía.
+PUBLIC_BASE_URL = (_env("PUBLIC_BASE_URL", "") or LITELLM_BASE_URL).rstrip("/")
+
 # Contexto de tenancy heredado del contrato de infraestructura
 CLIENTE_ID = _env("CLIENTE_ID", "default")
 ENTORNO = _env("ENTORNO", "prod")

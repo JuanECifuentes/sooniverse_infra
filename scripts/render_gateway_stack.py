@@ -513,7 +513,14 @@ services:
     environment:
       # Todo el tráfico de chat pasa por el balanceador, nunca directo al worker.
       OPENAI_API_BASE_URL: {litellm_base_url}/v1
-      OPENAI_API_KEY: ${{LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}}
+      # Key VIRTUAL dedicada (creada por scripts/ensure_openwebui_key.py tras el
+      # primer 'docker compose up', ver GATEWAY_RUN_SCRIPT), no la master key:
+      # la master key no es una key virtual, así que LiteLLM no la asocia a
+      # ninguna fila de sooniverse.api_key_registry y TODO el consumo del chat
+      # quedaba huérfano ("(sin registro)" en el panel). Cae a la master key
+      # solo como respaldo del primerísimo arranque, antes de que esa key
+      # exista todavía en .env.
+      OPENAI_API_KEY: ${{OPENWEBUI_LITELLM_API_KEY:-${{LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}}}}
       WEBUI_NAME: "Sooniverse AI"
       WEBUI_AUTH: "True"
       ENABLE_SIGNUP: ${{WEBUI_SIGNUP:-false}}
@@ -635,6 +642,14 @@ services:
       DB_HOST: ${{DB_HOST:-postgres}}
       DB_PORT: ${{DB_PORT:-5432}}
       LITELLM_BASE_URL: {litellm_base_url}
+      # Host público que ve el usuario final (https://<dominio> o http://<IP
+      # efímera>), calculado en GATEWAY_RUN_SCRIPT y persistido en .env -NUNCA
+      # 'litellm_base_url' de arriba: ese es un hostname interno de Docker
+      # (p.ej. 'http://litellm:4000'), inalcanzable e ilegible fuera de la red
+      # del propio Gateway. Se usa solo para mostrarle al operador dónde
+      # apuntar sus llamadas a la API (panel /apikeys/, cabecera del panel),
+      # nunca para las llamadas internas de litellm_client.py.
+      PUBLIC_BASE_URL: ${{PUBLIC_BASE_URL:-}}
       LITELLM_MASTER_KEY: ${{LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}}
       CLIENTE_ID: ${{CLIENTE_ID:-default}}
       ENTORNO: ${{ENTORNO:-prod}}
