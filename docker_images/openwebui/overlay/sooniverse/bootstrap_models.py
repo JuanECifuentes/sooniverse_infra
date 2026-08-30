@@ -293,6 +293,17 @@ def build_model_form(model_id: str, caps: Dict[str, Any]) -> Dict[str, Any]:
         },
         "params": {
             "max_tokens": max_output,
+            # Sin esto, Open WebUI cae al default 'native' (ver
+            # backend/open_webui/main.py: form_data.params.function_calling
+            # or model_info_params.function_calling or 'native') para TODA
+            # tarea automática (autocompletado, follow-ups, consultas de
+            # RAG/búsqueda), no solo para el chat -manda tool_choice="auto"
+            # a LiteLLM aunque el usuario nunca toque una herramienta.
+            # Contra un modelo sin --enable-auto-tool-choice/--tool-call-parser
+            # eso revienta con BadRequestError incluso en un chat normal.
+            # 'legacy' vuelve al camino de extracción por prompt/JSON, que sí
+            # funciona sin soporte real de tool calling en vLLM.
+            "function_calling": "native" if caps["effective_tool_calling"] else "legacy",
         },
         # Lista vacía, NUNCA None: update_model_by_id() reconstruye ModelForm
         # desde form_data.model_dump() (ver backend/open_webui/routers/models.py),
