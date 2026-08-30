@@ -187,6 +187,34 @@ def test_tls_disabled_ignores_domain_requirement():
     ConfigValidator.validate(cfg)  # no debe lanzar
 
 
+# -- gateway.litellm -------------------------------------------------------------
+def test_litellm_base_url_valid():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["litellm"]["base_url"] = "http://my-litellm:5000"
+    ConfigValidator.validate(cfg)  # no debe lanzar
+
+    cfg["gateway"]["litellm"]["base_url"] = "https://custom-proxy.internal"
+    ConfigValidator.validate(cfg)  # no debe lanzar
+
+
+def test_litellm_base_url_invalid_scheme_rejected():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["litellm"]["base_url"] = "ftp://invalid-proxy:4000"
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+    cfg["gateway"]["litellm"]["base_url"] = "just-a-hostname:4000"
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_litellm_not_a_dict_rejected():
+    cfg = clone(load_base_config())
+    cfg["gateway"]["litellm"] = "not-a-map"
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
 # -- gateway.dominio (catálogo + derivación hacia tls) -----------------------------
 def _dominio_valido():
     return {

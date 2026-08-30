@@ -92,6 +92,7 @@ gateway:
     modo: "self-signed"        # self-signed (implementado) | letsencrypt (implementado, vía 'dominio') | acm (no implementado)
     dominio: null              # requerido si habilitado: true (usado como CN del cert y server_name de nginx)
   litellm:
+    base_url: "http://litellm:4000"        # URL base del proxy LiteLLM (usada por WebUI, Métricas y Nginx)
     master_key_env: "LITELLM_MASTER_KEY"   # Nombre de la var de entorno con la master key
     num_retries: 2
     request_timeout: 600

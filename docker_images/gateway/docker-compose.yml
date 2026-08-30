@@ -143,12 +143,12 @@ services:
       # scripts/test_model_capabilities.py::probe_json_object). Derivadas de
       # la verdad observada en sooniverse.model_capability -o del override
       # gateway.open_webui.tareas_automaticas si el operador lo fuerza-.
-      ENABLE_TITLE_GENERATION: "true"
-      ENABLE_TAGS_GENERATION: "true"
-      ENABLE_AUTOCOMPLETE_GENERATION: "true"
-      ENABLE_FOLLOW_UP_GENERATION: "true"
-      ENABLE_RETRIEVAL_QUERY_GENERATION: "true"
-      ENABLE_SEARCH_QUERY_GENERATION: "true"
+      ENABLE_TITLE_GENERATION: "false"
+      ENABLE_TAGS_GENERATION: "false"
+      ENABLE_AUTOCOMPLETE_GENERATION: "false"
+      ENABLE_FOLLOW_UP_GENERATION: "false"
+      ENABLE_RETRIEVAL_QUERY_GENERATION: "false"
+      ENABLE_SEARCH_QUERY_GENERATION: "false"
       # Ídem para el intérprete de código, que depende de tool calling real.
       ENABLE_CODE_INTERPRETER: "false"
       # Sin backend propio en esta infra: apagados fijos, no dependen de capacidades.
@@ -248,7 +248,6 @@ services:
       DJANGO_SUPERUSER_EMAIL: ${DJANGO_SUPERUSER_EMAIL:-admin@sooniverse.co}
     volumes:
       - panel_static:/app/staticfiles
-      - ../../.ssh_bastion_key:/app/.ssh/bastion_key:ro
     expose:
       - "8000"
     depends_on:
