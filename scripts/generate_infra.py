@@ -346,6 +346,20 @@ class ConfigValidator:
                     f"Permitidos: {cls.ALLOWED_OPEN_WEBUI_OVERRIDES}"
                 )
 
+        litellm = gw.get("litellm")
+        if litellm is not None:
+            if not isinstance(litellm, dict):
+                raise ConfigValidationError("'gateway.litellm' debe ser un mapa.")
+            if "base_url" in litellm:
+                base_url = litellm["base_url"]
+                if not isinstance(base_url, str) or not (
+                    base_url.startswith("http://") or base_url.startswith("https://")
+                ):
+                    raise ConfigValidationError(
+                        f"'gateway.litellm.base_url' inválido: '{base_url}'. "
+                        "Debe ser una URL absoluta que comience por http:// o https://."
+                    )
+
         cls._validate_dominio(config)
 
     @classmethod

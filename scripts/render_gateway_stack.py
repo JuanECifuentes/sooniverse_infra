@@ -28,6 +28,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 try:
     import yaml
@@ -225,6 +226,13 @@ def render_nginx_conf(config: Dict[str, Any]) -> str:
     modo = tls.get("modo", "self-signed")
     letsencrypt_mode = tls_enabled and modo == "letsencrypt"
 
+    litellm_cfg = gw.get("litellm", {}) or {}
+    litellm_base_url = (litellm_cfg.get("base_url") or "http://litellm:4000").rstrip("/")
+    parsed_litellm = urlsplit(
+        litellm_base_url if "://" in litellm_base_url else f"//{litellm_base_url}"
+    )
+    litellm_upstream_server = parsed_litellm.netloc or "litellm:4000"
+
     common_header = f"""{GENERATED_HEADER}
 # Ruteo:
 #   /              -> Open WebUI (chat, WebSocket)
@@ -239,7 +247,7 @@ map $http_upgrade $connection_upgrade {{
 }}
 
 upstream sooniverse_webui   {{ server open-webui:8080; }}
-upstream sooniverse_litellm {{ server litellm:4000;     }}
+upstream sooniverse_litellm {{ server {litellm_upstream_server};     }}
 upstream sooniverse_metrics {{ server metrics:8000;     }}
 """
 
@@ -343,7 +351,14 @@ def render_docker_compose(config: Dict[str, Any], capabilities_dir: Optional[Pat
     gateway_ssh_key = Path.home() / ".sky" / "generated" / "ssh-keys" / f"{gateway_cluster_name}.key"
     ssh_key_volume = "      - ../../.ssh_bastion_key:/app/.ssh/bastion_key:ro\n" if gateway_ssh_key.exists() else ""
 
-    litellm_ports = _ports_or_expose(4000, expose_direct)
+    litellm_cfg = gw.get("litellm", {}) or {}
+    litellm_base_url = (litellm_cfg.get("base_url") or "http://litellm:4000").rstrip("/")
+    parsed_litellm = urlsplit(
+        litellm_base_url if "://" in litellm_base_url else f"http://{litellm_base_url}"
+    )
+    litellm_port = parsed_litellm.port or 4000
+
+    litellm_ports = _ports_or_expose(litellm_port, expose_direct)
     webui_ports = _ports_or_expose(8080, expose_direct)
     metrics_ports = _ports_or_expose(8000, expose_direct)
 
@@ -453,7 +468,7 @@ services:
   litellm:
     image: ghcr.io/berriai/litellm:main-stable
     container_name: sooniverse-litellm
-    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
+    command: ["--config", "/app/config.yaml", "--port", "{litellm_port}", "--num_workers", "4"]
     environment:
       # Esquema PROPIO ('litellm', no 'sooniverse'): su motor de migraciones
       # (Prisma) calcula un diff contra TODO lo que encuentra en el esquema y
@@ -479,7 +494,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "python -c \\"import urllib.request;urllib.request.urlopen('http://localhost:4000/health/liveliness')\\" || exit 1"]
+      test: ["CMD-SHELL", "python -c \\"import urllib.request;urllib.request.urlopen('http://localhost:{litellm_port}/health/liveliness')\\" || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -497,7 +512,7 @@ services:
     container_name: sooniverse-webui
     environment:
       # Todo el tráfico de chat pasa por el balanceador, nunca directo al worker.
-      OPENAI_API_BASE_URL: http://litellm:4000/v1
+      OPENAI_API_BASE_URL: {litellm_base_url}/v1
       OPENAI_API_KEY: ${{LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}}
       WEBUI_NAME: "Sooniverse AI"
       WEBUI_AUTH: "True"
@@ -577,7 +592,7 @@ services:
       DB_PASSWORD: ${{DB_PASSWORD}}
       DB_HOST: ${{DB_HOST:-postgres}}
       DB_PORT: ${{DB_PORT:-5432}}
-      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_BASE_URL: {litellm_base_url}
       LITELLM_MASTER_KEY: ${{LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}}
       CLIENTE_ID: ${{CLIENTE_ID:-default}}
       ENTORNO: ${{ENTORNO:-prod}}
@@ -619,7 +634,7 @@ services:
       DB_PASSWORD: ${{DB_PASSWORD}}
       DB_HOST: ${{DB_HOST:-postgres}}
       DB_PORT: ${{DB_PORT:-5432}}
-      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_BASE_URL: {litellm_base_url}
       LITELLM_MASTER_KEY: ${{LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}}
       CLIENTE_ID: ${{CLIENTE_ID:-default}}
       ENTORNO: ${{ENTORNO:-prod}}
@@ -672,11 +687,37 @@ volumes:
 """
 
 
+def _derive_tls_from_dominio(config: Dict[str, Any]) -> None:
+    """Si gateway.dominio.habilitado es true, deriva gateway.tls.* a partir del catálogo
+    para que tanto nginx como docker-compose se rendericen con la configuración adecuada."""
+    gw = config.setdefault("gateway", {})
+    dominio_cfg = gw.get("dominio") or {}
+    if not dominio_cfg.get("habilitado", False):
+        return
+
+    seleccionado = dominio_cfg.get("seleccionado")
+    disponibles = dominio_cfg.get("disponibles") or []
+    entrada = next((e for e in disponibles if e.get("nombre") == seleccionado), None)
+    if not entrada:
+        return
+
+    email_acme = entrada.get("email_acme")
+    tls = gw.setdefault("tls", {})
+    if tls.get("dominio") not in (None, seleccionado):
+        return
+
+    tls["habilitado"] = True
+    tls["modo"] = "letsencrypt"
+    tls["dominio"] = seleccionado
+    tls["email_acme"] = email_acme
+
+
 def render(config: Dict[str, Any], capabilities_dir: Optional[Path] = None) -> None:
     """`capabilities_dir`: directorio donde buscar `.sooniverse_capabilities.json`
     (ver `_load_effective_capabilities`) -normalmente el mismo `out_dir` que ya
     usa generate_infra.py para los manifiestos de ESTE cliente (multi-cliente,
     Fase 6). Si se omite, se asume que aún no hay sondeo (fail-closed)."""
+    _derive_tls_from_dominio(config)
     NGINX_CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
     NGINX_CONF_PATH.write_text(render_nginx_conf(config), encoding="utf-8", newline="\n")
     print(f"[OK] nginx     -> {NGINX_CONF_PATH.relative_to(REPO_ROOT)}")
