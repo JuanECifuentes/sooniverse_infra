@@ -36,7 +36,7 @@
 /* Optimización para el Splash Screen con SVG Vectorial Animado */
 html.dark #splash-screen,
 #splash-screen {
-  background: #080718 !important;
+  background: #161616 !important;
 }
 
 #splash-screen #logo {
