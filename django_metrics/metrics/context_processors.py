@@ -11,4 +11,5 @@ def branding(_request):
         "CLIENTE_ID": settings.CLIENTE_ID,
         "ENTORNO": settings.ENTORNO,
         "LITELLM_BASE_URL": settings.LITELLM_BASE_URL,
+        "PUBLIC_BASE_URL": settings.PUBLIC_BASE_URL,
     }

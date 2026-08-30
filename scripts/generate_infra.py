@@ -34,7 +34,7 @@ import sys
 import time
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -54,6 +54,13 @@ SKY_GATEWAY_CONFIG = ".sky_config_gateway.yaml"
 SKY_WORKERS_CONFIG = ".sky_config_workers.yaml"
 ENDPOINTS_CACHE = ".sooniverse_endpoints.json"
 CAPACITY_CACHE = ".sooniverse_capacity.json"
+
+# Presupuesto de la fase [ENDPOINTS] esperando a que vLLM termine de cargar el
+# modelo (descarga de pesos + init de CUDA graphs) antes de reintentar el
+# sync. 8 min cubre un arranque en frío típico de un checkpoint de pocos GB;
+# con hf_cache ya poblado (ver README §9) suele resolverse en el primer intento.
+ENDPOINTS_HEALTH_TIMEOUT_SECONDS = 480
+ENDPOINTS_HEALTH_POLL_INTERVAL_SECONDS = 20
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config_global.yaml"
 
 # Planificador de vLLM. El default histórico de docker_images/qwen3.5/entrypoint.sh
@@ -826,12 +833,20 @@ fi
 
 # ---------------------------------------------------------------------------
 # 1. Inicialización opcional de la base de datos (flag AUTO_INIT_DB del contrato)
+#    Best-effort (|| true): el operador (generate_infra.py::_ensure_db_schema)
+#    ya aplicó el esquema ANTES de tocar AWS, así que esta corrida remota es
+#    en el caso normal una re-aplicación idempotente que no debería fallar.
+#    Si de todos modos falla (blip transitorio de red hacia la BD), no debe
+#    tumbar el resto del arranque del Gateway bajo 'set -e' -confirmado como
+#    la causa real de un despliegue completo abortado contra una BD nueva
+#    antes de este fix.
 # ---------------------------------------------------------------------------
 if [ "${{AUTO_INIT_DB}}" = "true" ]; then
     echo "===> AUTO_INIT_DB=true -> ingestando {schema_dir}/*.sql (orden lexicográfico)"
     REFRESH_FLAG=""
     if [ "${{AUTO_REFRESH_METRICS}}" = "true" ]; then REFRESH_FLAG="--refresh"; fi
-    python3 scripts/db_setup.py --env-file .env --sql-dir {schema_dir} ${{REFRESH_FLAG}}
+    python3 scripts/db_setup.py --env-file .env --sql-dir {schema_dir} ${{REFRESH_FLAG}} \
+        || echo "[WARNING] db_setup.py remoto falló; el esquema ya debería existir de la corrida local. Revisa 'sooniverse.infra_event'."
 else
     echo "===> AUTO_INIT_DB=false -> se omite la inicialización automática de la BD."
     echo "     Ejecuta manualmente: python scripts/db_setup.py"
@@ -863,9 +878,35 @@ else
     export GATEWAY_PUBLIC_URL="http://${{PUBLIC_IP}}"
 fi
 
+# Persistido en .env (mismo patrón que CLIENTE_ID/ENTORNO arriba): una
+# invocación posterior vía 'sky exec' (sync_openwebui_models.py recreando
+# open-webui, por ejemplo) NO hereda el 'export' de esta sesión de shell, así
+# que sin esto 'PUBLIC_BASE_URL' (panel de métricas, ver render_gateway_stack.py)
+# quedaría vacío en cualquier corrida que no fuera este 'sky launch' exacto.
+sed -i '/^PUBLIC_BASE_URL=/d' .env
+echo "PUBLIC_BASE_URL=${{GATEWAY_PUBLIC_URL}}" >> .env
+
 cd {remote_root}/docker_images/gateway
 sudo -E docker compose --env-file {remote_root}/.env up -d --build
 sudo docker compose ps
+
+# ---------------------------------------------------------------------------
+# 3.5 API Key dedicada para Open WebUI (ver scripts/ensure_openwebui_key.py):
+#     sin ella, el chat usa la master key y su consumo queda invisible en el
+#     panel ("(sin registro)"). Best-effort: si falla, el chat sigue
+#     funcionando con la master key mientras tanto -nunca debe tumbar el
+#     despliegue del Gateway.
+# ---------------------------------------------------------------------------
+cd {remote_root}
+KEY_OUTPUT="$(python3 scripts/ensure_openwebui_key.py --env-file .env 2>&1)" || true
+echo "$KEY_OUTPUT"
+if echo "$KEY_OUTPUT" | grep -q "SOONIVERSE_OPENWEBUI_KEY_CREATED=1"; then
+    echo "===> Nueva API Key de Open WebUI emitida: recreando 'open-webui' para aplicarla..."
+    cd {remote_root}/docker_images/gateway
+    sudo -E docker compose --env-file {remote_root}/.env up -d --build open-webui \
+        || echo "[WARNING] No se pudo recrear open-webui con la nueva key; seguirá con la master key hasta el próximo redeploy."
+    cd {remote_root}
+fi
 
 echo "===> Gateway operativo (nginx como única puerta de entrada):"
 echo "     Chat / API / Panel -> ${{GATEWAY_PUBLIC_URL}}/  |  /v1/  |  /panel/"
@@ -1597,6 +1638,135 @@ def _run_sky(args: List[str], env: Optional[Dict[str, str]] = None) -> None:
     subprocess.run(cmd, check=True, env=merged_env)
 
 
+def _run_sky_with_retry(
+    args: List[str],
+    env: Optional[Dict[str, str]] = None,
+    max_attempts: int = 3,
+    backoff_seconds: Sequence[int] = (30, 90),
+) -> None:
+    """Como `_run_sky()`, pero reintenta ante fallos TRANSITORIOS de
+    'sky launch' -confirmado en un despliegue real: un 503 del mirror ARM de
+    Ubuntu a mitad del 'apt-get install' del setup script tumbaba TODO el
+    despliegue (VPC/EIP/NAT ya creados y facturando), y el mismo comando sin
+    tocar nada más funcionaba al reintentarlo -el clúster y el setup son
+    idempotentes por diseño de SkyPilot. No distingue el tipo de fallo (no
+    hay una señal fiable en el `returncode`/stderr de `sky launch` para
+    separar "mirror caído" de "el contrato está mal"), así que el último
+    intento SÍ propaga la excepción para que el operador vea el error real."""
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            _run_sky(args, env=env)
+            return
+        except (subprocess.CalledProcessError, RuntimeError) as exc:
+            last_exc = exc
+            if attempt == max_attempts:
+                break
+            wait = backoff_seconds[min(attempt - 1, len(backoff_seconds) - 1)]
+            print(f"[WARNING] 'sky {' '.join(args)}' falló (intento {attempt}/{max_attempts}): {exc}")
+            print(f"[REINTENTO] Esperando {wait}s (suele ser un mirror de paquetes caído o "
+                  "capacidad transitoria de AWS)...")
+            time.sleep(wait)
+    raise RuntimeError(f"'sky {' '.join(args)}' falló tras {max_attempts} intento(s): {last_exc}") from last_exc
+
+
+def _preclean_stale_file_mounts(cluster: str, aws_profile: Optional[str] = None) -> None:
+    """Antes de relanzar 'sky launch' sobre un clúster que pudo haber corrido
+    antes (una '--run' completa repetida, o retomar tras un fallo a mitad de
+    camino), borra los file_mounts de UN SOLO ARCHIVO que
+    `_associate_gateway_eip()` puede haber dejado como archivo REAL en vez de
+    symlink -'.env' en particular: se reescribe a propósito como archivo real
+    ahí para que el resto de ESA corrida lo tenga disponible de inmediato
+    (ver el comentario en `_associate_gateway_eip`), pero eso deja una bomba
+    de tiempo para el SIGUIENTE 'sky launch' sobre el mismo clúster, que falla
+    con 'Failed mounting because path exists' -confirmado en una corrida
+    real. Best-effort y silencioso: si el clúster no existe todavía (primer
+    'sky launch' de siempre), el 'sky exec' simplemente falla rápido y no hay
+    nada que limpiar."""
+    sky = _sky_binary()
+    if not sky:
+        return
+    subprocess.run(
+        [
+            sky, "exec", cluster,
+            "for f in .env config_global.yaml .ssh_bastion_key; do "
+            f"p={REMOTE_ROOT}/$f; "
+            "[ -f \"$p\" ] && [ ! -L \"$p\" ] && rm -f \"$p\"; "
+            "done; true",
+        ],
+        capture_output=True, text=True, timeout=60, env=_sky_env(aws_profile),
+    )
+
+
+def _ensure_db_schema(config: Dict[str, Any], dry_run: bool = False) -> None:
+    """Bootstrap local del esquema `sooniverse` ANTES de que nada -ni el
+    'estado' del propio orquestador (`sooniverse.infra_deployment`, la
+    PRIMERÍSIMA tabla que toca `deploy()`, vía `_open_state_store()`)- intente
+    hablar con PostgreSQL.
+
+    Sin esto, un despliegue contra una base de datos COMPLETAMENTE NUEVA (sin
+    el esquema `sooniverse` todavía) fallaba en ese primer paso con 'relation
+    "sooniverse.infra_deployment" does not exist', mucho antes de que el
+    AUTO_INIT_DB remoto (GATEWAY_RUN_SCRIPT, dentro de 'sky launch') tuviera
+    oportunidad de aplicar el esquema -confirmado en un despliegue real: el
+    operador tuvo que correr 'python scripts/db_setup.py' A MANO antes de
+    poder correr '--run' siquiera una vez. Aplicarlo aquí, localmente y antes
+    de tocar AWS, hace que la corrida remota del Gateway sea una
+    re-aplicación idempotente (ya no crítica) en vez de la única oportunidad.
+
+    Reintenta unas pocas veces con espera corta: justo tras crear una base de
+    datos nueva (o reiniciar el servidor), la primera conexión a veces se
+    rechaza un par de segundos."""
+    db_cfg = config.get("base_de_datos", {}) or {}
+    if not db_cfg.get("AUTO_INIT_DB", True):
+        print("[BD] AUTO_INIT_DB=false -> se omite la inicialización automática del esquema "
+              "(ejecuta 'python scripts/db_setup.py' manualmente).")
+        return
+
+    from db_setup import connect, resolve_db_config
+
+    env_path = REPO_ROOT / ".env"
+    attempts = 3
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            db_config = resolve_db_config(env_path)
+            conn = connect(db_config)
+            conn.close()
+            last_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001 - se reintenta o se relanza abajo
+            last_exc = exc
+            if attempt == attempts:
+                break
+            print(f"[BD] Conexión falló (intento {attempt}/{attempts}): {exc}. Reintentando en 5s...")
+            time.sleep(5)
+
+    if last_exc is not None:
+        raise RuntimeError(
+            f"No se pudo conectar a PostgreSQL tras {attempts} intento(s): {last_exc}. Revisa "
+            "DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME en .env y que la base de datos YA EXISTA "
+            "-este bootstrap crea el esquema/las tablas dentro de ella, nunca la base de datos en sí."
+        ) from last_exc
+
+    if dry_run:
+        print("[BD] --dry-run: se verificaría/aplicaría el esquema 'sooniverse' (sin tocar Postgres).")
+        return
+
+    cmd = [sys.executable, str(REPO_ROOT / "scripts" / "db_setup.py"), "--env-file", str(env_path)]
+    print("[BD] Verificando/aplicando el esquema 'sooniverse' (idempotente)...")
+    print(f"[EXEC] {' '.join(cmd)}")
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"scripts/db_setup.py falló (código {exc.returncode}) inicializando el esquema. Suele ser "
+            "un problema de permisos del usuario de .env (necesita CREATE en la base de datos/el "
+            "esquema 'sooniverse'); corre 'python scripts/db_setup.py' a mano para ver el error completo."
+        ) from exc
+    print("[BD] Esquema 'sooniverse' listo.")
+
+
 def _sky_env(aws_profile: Optional[str] = None) -> Optional[Dict[str, str]]:
     """Entorno para subprocess.run([sky, ...]) que fuerza AWS_PROFILE cuando el
     cliente es BYOC (ver comentario en la fase [GATEWAY] de generate_infra)."""
@@ -1616,6 +1786,22 @@ def _gateway_public_ip(cluster: str, aws_profile: Optional[str] = None) -> Optio
         return ip or None
     except (subprocess.CalledProcessError, IndexError):
         return None
+
+
+def _count_healthy_endpoints(out_dir: Path) -> int:
+    """Lee `.sooniverse_endpoints.json` (lo escribe sync_endpoints.py --apply,
+    TODOS los endpoints descubiertos -sanos y no sanos-, para diagnóstico) y
+    cuenta cuántos quedaron marcados `healthy`. Nunca lanza: un archivo
+    ausente o corrupto se trata como 0 sanos (fail-closed, coherente con el
+    resto del pipeline)."""
+    path = out_dir / ENDPOINTS_CACHE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if not isinstance(data, list):
+        return 0
+    return sum(1 for ep in data if isinstance(ep, dict) and ep.get("healthy", True))
 
 
 class GatewayEipAssociationError(RuntimeError):
@@ -1715,6 +1901,28 @@ def _associate_gateway_eip(
         if env_path.exists():
             payload = env_path.read_text(encoding="utf-8")
             remote_env = "/home/ubuntu/sooniverse_infra/.env"
+
+            # PERO: GATEWAY_RUN_SCRIPT y ensure_openwebui_key.py (ambos ya
+            # corrieron, EN ESTA MISMA fase, justo antes) le añadieron a ESE
+            # .env remoto valores que solo existen ahí -PUBLIC_BASE_URL
+            # (calculado en caliente con la IP/dominio real) y
+            # OPENWEBUI_LITELLM_API_KEY (generado una vez, nunca en el .env
+            # local)-. Sobrescribir con el .env local a secas los borraría de
+            # inmediato -confirmado en un despliegue real: ambas variables
+            # desaparecían del .env remoto justo después de asociarse la
+            # Elastic IP-. Se preservan fusionándolos en el payload que se
+            # va a escribir.
+            preserve_keys = ("PUBLIC_BASE_URL", "OPENWEBUI_LITELLM_API_KEY")
+            remote_current = subprocess.run(
+                [sky, "exec", cluster, f"cat {remote_env} 2>/dev/null || true"],
+                capture_output=True, text=True, timeout=60, env=sky_env,
+            )
+            for key in preserve_keys:
+                match = re.search(rf"^{key}=(.*)$", remote_current.stdout or "", re.MULTILINE)
+                if match and match.group(1).strip():
+                    payload = re.sub(rf"(?m)^{key}=.*$", "", payload)
+                    payload = payload.rstrip("\n") + f"\n{key}={match.group(1).strip()}\n"
+
             script = (
                 f"rm -f {remote_env} && cat > {remote_env} <<'SOONIVERSE_ENV_EOF'\n"
                 f"{payload}\nSOONIVERSE_ENV_EOF\n"
@@ -1724,13 +1932,25 @@ def _associate_gateway_eip(
 
     sky = _sky_binary()
     if sky:
-        check = subprocess.run(
-            [sky, "exec", cluster, "true"], capture_output=True, text=True, timeout=120, env=sky_env,
-        )
-        if check.returncode != 0:
+        # 'sky start' puede devolver éxito una fracción de segundo antes de que
+        # el estado interno de SkyPilot termine de reconciliarse a 'UP' -
+        # confirmado en un despliegue real: esta misma comprobación fallaba
+        # con ClusterNotUpError (status: INIT) justo después de un 'sky start'
+        # que había devuelto returncode 0. Unos pocos reintentos cortos
+        # absorben esa ventana sin necesitar intervención manual.
+        last_check: Optional[subprocess.CompletedProcess] = None
+        for attempt in range(1, 4):
+            last_check = subprocess.run(
+                [sky, "exec", cluster, "true"], capture_output=True, text=True, timeout=120, env=sky_env,
+            )
+            if last_check.returncode == 0:
+                break
+            if attempt < 3:
+                time.sleep(15)
+        if last_check is not None and last_check.returncode != 0:
             raise GatewayEipAssociationError(
-                f"La Elastic IP se asoció ({new_ip}) pero 'sky exec {cluster} true' falló tras el "
-                f"refresh: {check.stderr.strip() or check.stdout.strip()}"
+                f"La Elastic IP se asoció ({new_ip}) pero 'sky exec {cluster} true' siguió fallando "
+                f"tras 3 intentos: {last_check.stderr.strip() or last_check.stdout.strip()}"
             )
 
     return new_ip
@@ -1965,6 +2185,12 @@ def deploy(
     print(" DESPLIEGUE SOONIVERSE - MÁQUINA DE FASES (FASE 3)")
     print("=" * 74)
 
+    # Antes de TOCAR PostgreSQL siquiera para abrir el 'estado' del despliegue
+    # (ver _open_state_store() más abajo, la primerísima llamada a la BD):
+    # sin esto, un despliegue contra una base de datos en blanco fallaba ahí
+    # mismo con 'relation "sooniverse.infra_deployment" does not exist'.
+    _ensure_db_schema(config, dry_run=dry_run)
+
     builder = TopologyBuilder(config)
     gateway_ip: Optional[str] = None
     state = None
@@ -2079,8 +2305,14 @@ def deploy(
             # aws_profile).
             gateway_env["AWS_PROFILE"] = red["aws_profile"]
 
+        # Best-effort: si el clúster ya corrió antes (retomar una '--run'
+        # completa, o repetir solo esta fase), deja sus file_mounts de un
+        # solo archivo listos para un símlink limpio -ver el docstring de la
+        # función para el bug real que evita.
+        _preclean_stale_file_mounts(builder.gateway_cluster, red.get("aws_profile"))
+
         t0 = time.monotonic()
-        _run_sky(
+        _run_sky_with_retry(
             ["launch", "-y", "-c", builder.gateway_cluster, str(artefactos["gateway"])],
             env=gateway_env,
         )
@@ -2162,8 +2394,8 @@ def deploy(
             # solo existe en una, y SkyPilot está anclado a ella por
             # `use_internal_ips`. Si esto se vuelve crónico, la salida es subir
             # `red_y_aislamiento.azs`.
-            _run_sky(["launch", "-y", "--retry-until-up", "-c", cluster, str(manifest)],
-                     env=worker_env)
+            _run_sky_with_retry(["launch", "-y", "--retry-until-up", "-c", cluster, str(manifest)],
+                                 env=worker_env)
             if state and deployment_id:
                 state.log_event(deployment_id, "workers", "sky_launch", "ok",
                                  message=cluster, duration_ms=int((time.monotonic() - t0) * 1000))
@@ -2173,14 +2405,41 @@ def deploy(
         print("\n--- [ENDPOINTS] --dry-run: se ejecutaría sync_endpoints.py --apply ---")
     elif "endpoints" in phases:
         print("\n--- [ENDPOINTS] Sincronización de endpoints en LiteLLM ---")
+        # sync_endpoints.py devuelve 0 aunque 0 workers queden sanos (solo
+        # falla si LiteLLM en sí no recarga) -confirmado en un despliegue
+        # real: vLLM todavía estaba cargando el modelo en el primer intento,
+        # el worker quedó excluido del pool ("NO SANO"), y el propio script
+        # reportó '[SUCCESS]' igual. Sin este bucle, quien corre '--run' no
+        # se entera de que el pool quedó vacío hasta que prueba el chat.
+        expected_healthy = sum(wl.get("replicas", 1) for wl in config["workloads"])
         sync_script = REPO_ROOT / "scripts" / "sync_endpoints.py"
         cmd = [sys.executable, str(sync_script), "--config", str(config_path), "--apply"]
-        print(f"[EXEC] {' '.join(cmd)}")
-        try:
-            subprocess.run(cmd, check=True)
-        except subprocess.CalledProcessError as exc:
-            print(f"[WARNING] La sincronización automática falló (código {exc.returncode}).")
-            print("          Reintenta manualmente: python scripts/sync_endpoints.py --apply")
+        deadline = time.monotonic() + ENDPOINTS_HEALTH_TIMEOUT_SECONDS
+        attempt = 0
+        while True:
+            attempt += 1
+            suffix = f" (intento {attempt})" if attempt > 1 else ""
+            print(f"[EXEC] {' '.join(cmd)}{suffix}")
+            try:
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as exc:
+                print(f"[WARNING] La sincronización automática falló (código {exc.returncode}).")
+                print("          Reintenta manualmente: python scripts/sync_endpoints.py --apply")
+                break
+
+            healthy_count = _count_healthy_endpoints(out_dir)
+            if healthy_count >= expected_healthy and expected_healthy > 0:
+                print(f"[OK] {healthy_count}/{expected_healthy} worker(s) sano(s) en el pool.")
+                break
+            if time.monotonic() >= deadline:
+                print(f"[WARNING] Solo {healthy_count}/{expected_healthy} worker(s) sano(s) tras "
+                      f"{ENDPOINTS_HEALTH_TIMEOUT_SECONDS}s (¿el modelo sigue cargando?). "
+                      "Reintenta manualmente: python scripts/sync_endpoints.py --apply")
+                break
+            print(f"[ESPERA] {healthy_count}/{expected_healthy} worker(s) sano(s) todavía; "
+                  f"reintentando en {ENDPOINTS_HEALTH_POLL_INTERVAL_SECONDS}s "
+                  "(vLLM puede seguir cargando el modelo)...")
+            time.sleep(ENDPOINTS_HEALTH_POLL_INTERVAL_SECONDS)
 
     # --- FASE: capabilities (best-effort; no aborta el resto del pipeline) -----
     if "capabilities" in phases and dry_run:
@@ -2205,10 +2464,24 @@ def deploy(
         sync_owui_script = REPO_ROOT / "scripts" / "sync_openwebui_models.py"
         if sync_owui_script.exists():
             sync_cmd = [sys.executable, str(sync_owui_script), "--config", str(config_path), "--apply"]
-            print(f"[EXEC] {' '.join(sync_cmd)}")
-            sync_result = subprocess.run(sync_cmd)
-            if sync_result.returncode != 0:
-                print(f"[WARNING] sync_openwebui_models.py falló (código {sync_result.returncode}); "
+            # 2 intentos: la causa más común de un fallo aquí es una carrera
+            # de arranque (Open WebUI/litellm todavía terminando su propio
+            # healthcheck cuando llega la petición de bootstrap), no un error
+            # de configuración -reintentar una vez basta y no vale la pena un
+            # presupuesto de tiempo tan largo como el de [ENDPOINTS].
+            sync_result = None
+            for sync_attempt in (1, 2):
+                suffix = f" (intento {sync_attempt})" if sync_attempt > 1 else ""
+                print(f"[EXEC] {' '.join(sync_cmd)}{suffix}")
+                sync_result = subprocess.run(sync_cmd)
+                if sync_result.returncode == 0:
+                    break
+                if sync_attempt == 1:
+                    print(f"[WARNING] sync_openwebui_models.py falló (código {sync_result.returncode}); "
+                          "reintentando en 20s...")
+                    time.sleep(20)
+            if sync_result is not None and sync_result.returncode != 0:
+                print(f"[WARNING] sync_openwebui_models.py siguió fallando (código {sync_result.returncode}); "
                       "reintenta manualmente: python scripts/sync_openwebui_models.py --apply")
         else:
             print("[SKIP] scripts/sync_openwebui_models.py no existe todavía.")

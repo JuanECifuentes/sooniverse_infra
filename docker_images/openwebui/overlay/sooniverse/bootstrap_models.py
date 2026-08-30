@@ -186,6 +186,57 @@ def authenticate() -> str:
     )
 
 
+def ensure_bootstrap_is_admin() -> bool:
+    """Autopromueve la cuenta técnica de bootstrap a admin en la tabla `user`
+    de Open WebUI si quedó como 'user'.
+
+    El diseño original asumía que la cuenta técnica siempre sería la PRIMERA
+    en autenticarse vía SSO (ver authenticate()/docstring del módulo), pero
+    eso es una carrera real: si un humano visita el chat/panel antes de que
+    este bootstrap corra con éxito por primera vez, ESE humano se queda con
+    el único ascenso automático a admin y la cuenta técnica recibe 401 en
+    cualquier llamada de administración (crear/actualizar modelos) para
+    siempre -confirmado en un despliegue real: la tabla `model` quedaba
+    vacía indefinidamente y cada corrida del bootstrap reportaba 'OK' igual
+    (ver el fix de exit code en main()). Corregir esto por SQL directo (en
+    vez de depender del orden de visitas) hace el resultado determinista sin
+    importar quién llegó primero.
+
+    Devuelve True si promovió a alguien (quien llame debe re-autenticarse
+    para obtener un token que refleje el rol nuevo)."""
+    try:
+        import psycopg2
+    except ImportError:
+        return False
+
+    try:
+        conn = psycopg2.connect(
+            dbname=os.environ["DB_NAME"], user=os.environ["DB_USER"],
+            password=os.environ["DB_PASSWORD"], host=os.environ["DB_HOST"],
+            port=os.environ["DB_PORT"], connect_timeout=10,
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort, no debe tumbar el bootstrap
+        print(f"[WARNING] No se pudo conectar a PostgreSQL para verificar el rol de la cuenta técnica: {exc}")
+        return False
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'UPDATE "user" SET role = %s WHERE email = %s AND role <> %s',
+                    ("admin", BOOTSTRAP_EMAIL, "admin"),
+                )
+                promoted = cur.rowcount > 0
+        if promoted:
+            print(f"[bootstrap] Cuenta técnica '{BOOTSTRAP_EMAIL}' promovida a admin (autocorrección de carrera).")
+        return promoted
+    except Exception as exc:  # noqa: BLE001 - p.ej. la tabla 'user' aún no existe
+        print(f"[WARNING] No se pudo verificar/corregir el rol de la cuenta técnica: {exc}")
+        return False
+    finally:
+        conn.close()
+
+
 def ensure_default_user_role_is_user(token: str) -> None:
     """Fuerza 'ui.default_user_role' = 'user' en la config de Open WebUI.
 
@@ -315,7 +366,14 @@ def build_model_form(model_id: str, caps: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def upsert_model(token: str, model_id: str, form: Dict[str, Any], existing_ids: set) -> None:
+def upsert_model(token: str, model_id: str, form: Dict[str, Any], existing_ids: set) -> bool:
+    """Devuelve True si el upsert tuvo éxito (status 200). El llamador la usa
+    para decidir el código de salida del proceso -antes se ignoraba, así que
+    un 401 (p.ej. la cuenta técnica sin admin, ver ensure_bootstrap_is_admin())
+    quedaba como '[WARNING]' en el log pero el bootstrap completo reportaba
+    éxito (exit 0) igual, dejando la tabla 'model' vacía sin que nada aguas
+    arriba (sync_openwebui_models.py, la fase 'capabilities') se enterara ni
+    reintentara."""
     if model_id in existing_ids:
         resp = _http("POST", f"{OPENWEBUI_BASE_URL}/api/v1/models/model/update?id={model_id}",
                      form, token=token)
@@ -328,14 +386,21 @@ def upsert_model(token: str, model_id: str, form: Dict[str, Any], existing_ids: 
         print(f"[bootstrap] Modelo '{model_id}' {action} "
               f"(vision={form['meta']['capabilities']['vision']}, "
               f"tools={form['meta']['capabilities']['code_interpreter']})")
-    else:
-        print(f"[WARNING] No se pudo aplicar ({action}) '{model_id}': {resp}")
+        return True
+
+    print(f"[WARNING] No se pudo aplicar ({action}) '{model_id}': {resp}")
+    return False
 
 
 def main() -> int:
     try:
         wait_for_openwebui()
         token = authenticate()
+        if ensure_bootstrap_is_admin():
+            # El token que ya teníamos se emitió con el rol viejo ('user');
+            # las llamadas de administración de abajo (crear/actualizar
+            # modelos, leer/escribir la config de admin) necesitan uno fresco.
+            token = authenticate()
         ensure_default_user_role_is_user(token)
 
         litellm_models = fetch_litellm_models()
@@ -358,6 +423,7 @@ def main() -> int:
             m["id"] for m in list_resp.get("json", []) if isinstance(list_resp.get("json"), list) and "id" in m
         }
 
+        any_failed = False
         for model_id in litellm_models:
             # Fail-closed por diseño (ver database/003_model_capabilities.sql):
             # sin fila de capacidades sondeadas todavía (primer despliegue, antes
@@ -371,7 +437,12 @@ def main() -> int:
                 "max_output_tokens": None,
             })
             form = build_model_form(model_id, caps)
-            upsert_model(token, model_id, form, existing_ids)
+            if not upsert_model(token, model_id, form, existing_ids):
+                any_failed = True
+
+        if any_failed:
+            print("[ERROR] Uno o más modelos no se pudieron sincronizar (ver [WARNING] arriba).", file=sys.stderr)
+            return 1
 
         print(f"[OK] Bootstrap de modelos completo ({len(litellm_models)} modelo(s)).")
         return 0
