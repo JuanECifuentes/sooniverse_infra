@@ -79,12 +79,22 @@ class VerificationContext:
         """Esquema+host efectivos para las comprobaciones HTTP: con dominio
         propio (TLS real o autofirmado), el único host con el que el
         certificado puede ser válido es el dominio -no la IP, aunque resuelva
-        a la misma Elastic IP. Sin TLS, sigue siendo la IP por http://."""
+        a la misma Elastic IP. Sin TLS, sigue siendo la IP por http://.
+
+        ctx.config viene de un yaml.safe_load() plano (ver main()), SIN pasar
+        por la derivación dominio.habilitado -> tls.* de
+        generate_infra.py::load_config -leer gateway.tls aquí vería el
+        'habilitado: false' de fábrica incluso con un dominio real
+        configurado y desplegado, y las comprobaciones que dependen del Host
+        (Django ALLOWED_HOSTS, auth_request de Open WebUI) fallan contra la
+        IP pelada aunque el despliegue esté sano. Se lee gateway.dominio
+        directamente, igual que check_domain_certificate_valid."""
         if not self.gateway_ip:
             return None
-        tls = (self.config.get("gateway", {}).get("tls") or {})
-        if tls.get("habilitado") and tls.get("dominio"):
-            return f"https://{tls['dominio']}"
+        dominio_cfg = (self.config.get("gateway", {}).get("dominio") or {})
+        dominio = dominio_cfg.get("seleccionado")
+        if dominio_cfg.get("habilitado") and dominio:
+            return f"https://{dominio}"
         return f"http://{self.gateway_ip}"
 
 
