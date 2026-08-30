@@ -608,7 +608,10 @@ def api_keys(request):
         "total_activas": len(activas),
         "consumo_prompt_global": sum((f["consumo_prompt"] or 0) for f in filas),
         "consumo_completion_global": sum((f["consumo_completion"] or 0) for f in filas),
-        "litellm_url": settings.LITELLM_BASE_URL,
+        # Público, no LITELLM_BASE_URL (interno, 'http://litellm:4000' -inalcanzable
+        # e ilegible fuera del propio Gateway): esto se le muestra al operador
+        # como la URL que debe usar para llamar a la API con su nueva key.
+        "litellm_url": f"{settings.PUBLIC_BASE_URL}/v1",
     }
     return render(request, "metrics/apikeys.html", contexto)
 
