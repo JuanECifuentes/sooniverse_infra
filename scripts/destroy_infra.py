@@ -80,45 +80,79 @@ def _sky_down(cluster: str, aws_profile: Optional[str] = None) -> bool:
     return True
 
 
-def _wait_for_instances_terminated(
-    clusters: List[str], region: str, aws_profile: Optional[str] = None, timeout: int = 180
-) -> None:
-    """Espera a que las instancias EC2 de estos clústeres SkyPilot lleguen a
-    'terminated' antes de tocar la capa de red.
+# Política de reintento para apagar el cómputo (workers GPU + Gateway): los
+# nodos GPU pueden tardar hasta ~15 min en terminar del todo (drivers NVIDIA +
+# limpieza del ENI), así que "sky down" + una espera corta no basta -pero
+# tampoco hay que reintentar para siempre si algo está genuinamente roto.
+# 1 intento/min durante 20 min y, si para entonces sigue sin terminar,
+# mostrar el error y parar -no seguir intentando por cuenta propia.
+DESTROY_MAX_WAIT_SECONDS = 1200
+DESTROY_RETRY_INTERVAL_SECONDS = 60
 
-    'sky down' vuelve en cuanto AWS ACEPTA la petición de terminación, no
-    cuando la instancia realmente desaparece -de 'shutting-down' a
-    'terminated' pasan según AWS varios segundos-. Sin esta espera, el ENI de
-    la instancia sigue "in-use" cuando el paso [3/3] intenta borrar los
-    Security Groups/subredes/VPC, y falla con DependencyViolation
-    (confirmado en una destrucción real: los 4 fallos fueron por un ENI que
-    tardó en soltarse, no un problema real de tags/propiedad)."""
+
+def _instances_pending(clusters: List[str], region: str, aws_profile: Optional[str] = None) -> List[str]:
+    """IDs de instancia de estos clústeres SkyPilot que NO llegaron todavía a
+    'terminated' (incluye 'shutting-down', 'stopping', 'pending', 'running':
+    cualquier estado donde el ENI sigue potencialmente 'in-use', que es lo
+    que de verdad bloquea la capa de red con DependencyViolation)."""
     try:
         import boto3
     except ImportError:
-        return
+        return []
 
     ec2 = boto3.Session(profile_name=aws_profile, region_name=region).client("ec2")
     filtro_valores = [c for cluster in clusters for c in (cluster, f"{cluster}-*")]
-    t0 = time.monotonic()
-    while time.monotonic() - t0 < timeout:
-        pendientes = []
-        for tag_key in ("ray-cluster-name", "skypilot-cluster-name"):
-            resp = ec2.describe_instances(
-                Filters=[
-                    {"Name": f"tag:{tag_key}", "Values": filtro_valores},
-                    {"Name": "instance-state-name", "Values": ["shutting-down"]},
-                ]
-            )
-            for reservation in resp.get("Reservations", []):
-                pendientes.extend(i["InstanceId"] for i in reservation.get("Instances", []))
+    pendientes: List[str] = []
+    for tag_key in ("ray-cluster-name", "skypilot-cluster-name"):
+        resp = ec2.describe_instances(
+            Filters=[
+                {"Name": f"tag:{tag_key}", "Values": filtro_valores},
+                {"Name": "instance-state-name",
+                 "Values": ["pending", "running", "stopping", "shutting-down"]},
+            ]
+        )
+        for reservation in resp.get("Reservations", []):
+            pendientes.extend(i["InstanceId"] for i in reservation.get("Instances", []))
+    return pendientes
+
+
+def _teardown_clusters_with_budget(
+    clusters: List[str], region: str, deadline: float, aws_profile: Optional[str] = None,
+) -> bool:
+    """`sky down` de cada clúster de la lista (en orden) y reintenta hasta que
+    TODAS sus instancias EC2 confirmen 'terminated', a razón de un intento por
+    minuto, sin pasar de `deadline` (un `time.monotonic()` absoluto,
+    compartido entre fases por el llamador -ver `destroy()`- para que el
+    presupuesto total de 20 min sea del proceso de destrucción completo, no
+    20 min por cada fase). Devuelve False (sin lanzar) si se agota el
+    presupuesto: quien llama decide si aborta la capa de red o no."""
+    attempt = 0
+    while True:
+        attempt += 1
+        for cluster in clusters:
+            _sky_down(cluster, aws_profile=aws_profile)
+
+        pendientes = _instances_pending(clusters, region, aws_profile=aws_profile)
         if not pendientes:
-            return
-        print(f"[ESPERA] {len(pendientes)} instancia(s) todavía terminando ({pendientes}); "
-              f"esperando antes de tocar la red...")
-        time.sleep(10)
-    print(f"[WARNING] Timeout ({timeout}s) esperando a que las instancias terminen; "
-          "la limpieza de red podría fallar por dependencias -reintenta 'destroy_infra.py --yes'.")
+            if attempt > 1:
+                print(f"[OK] {', '.join(clusters)}: instancia(s) terminada(s) tras {attempt} intento(s).")
+            return True
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(
+                f"[ERROR] Tras {DESTROY_MAX_WAIT_SECONDS // 60} min ({attempt} intento(s)), sigue(n) "
+                f"activa(s) {len(pendientes)} instancia(s) de {clusters}: {pendientes}. Los nodos GPU "
+                "pueden tardar hasta ~15 min en apagarse del todo; no se sigue reintentando "
+                "automáticamente para no perder más tiempo. Verifica en la consola de EC2 y vuelve a "
+                "correr 'python scripts/destroy_infra.py --yes' cuando confirmes que ya terminaron."
+            )
+            return False
+
+        wait = min(DESTROY_RETRY_INTERVAL_SECONDS, max(1, int(remaining)))
+        print(f"[ESPERA] {len(pendientes)} instancia(s) todavía no termina(n) (intento {attempt}); "
+              f"reintentando en {wait}s (presupuesto restante: {int(remaining)}s)...")
+        time.sleep(wait)
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:
@@ -330,16 +364,34 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
     only = args.only
 
     if only in ("all",) and not args.dry_run:
-        print("\n--- [1/3] Workers vLLM (sky down) ---")
-        for wl in config["workloads"]:
-            cluster = builder.worker_cluster(wl["id"])
-            _sky_down(cluster, aws_profile=red.get("aws_profile"))
+        worker_clusters = [builder.worker_cluster(wl["id"]) for wl in config["workloads"]]
+        aws_profile = red.get("aws_profile")
+        # Presupuesto ÚNICO para todo el apagado de cómputo (workers + Gateway),
+        # no uno por fase: 20 min en total, 1 intento/min (ver
+        # _teardown_clusters_with_budget). Los workers van primero -sin el
+        # Gateway como bastion, SkyPilot pierde el SSH a instancias sin IP
+        # pública- así que si se agota el presupuesto ahí, el Gateway ni se toca.
+        deadline = time.monotonic() + DESTROY_MAX_WAIT_SECONDS
 
-        print("\n--- [2/3] Nodo Gateway (sky down) ---")
-        _sky_down(builder.gateway_cluster, aws_profile=red.get("aws_profile"))
+        print("\n--- [1/3] Workers vLLM (sky down, hasta 20 min de reintentos) ---")
+        workers_ok = True
+        if worker_clusters:
+            workers_ok = _teardown_clusters_with_budget(
+                worker_clusters, red["region"], deadline, aws_profile=aws_profile,
+            )
 
-        clusters = [builder.worker_cluster(wl["id"]) for wl in config["workloads"]] + [builder.gateway_cluster]
-        _wait_for_instances_terminated(clusters, red["region"], aws_profile=red.get("aws_profile"))
+        if not workers_ok:
+            print("\n[ABORTADO] La capa de red no se toca con workers todavía activos "
+                  "-fallaría por dependencias (ENI en uso) y solo generaría ruido.")
+            return 2
+
+        print("\n--- [2/3] Nodo Gateway (sky down, mismo presupuesto) ---")
+        gateway_ok = _teardown_clusters_with_budget(
+            [builder.gateway_cluster], red["region"], deadline, aws_profile=aws_profile,
+        )
+        if not gateway_ok:
+            print("\n[ABORTADO] La capa de red no se toca con el Gateway todavía activo.")
+            return 2
     elif only in ("all",):
         print("\n--- (dry-run) Se ejecutaría 'sky down' de workers y gateway ---")
         for wl in config["workloads"]:
