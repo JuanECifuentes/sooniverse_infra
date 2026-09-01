@@ -123,8 +123,15 @@ class ConfigValidator:
         "usage-based-routing",
         "usage-based-routing-v2",
     }
+    # "aws" es el default histórico e implícito: ningún config_global.yaml
+    # existente trae 'cloud', así que su ausencia debe seguir comportándose
+    # exactamente igual que hoy (ver ConfigValidator._validate_red).
+    ALLOWED_CLOUDS = {"aws", "azure"}
     ALLOWED_GESTION_RED = {"auto", "existente"}
     ALLOWED_NAT_MODOS = {"single", "per-az", "none"}
+    # Azure NAT Gateway se asocia a nivel de subred, sin el concepto "per-az" de
+    # AWS (las subredes de Azure no son zonales) -ver scripts/azure_network.py.
+    ALLOWED_NAT_MODOS_AZURE = {"single", "none"}
     ALLOWED_TLS_MODOS = {"self-signed", "letsencrypt", "acm"}
     # 'segun_capacidades' (default): la verdad observada en sooniverse.model_capability
     # decide. 'activado'/'desactivado': escape manual del operador.
@@ -186,6 +193,16 @@ class ConfigValidator:
         if not red or not isinstance(red, dict):
             raise ConfigValidationError("Falta la sección obligatoria 'red_y_aislamiento'.")
 
+        # 'cloud' es NUEVO y opcional: ausente = 'aws' (comportamiento histórico,
+        # ningún config_global.yaml existente lo trae). No confundir con
+        # 'cliente.modo' (byoc|hosted, quién es dueño de la cuenta) -'cloud' es
+        # ortogonal: EN QUÉ nube se despliega.
+        cloud = red.get("cloud", "aws")
+        if cloud not in cls.ALLOWED_CLOUDS:
+            raise ConfigValidationError(
+                f"'red_y_aislamiento.cloud' inválido: '{cloud}'. Permitidos: {cls.ALLOWED_CLOUDS}"
+            )
+
         if not red.get("region"):
             raise ConfigValidationError("Falta 'red_y_aislamiento.region'.")
 
@@ -204,6 +221,11 @@ class ConfigValidator:
             )
 
         if gestion_red == "existente":
+            if cloud != "aws":
+                raise ConfigValidationError(
+                    "'red_y_aislamiento.gestion_red: existente' (red pre-creada a mano) todavía no está "
+                    f"implementado para 'cloud: {cloud}' -solo 'auto' (AzureNetworkManager crea la red)."
+                )
             # Modo legado: la VPC/SGs ya existen y se referencian por nombre.
             if privada and not red.get("vpc_name"):
                 print(
@@ -213,8 +235,11 @@ class ConfigValidator:
                 )
             return
 
-        # gestion_red == "auto": AwsNetworkManager crea la VPC; validar el resto del contrato.
-        cls._validate_red_auto(red)
+        # gestion_red == "auto": *NetworkManager crea la red; validar el resto del contrato.
+        if cloud == "azure":
+            cls._validate_red_azure(red)
+        else:
+            cls._validate_red_auto(red)
 
     @classmethod
     def _validate_red_auto(cls, red: Dict[str, Any]) -> None:
@@ -280,6 +305,40 @@ class ConfigValidator:
                         f"'red_y_aislamiento.subredes': los CIDR '{cidr}' y '{other}' se solapan."
                     )
             seen_networks.append(net)
+
+    @classmethod
+    def _validate_red_azure(cls, red: Dict[str, Any]) -> None:
+        """Equivalente de `_validate_red_auto` para `cloud: azure`
+        (scripts/azure_network.py::AzureNetworkManager). Reutiliza la misma
+        validación de CIDR (vía `ipaddress`); difiere en las reglas propias de
+        Azure: sin 'per-az' (subredes no zonales) y sin S3 VPC Endpoint (no
+        aplica, Azure Storage no tiene ese concepto)."""
+        vpc_cidr_raw = red.get("vpc_cidr")
+        if not vpc_cidr_raw:
+            raise ConfigValidationError("Falta 'red_y_aislamiento.vpc_cidr' (requerido en modo 'auto').")
+        try:
+            ipaddress.ip_network(vpc_cidr_raw, strict=True)
+        except ValueError as exc:
+            raise ConfigValidationError(f"'red_y_aislamiento.vpc_cidr' inválido: {exc}") from exc
+
+        nat = red.get("nat_gateway") or {}
+        if not isinstance(nat, dict):
+            raise ConfigValidationError("'red_y_aislamiento.nat_gateway' debe ser un mapa.")
+        nat_modo = nat.get("modo", "single")
+        if nat_modo not in cls.ALLOWED_NAT_MODOS_AZURE:
+            raise ConfigValidationError(
+                f"'red_y_aislamiento.nat_gateway.modo' inválido para Azure: '{nat_modo}'. "
+                f"Permitidos: {cls.ALLOWED_NAT_MODOS_AZURE} ('per-az' no existe en Azure NAT Gateway, "
+                "que se asocia a nivel de subred)."
+            )
+
+        privada = red.get("workers_en_subred_privada", True)
+        if privada and nat_modo == "none":
+            raise ConfigValidationError(
+                "'workers_en_subred_privada: true' con 'nat_gateway.modo: none' en Azure deja a los "
+                "workers sin salida a internet para descargar el modelo (no hay equivalente a "
+                "'vpc_endpoints.s3' que lo compense en esta versión)."
+            )
 
     @classmethod
     def _validate_gateway(cls, config: Dict[str, Any]) -> None:
@@ -381,6 +440,14 @@ class ConfigValidator:
             raise ConfigValidationError("'gateway.dominio' debe ser un mapa.")
         if not dominio_cfg.get("habilitado", False):
             return
+
+        cloud = (config.get("red_y_aislamiento") or {}).get("cloud", "aws")
+        if cloud != "aws":
+            raise ConfigValidationError(
+                f"'gateway.dominio.habilitado: true' no está implementado todavía para 'cloud: {cloud}' "
+                "(dominio propio + TLS real sigue siendo solo AWS por ahora). Usa 'tls.modo: self-signed' "
+                "o deja 'gateway.dominio.habilitado: false'."
+            )
 
         disponibles = dominio_cfg.get("disponibles") or []
         if not isinstance(disponibles, list) or not disponibles:
@@ -976,7 +1043,7 @@ class TopologyBuilder:
                     public_ports.append(port)
 
         resources: Dict[str, Any] = {
-            "cloud": "aws",
+            "cloud": self.red.get("cloud", "aws"),
             "region": self.red["region"],
             "instance_type": gw.get("tipo_instancia", "t4g.large"),
             "disk_size": gw.get("disk_size", 100),
@@ -1064,7 +1131,7 @@ class TopologyBuilder:
         frac = wl.get("asignacion_fraccional", {})
 
         resources: Dict[str, Any] = {
-            "cloud": "aws",
+            "cloud": self.red.get("cloud", "aws"),
             "region": self.red["region"],
             "accelerators": f"{wl['accelerator']}:{wl['cantidad_gpus']}",
             "labels": {**self.red.get("tags_obligatorios", {}), "rol": "worker", "workload": wl["id"]},
@@ -1131,15 +1198,28 @@ class TopologyBuilder:
 
     def build_sky_gateway_config(self) -> Dict[str, Any]:
         """
-        Fuerza al Nodo Gateway a nacer en la misma VPC que los workers (con su
-        propio Security Group reservado), para que el túnel SSH bastion y las
-        rutas internas a la subred privada funcionen. Sin esto, SkyPilot puede
-        elegir la VPC por defecto de la cuenta, aislando al Gateway de los
+        Fuerza al Nodo Gateway a nacer en la misma VPC/VNet que los workers (con
+        su propio Security Group/NSG reservado), para que el túnel SSH bastion y
+        las rutas internas a la subred privada funcionen. Sin esto, SkyPilot puede
+        elegir la red por defecto de la cuenta, aislando al Gateway de los
         workers aunque ambos estén "arriba".
         """
-        aws_cfg: Dict[str, Any] = {}
         net = self._network_outputs
 
+        if self.red.get("cloud", "aws") == "azure":
+            # NOTA DE IMPLEMENTACIÓN: estas claves (resource_group/vnet/nsg) son
+            # las que SkyPilot documenta para pinear red en Azure, pero este
+            # repo no tenía precedente Azure -verificar contra
+            # `sky check azure -v` / el código instalado de SkyPilot
+            # (sky/clouds/azure.py) antes de confiar en esto en producción real.
+            azure_cfg: Dict[str, Any] = {}
+            if net:
+                azure_cfg["resource_group"] = net.resource_group_name
+                azure_cfg["vnet_name"] = net.vnet_name
+                azure_cfg["security_group_name"] = net.nsg_gateway_name
+            return {"azure": azure_cfg} if azure_cfg else {}
+
+        aws_cfg: Dict[str, Any] = {}
         vpc_name = net.vpc_name if net else self.red.get("vpc_name")
         sg_gateway = net.sg_gateway_name if net else self.red.get("security_group_gateway")
 
@@ -1154,11 +1234,36 @@ class TopologyBuilder:
     def build_sky_workers_config(self, gateway_ip: Optional[str] = None) -> Dict[str, Any]:
         """
         Genera la configuración de cliente de SkyPilot que fuerza a los workers a
-        vivir dentro de la VPC sin IP pública, tunelizando SSH por el Gateway.
+        vivir dentro de la VPC/VNet sin IP pública, tunelizando SSH por el Gateway.
         """
-        aws_cfg: Dict[str, Any] = {}
         net = self._network_outputs
 
+        if self.red.get("cloud", "aws") == "azure":
+            # Mismas notas que build_sky_gateway_config() sobre verificar estas
+            # claves contra la versión instalada de SkyPilot.
+            azure_cfg: Dict[str, Any] = {}
+            if net:
+                azure_cfg["resource_group"] = net.resource_group_name
+                azure_cfg["vnet_name"] = net.vnet_name
+                azure_cfg["security_group_name"] = net.nsg_workers_name
+            if self.red.get("workers_en_subred_privada", True):
+                azure_cfg["use_internal_ips"] = True
+                if gateway_ip:
+                    gateway_ssh_key = (
+                        Path.home() / ".sky" / "generated" / "ssh-keys" / f"{self.gateway_cluster}.key"
+                    )
+                    if gateway_ssh_key.exists():
+                        os.chmod(gateway_ssh_key, 0o600)
+                    azure_cfg["ssh_proxy_command"] = (
+                        f"ssh -W %h:%p -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                        # 'ubuntu', no 'azureuser': SkyPilot normaliza el usuario remoto a
+                        # 'ubuntu' en sus VMs sin importar la nube (ver REMOTE_ROOT =
+                        # "/home/ubuntu/..." arriba, ya asumido para AWS Y Azure).
+                        f"-o ConnectTimeout=10 -i {gateway_ssh_key} ubuntu@{gateway_ip}"
+                    )
+            return {"azure": azure_cfg} if azure_cfg else {}
+
+        aws_cfg: Dict[str, Any] = {}
         vpc_name = net.vpc_name if net else self.red.get("vpc_name")
         if vpc_name:
             aws_cfg["vpc_name"] = vpc_name
@@ -1255,19 +1360,42 @@ def dump_yaml(data: Dict[str, Any], out_path: Path, header: bool = True) -> None
 
 def build_network_spec_from_config(config: Dict[str, Any]) -> "Any":
     """Traduce `red_y_aislamiento` + `gateway` + `workloads[].puerto` del contrato
-    a un `aws_network.NetworkSpec`. Solo tiene sentido en modo 'gestion_red: auto'."""
-    from aws_network import NetworkSpec  # import perezoso: boto3 solo hace falta aquí
-
+    a un `aws_network.NetworkSpec` (o `azure_network.AzureNetworkSpec` si
+    `red_y_aislamiento.cloud: azure`). Solo tiene sentido en modo 'gestion_red: auto'."""
     cliente = config["cliente"]
     red = config["red_y_aislamiento"]
     gw = config.get("gateway", {})
     nat = red.get("nat_gateway") or {}
-    endpoints = red.get("vpc_endpoints") or {}
     subredes = red.get("subredes") or {}
     tls = gw.get("tls") or {}
-    dominio = gw.get("dominio") or {}
 
     worker_ports = sorted({wl["puerto"] for wl in config["workloads"]})
+
+    if red.get("cloud", "aws") == "azure":
+        from azure_network import AzureNetworkSpec  # import perezoso: SDK de Azure solo hace falta aquí
+
+        return AzureNetworkSpec(
+            client_id=cliente["id"],
+            environment=cliente["entorno"],
+            region=red["region"],
+            vnet_cidr=red.get("vpc_cidr", "10.0.0.0/16"),
+            az_count=red.get("azs", 1),
+            public_subnet_cidrs=subredes.get("publicas"),
+            private_subnet_cidrs=subredes.get("privadas"),
+            nat_mode=nat.get("modo", "single"),
+            admin_cidrs=[red.get("cidr_admin_ssh", "0.0.0.0/0")],
+            public_cidrs=[red.get("cidr_permitido_gateway", "0.0.0.0/0")],
+            gateway_public_ports=gw.get("puertos_publicos", [80, 4000, 8000, 8080]),
+            worker_ports=worker_ports,
+            expose_direct_ports=bool(gw.get("exponer_puertos_directos", False)),
+            tls_enabled=bool(tls.get("habilitado", False)),
+            extra_tags=red.get("tags_obligatorios") or {},
+        )
+
+    from aws_network import NetworkSpec  # import perezoso: boto3 solo hace falta aquí
+
+    endpoints = red.get("vpc_endpoints") or {}
+    dominio = gw.get("dominio") or {}
 
     return NetworkSpec(
         client_id=cliente["id"],
@@ -1307,10 +1435,9 @@ def load_network_outputs_from_state(config: Dict[str, Any], state: Any, deployme
     entonces lanzaba el gateway en la VPC por defecto de la cuenta, no en la
     nuestra (bug real encontrado en una corrida de prueba real).
 
-    Devuelve None si el despliegue no tiene (todavía) VPC + ambos SGs registrados.
-    """
-    from aws_network import NetworkOutputs
-
+    Devuelve None si el despliegue no tiene (todavía) VPC + ambos SGs registrados
+    (o, en Azure, VNet + ambos NSG)."""
+    red = config.get("red_y_aislamiento", {})
     resources = state.list_resources(deployment_id)
     by_component: Dict[str, List[Dict[str, Any]]] = {}
     for res in resources:
@@ -1320,13 +1447,46 @@ def load_network_outputs_from_state(config: Dict[str, Any], state: Any, deployme
         rows = by_component.get(component)
         return rows[0] if rows else None
 
+    cliente = config["cliente"]
+
+    if red.get("cloud", "aws") == "azure":
+        from azure_network import AzureNetworkOutputs
+
+        vnet_row = first("vnet")
+        nsg_gw_row = first("nsg-gateway")
+        nsg_wk_row = first("nsg-workers")
+        rg_row = first("resource-group")
+        subnet_pub_row = first("subnet-public")
+        subnet_priv_row = first("subnet-private")
+        if not vnet_row or not nsg_gw_row or not nsg_wk_row or not rg_row:
+            return None
+
+        def resolved_name_azure(row: Dict[str, Any], fallback_suffix: str) -> str:
+            attrs = row.get("attributes") or {}
+            return attrs.get("name") or f"sooniverse-{cliente['id']}-{cliente['entorno']}-{fallback_suffix}"
+
+        return AzureNetworkOutputs(
+            deployment_id=deployment_id,
+            resource_group_name=resolved_name_azure(rg_row, "rg"),
+            vnet_id=vnet_row["aws_id"],
+            vnet_name=resolved_name_azure(vnet_row, "vnet"),
+            public_subnet_id=(subnet_pub_row or {}).get("aws_id", ""),
+            private_subnet_id=(subnet_priv_row or {}).get("aws_id", ""),
+            nat_gateway_id=(first("natgw") or {}).get("aws_id"),
+            nsg_gateway_id=nsg_gw_row["aws_id"],
+            nsg_gateway_name=resolved_name_azure(nsg_gw_row, "gateway"),
+            nsg_workers_id=nsg_wk_row["aws_id"],
+            nsg_workers_name=resolved_name_azure(nsg_wk_row, "workers"),
+            managed_by_us=True,
+        )
+
+    from aws_network import NetworkOutputs
+
     vpc_row = first("vpc")
     sg_gw_row = first("sg-gateway")
     sg_wk_row = first("sg-workers")
     if not vpc_row or not sg_gw_row or not sg_wk_row:
         return None
-
-    cliente = config["cliente"]
 
     def resolved_name(row: Dict[str, Any], fallback_suffix: str) -> str:
         attrs = row.get("attributes") or {}
@@ -2233,16 +2393,40 @@ def deploy(
                 builder.apply_network_outputs(loaded_outputs)
 
     # --- FASE: network --------------------------------------------------------
+    cloud = red.get("cloud", "aws")
     if "network" in phases:
-        print("\n--- [RED] Red AWS (VPC/subredes/NAT/Security Groups) ---")
+        print(f"\n--- [RED] Red {cloud.upper()} (VPC-VNet/subredes/NAT/Security Groups-NSG) ---")
+        # Compara 'vpc_cidr' contra otros despliegues activos en la misma
+        # 'region' -es una simple comparación de strings/CIDR sobre
+        # config_snapshot, cloud-agnóstica: los slugs de región de AWS
+        # ("us-east-1") y Azure ("eastus") nunca coinciden entre sí, así que
+        # no hay riesgo de falsos positivos cruzando nubes.
         check_cidr_isolation(config)
         if red.get("gestion_red", "auto") == "auto" and dry_run and not deployment_id:
             # Sin despliegue previo: no hay nada que leer y, para no escribir en
-            # PostgreSQL durante un dry-run, no se instancia AwsNetworkManager
+            # PostgreSQL durante un dry-run, no se instancia el *NetworkManager
             # (su constructor abriría un deployment_id nuevo si no se le pasa uno).
-            print("[RED] --dry-run: no existe un despliegue previo para "
+            print(f"[RED] --dry-run: no existe un despliegue previo para "
                   f"{config['cliente']['id']}/{config['cliente']['entorno']}/{red['region']}. "
-                  "Se crearía una VPC, subredes, NAT, route tables y Security Groups nuevos.")
+                  f"Se crearía una red {cloud.upper()} nueva (VPC/VNet, subredes, NAT, Security Groups/NSG).")
+        elif red.get("gestion_red", "auto") == "auto" and cloud == "azure":
+            from azure_network import AzureNetworkManager
+
+            spec = build_network_spec_from_config(config)
+            mgr = AzureNetworkManager(spec, state=state, deployment_id=deployment_id)
+            if dry_run:
+                print("[RED] --dry-run: no se ejecuta ninguna llamada mutante a Azure.")
+                for item in mgr.plan_destroy():
+                    print(f"       (existente) {item.component} {item.azure_id}")
+            else:
+                t0 = time.monotonic()
+                network_outputs = mgr.provision()
+                print(f"[RED] ResourceGroup={network_outputs.resource_group_name} "
+                      f"VNet={network_outputs.vnet_id} ({network_outputs.vnet_name}) "
+                      f"NSG-gateway={network_outputs.nsg_gateway_id} NSG-workers={network_outputs.nsg_workers_id} "
+                      f"({time.monotonic() - t0:.1f}s)")
+                builder.apply_network_outputs(network_outputs)
+                artefactos = generate_manifests(config, out_dir, builder=builder)
         elif red.get("gestion_red", "auto") == "auto":
             from aws_network import AwsNetworkManager
 
@@ -2269,7 +2453,7 @@ def deploy(
                 # El render de manifiestos depende de los IDs reales de red: regenerarlos ahora.
                 artefactos = generate_manifests(config, out_dir, builder=builder)
         else:
-            print("[SKIP] 'gestion_red: existente' -> se omite AwsNetworkManager (VPC/SGs manuales).")
+            print(f"[SKIP] 'gestion_red: existente' -> se omite *NetworkManager ({cloud}, VPC/VNet-SGs manuales).")
 
     # --- FASE: gateway ----------------------------------------------------------
     if "gateway" in phases and artefactos.get("gateway") and dry_run:
@@ -2623,9 +2807,10 @@ def main() -> int:
                 dry_run=args.dry_run,
             )
         else:
-            print("\n[INFO] Para aprovisionar la topología en AWS:")
+            cloud_label = config["red_y_aislamiento"].get("cloud", "aws").upper()
+            print(f"\n[INFO] Para aprovisionar la topología en {cloud_label}:")
             print("       python scripts/generate_infra.py --run")
-            print("       python scripts/generate_infra.py --run --dry-run          # plan, sin tocar AWS")
+            print(f"       python scripts/generate_infra.py --run --dry-run          # plan, sin tocar {cloud_label}")
             print("       python scripts/generate_infra.py --run --only network     # solo la capa de red")
             print("       python scripts/generate_infra.py --run --only gateway     # solo el gateway")
 

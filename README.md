@@ -200,6 +200,7 @@ cliente:
   modo: "byoc"                      # [Enum]  byoc | hosted
 
 red_y_aislamiento:
+  cloud: "aws"                      # [Enum] aws (default, histórico) | azure -ver docs de Azure más abajo
   region: "us-east-1"
   aws_profile: null                 # perfil de ~/.aws/credentials por cliente (opcional)
   image_id: "ami-0d001f8052688dc45" # AMI de los workers GPU
@@ -370,6 +371,117 @@ sky check                                            # valida el acceso de SkyPi
 cp .env.example .env                                 # y completar credenciales
 ```
 
+### 7.1 Azure (modo `hosted`, opcional)
+
+Para desplegar con `red_y_aislamiento.cloud: "azure"` (ver `clients/_ejemplo_azure/`)
+hace falta además:
+
+```bash
+pip install "skypilot[azure]" azure-identity azure-mgmt-network azure-mgmt-resource
+# Además, solo para scripts/azure_check_gpu_quota.py (diagnóstico de cuotas, 7.1.1):
+pip install azure-mgmt-compute azure-mgmt-quota azure-mgmt-subscription
+
+az ad sp create-for-rbac --name sooniverse-deploy-hosted \
+  --role Contributor --scopes /subscriptions/<AZURE_SUBSCRIPTION_ID>
+# Completa AZURE_SUBSCRIPTION_ID/AZURE_TENANT_ID/AZURE_CLIENT_ID/AZURE_CLIENT_SECRET en .env
+
+az login --service-principal -u <AZURE_CLIENT_ID> -p <AZURE_CLIENT_SECRET> --tenant <AZURE_TENANT_ID>
+sky check azure
+```
+
+A diferencia de AWS, Azure necesita además una sesión de `az login` activa en la
+máquina que despliega (varias rutas de `azure-identity`/SkyPilot caen de vuelta
+a esa sesión cacheada), y las suscripciones nuevas traen **cuota 0** para
+familias de VM con GPU -pídela en el Portal (o con `scripts/azure_check_gpu_quota.py`,
+ver 7.1.1) antes de intentar levantar workers. Alcance de este primer corte:
+solo modo `hosted` (cuenta propia de Sooniverse), sin dominio propio/TLS real
+(`self-signed` sí funciona), sin `gestion_red: existente`. Ver
+`scripts/azure_network.py` para el detalle completo del mapeo de recursos
+AWS -> Azure.
+
+#### 7.1.1 GPU: no existe L4/L40S en Azure -qué familia y región pedir
+
+**No hay ningún tamaño de VM con GPU L4 o L40S en el catálogo público de Azure**
+(verificado el 2026-08-30 contra `azure-mgmt-compute` -`resource_skus.list()`-
+sobre una suscripción real, en las ~70 regiones públicas; L40S solo existe para
+Azure Local/Stack HCI on-prem, no en regiones de nube pública). Si tu contrato
+(`config_global.yaml`) viene de una plantilla AWS con `accelerator: "L4"`, no
+hay traducción posible -hay que elegir una familia Azure real:
+
+| Preferencia | Familia Azure (`az`/SDK) | Tamaños de ejemplo | Rol en L4 |
+|---|---|---|---|
+| 1ª opción (más cercana a L4 para inferencia) | `StandardNVADSA10v5Family` (A10) | `Standard_NV6ads_A10_v5`, `Standard_NV12ads_A10_v5` | Reemplazo recomendado |
+| 2ª opción (más barata, más antigua) | `Standard NCASv3_T4 Family` (T4) | `Standard_NC4as_T4_v3`, `Standard_NC8as_T4_v3` | Fallback |
+
+**Cómo se decidió la región**: se consultó en vivo, contra la suscripción real
+de Sooniverse, qué combinaciones familia+región no tienen la restricción
+`NOT_AVAILABLE_FOR_SUBSCRIPTION` (un bloqueo de Azure previo a la cuota en sí).
+`southcentralus` y `westus2` salieron limpios para AMBAS familias (A10 y T4);
+`eastus`/`eastus2`/`westeurope` están bloqueados para A10 en esta suscripción
+aunque sí sirven para T4 -por eso no basta con mirar solo la documentación de
+Azure, hay que verificar contra la suscripción real:
+
+```bash
+# 1. Qué SKUs de GPU están realmente visibles para tu suscripción, y en qué
+#    regiones (marca las que Azure ya bloquea antes de la cuota):
+python scripts/azure_check_gpu_quota.py --skus --region southcentralus --region westus2 --region eastus
+
+# 2. Cuota actual (uso/límite) de cada familia GPU en una región:
+python scripts/azure_check_gpu_quota.py --quota southcentralus
+
+# 3. Pedir el aumento (16 vCPUs, ~1-2 workers L4-equivalentes según tamaño elegido):
+python scripts/azure_check_gpu_quota.py --request-increase southcentralus StandardNVADSA10v5Family 16
+python scripts/azure_check_gpu_quota.py --request-increase southcentralus "Standard NCASv3_T4 Family" 16
+```
+
+Estos comandos usan el SDK de Azure (`azure-mgmt-compute`/`azure-mgmt-quota`)
+con el Service Principal de `.env` -no dependen de tener `az` CLI instalada.
+Si prefieres la CLI, el equivalente es la página **My quotas** del Portal
+(Azure Home -> Quotas -> Compute) o la extensión `az quota` (`az extension add
+--name quota`); ver [Increase VM-family vCPU quotas](https://learn.microsoft.com/en-us/azure/quotas/per-vm-quota-requests).
+
+**Resultado real obtenido al ejecutar el paso 3 contra la suscripción de
+Sooniverse**: ambas peticiones fallaron con
+`HttpResponseError: status=200 code=ResourceNotAvailableForOffer`. La causa
+(diagnosticada con el comando de abajo) es que la suscripción es de tipo
+**Free Trial** (`quota_id: FreeTrial_2014-09-01`, `spending_limit: On`) -Azure
+**bloquea toda cuota de GPU en suscripciones Free Trial/Azure for Students,
+sin importar la región o familia elegida**. No es un problema de permisos del
+Service Principal ni de la región: es una regla de la oferta de suscripción.
+
+```bash
+python scripts/azure_check_gpu_quota.py --sub-info
+```
+
+**Solución**: pasar la suscripción a **Pay-As-You-Go** desde el Portal (Cost
+Management + Billing -> Upgrade subscription) -esto no se puede hacer por
+API/CLI, es una acción de facturación que solo el dueño de la cuenta puede
+confirmar. Una vez hecho el upgrade, repetir el paso 3 de arriba (misma
+familia/región recomendadas: `StandardNVADSA10v5Family` o
+`Standard NCASv3_T4 Family` en `southcentralus`/`westus2`).
+
+**Actualización tras el upgrade real (2026-08-30)**: confirmado que el
+upgrade a Pay-As-You-Go se reflejó (`--sub-info` mostró
+`quota_id: PayAsYouGo_2014-09-01`, `spending_limit: Off`), pero **ambas
+peticiones (T4 y A10, 16 vCPUs, `southcentralus`) volvieron a fallar**,
+ahora con un código distinto: `QuotaNotAvailableForResource` (en vez de
+`ResourceNotAvailableForOffer`). Verificado con
+`qc.quota_request_status.list(scope)` (historial completo de intentos, con
+`provisioningState: Failed` para ambas familias) que no es un problema del
+cuerpo de la petición -tiene el mismo formato que Azure devuelve al
+consultar la cuota existente (`limit_type: Independent`, `resource_type:
+Family`).
+
+Causa más probable (patrón muy reportado en Microsoft Q&A, ver
+[hilo relacionado](https://learn.microsoft.com/en-us/answers/questions/2264590/upgraded-my-azure-subscription-from-trial-to-pay-a)):
+Azure aplica una verificación anti-fraude adicional sobre cuota de GPU en
+suscripciones **recién** pasadas a Pay-As-You-Go, que puede tardar horas o
+más en liberarse, independiente de que la petición esté bien formada. No se
+resolvió reintentando en el momento. Próximo paso (a cargo del operador, no
+automatizable): reintentar `--request-increase` más tarde, o abrir un ticket
+de soporte desde el Portal (Quotas -> My quotas -> ícono de información ->
+"Create a support request") si el bloqueo persiste.
+
 ---
 
 ## 8. Notas para agentes de IA
@@ -425,7 +537,9 @@ Para no re-descargar pesos de varios GB en cada reinicio:
 | 7 | Multi-cliente (`clients/<id>/`, aislamiento de CIDR/artefactos/credenciales) | ✅ Completa |
 | 8 | Pruebas (moto + PostgreSQL real + smoke de nginx) y documentación completa (`docs/`) | ✅ Completa |
 | 9 | Modo BYOC real (IAM AssumeRole + External ID) — hook documentado, no implementado | Pendiente |
-| 10 | Segundo proveedor de nube (GCP) | Pendiente |
+| 10 | Segundo proveedor de nube: Azure, modo `hosted` (`scripts/azure_network.py`) | ✅ Completa (primer corte) |
+| 10.1 | Azure modo BYOC (Service Principal/tenant del cliente) | Pendiente |
+| 10.2 | Segundo proveedor de nube (GCP) | Pendiente |
 | 11 | Kubernetes (EKS/GKE + GPU Operator + Karpenter + KubeAI) | Pendiente |
 | 12 | TLS `letsencrypt`/`acm` (hoy solo `self-signed`) | Pendiente |
 
