@@ -1,0 +1,138 @@
+# ==============================================================================
+# PLANTILLA DE CLIENTE -- AZURE, modo "hosted" (cuenta propia de Sooniverse)
+# ==============================================================================
+# Primer corte de soporte Azure: solo modo 'hosted' (red_y_aislamiento.aws_profile
+# no aplica -no hay BYOC en Azure todavía, ver scripts/azure_network.py).
+#
+# Antes de usar esta plantilla:
+#   1. cp -r clients/_ejemplo_azure clients/<id-del-cliente>
+#   2. Crea el Service Principal y carga las 4 variables AZURE_* en .env
+#      (ver .env.example y el punto 1 de Manual_Dominio_AWS.md-equivalente
+#      todavía no escrito para Azure -por ahora, ver el plan de implementación).
+#   3. Ajusta cliente.id, red_y_aislamiento.region/vpc_cidr y workloads.
+#   4. Usa ese archivo con --config en todos los comandos, IGUAL que con AWS:
+#        python scripts/generate_infra.py --config clients/<id>/config_global.yaml --run
+#        python scripts/destroy_infra.py  --config clients/<id>/config_global.yaml --dry-run
+#
+# Diferencias de vocabulario frente a un cliente AWS (rellenar con valores
+# reales de Azure, NO hay traducción automática AWS->Azure):
+#   - red_y_aislamiento.region: slug de Azure (ej. "eastus", "westeurope"),
+#     no "us-east-1".
+#   - red_y_aislamiento.image_id: URN de imagen de Azure
+#     (ej. "Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest"), no un AMI id.
+#   - gateway.tipo_instancia / workloads[].tipo_instancia: SKU de Azure
+#     (ej. "Standard_D2as_v5", "Standard_NC4as_T4_v3"), no "t4g.large"/"g6.xlarge".
+#   - Antes de lanzar workers GPU: pide el incremento de cuota de la familia de
+#     VM con GPU en el Portal de Azure (las suscripciones nuevas traen cuota 0).
+#
+# Fuera de alcance en esta versión (ver ConfigValidator/azure_network.py):
+#   - gateway.dominio.habilitado: true (dominio propio + TLS real) -solo AWS
+#     por ahora. Usa gateway.tls.modo: "self-signed" si necesitas HTTPS.
+#   - red_y_aislamiento.gestion_red: "existente" (red pre-creada a mano).
+#   - red_y_aislamiento.nat_gateway.modo: "per-az" (no existe en Azure NAT
+#     Gateway) -solo "single" | "none".
+# ==============================================================================
+
+# 1. Datos del Cliente y Entorno
+cliente:
+  id: "mi-cliente-azure"       # ÚNICO por cliente: minúsculas, [a-z0-9-], máx 20 caracteres.
+  entorno: "dev"                # prod | dev
+  modo: "hosted"                # Azure BYOC no implementado todavía -ver docs/05_MULTICLIENTE.md (AWS)
+
+# 2. Variables de Red y Aislamiento
+red_y_aislamiento:
+  cloud: "azure"                 # NUEVO: aws (default) | azure
+  region: "eastus"                # slug de Azure, no "us-east-1"
+  aws_profile: null                # sin efecto con cloud: azure (ver .env.example AZURE_*)
+  image_id: "Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest"
+  gestion_red: "auto"               # único modo soportado en Azure por ahora
+  vpc_name: null
+  vpc_id: null
+  subnet_id: null
+  vpc_cidr: "10.20.0.0/16"          # CIDR de la VNet -distinto al de otros clientes activos
+  azs: 1                             # Azure no tiene subredes zonales; >1 se ignora con un WARNING
+  subredes:
+    publicas: null
+    privadas: null
+  nat_gateway:
+    modo: "single"                  # single | none (Azure no tiene "per-az")
+    timeout_segundos: 300
+  vpc_endpoints:
+    s3: true                        # sin efecto en Azure (no hay VPC Endpoint tipo S3)
+    ecr: false
+  workers_en_subred_privada: true
+  cidr_permitido_gateway: "0.0.0.0/0"
+  cidr_admin_ssh: "0.0.0.0/0"        # Restringe a la IP/VPN del operador en producción real.
+  security_group_workers: null
+  security_group_gateway: null
+  tags_obligatorios:
+    cliente_id: "mi-cliente-azure"
+    modo: "hosted"
+    entorno: "dev"
+    gestionado_por: "sooniverse"
+
+# 3. Nodo Gateway
+gateway:
+  habilitado: true
+  tipo_instancia: "Standard_D2as_v5"   # SKU de Azure (CPU-only), no "t4g.large"
+  disk_size: 100
+  exponer_puertos_directos: false
+  puertos_publicos:
+    - 4000
+    - 8080
+    - 8000
+  load_balancing_strategy: "latency-based-routing"
+  # Dominio propio + TLS real: NO implementado para Azure en esta versión
+  # (ver ConfigValidator._validate_dominio). Deja 'habilitado: false'.
+  dominio:
+    habilitado: false
+    seleccionado: null
+    disponibles: []
+    staging: false
+    redirigir_http: true
+    eip_persistente: true
+    esperar_dns_segundos: 300
+  tls:
+    habilitado: false                 # true + modo: self-signed sí funciona en Azure (certbot/openssl en la VM)
+    modo: "self-signed"
+    dominio: null
+  litellm:
+    master_key_env: "LITELLM_MASTER_KEY"
+    num_retries: 2
+    request_timeout: 600
+    cooldown_time: 30
+    allowed_fails: 2
+  open_webui:
+    habilitado: true
+    signup_habilitado: false
+    tareas_automaticas: "segun_capacidades"
+    code_interpreter: "segun_capacidades"
+  django_metrics:
+    habilitado: true
+    puerto: 8000
+    metrics_refresh_interval: 300
+
+# 4. Automatización de Base de Datos
+base_de_datos:
+  AUTO_INIT_DB: true
+  auto_refresh_metrics: true
+  schema_dir: "database"
+
+# 5. Perfil de Cargas de Trabajo -- SKU de GPU de Azure, no de AWS.
+#    Pide antes el incremento de cuota de esta familia de VM en el Portal.
+workloads:
+  - id: "qwen3-5-llm"
+    modelo: "qwen3.5"
+    hf_repo: "cyankiwi/Qwen3.5-2B-AWQ-4bit"
+    tipo_tarea: "llm-texto"
+    accelerator: "T4"                    # informativo; el SKU real lo fija tipo_instancia
+    cantidad_gpus: 1
+    replicas: 1
+    tipo_instancia: "Standard_NC4as_T4_v3"   # SKU con GPU de Azure, no "g6.xlarge"
+    puerto: 8007
+    nombre_publico: "sooniverse-qwen3.5"
+    peso_balanceo: 1
+    asignacion_fraccional:
+      habilitado: true
+      gpu_memory_utilization: 0.95
+      max_model_len: 16384
