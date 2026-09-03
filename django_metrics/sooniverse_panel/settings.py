@@ -147,7 +147,8 @@ STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {
         "BACKEND": (
-            "django.contrib.staticfiles.storage.StaticFilesStorage" if DEBUG
+            "django.contrib.staticfiles.storage.StaticFilesStorage"
+            if DEBUG
             else "sooniverse_panel.storage.SooniverseStaticFilesStorage"
         )
     },
@@ -184,6 +185,13 @@ LITELLM_TIMEOUT = int(_env("LITELLM_TIMEOUT", "30"))
 # todavía (primer render, antes de 'sky launch'), cae al valor interno para
 # no dejar la UI con una URL vacía.
 PUBLIC_BASE_URL = (_env("PUBLIC_BASE_URL", "") or LITELLM_BASE_URL).rstrip("/")
+
+# Destino del botón de navegación panel -> chat (templates/metrics/base.html,
+# .sv-iconbtn del header). En producción nginx sirve el chat en la raíz del
+# MISMO origen que el panel ('/'), así que el default relativo basta; en
+# desarrollo local el chat corre en otro puerto (p. ej. http://localhost:8080),
+# ahí se fija CHAT_URL absoluto. Espejo de SOONIVERSE_PANEL_URL en Open WebUI.
+CHAT_URL = _env("CHAT_URL", "/")
 
 # Contexto de tenancy heredado del contrato de infraestructura
 CLIENTE_ID = _env("CLIENTE_ID", "default")

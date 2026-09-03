@@ -100,7 +100,9 @@ def _load_effective_capabilities(capabilities_dir: Optional[Path]) -> Dict[str, 
         return default
 
 
-def _resolve_open_webui_flag(owui_cfg: Dict[str, Any], override_key: str, capability_value: bool) -> bool:
+def _resolve_open_webui_flag(
+    owui_cfg: Dict[str, Any], override_key: str, capability_value: bool
+) -> bool:
     """'segun_capacidades' (default) usa la verdad observada; 'activado'/
     'desactivado' son el escape manual del operador (ver config_global.yaml,
     sección gateway.open_webui)."""
@@ -227,7 +229,9 @@ def render_nginx_conf(config: Dict[str, Any]) -> str:
     letsencrypt_mode = tls_enabled and modo == "letsencrypt"
 
     litellm_cfg = gw.get("litellm", {}) or {}
-    litellm_base_url = (litellm_cfg.get("base_url") or "http://litellm:4000").rstrip("/")
+    litellm_base_url = (litellm_cfg.get("base_url") or "http://litellm:4000").rstrip(
+        "/"
+    )
     parsed_litellm = urlsplit(
         litellm_base_url if "://" in litellm_base_url else f"//{litellm_base_url}"
     )
@@ -330,10 +334,12 @@ server {{
 def _ports_or_expose(service_port: int, expose_direct: bool) -> str:
     if expose_direct:
         return f'    ports:\n      - "{service_port}:{service_port}"\n'
-    return f"    expose:\n      - \"{service_port}\"\n"
+    return f'    expose:\n      - "{service_port}"\n'
 
 
-def render_docker_compose(config: Dict[str, Any], capabilities_dir: Optional[Path] = None) -> str:
+def render_docker_compose(
+    config: Dict[str, Any], capabilities_dir: Optional[Path] = None
+) -> str:
     gw = config.get("gateway", {})
     expose_direct = bool(gw.get("exponer_puertos_directos", False))
     tls = gw.get("tls", {}) or {}
@@ -348,11 +354,19 @@ def render_docker_compose(config: Dict[str, Any], capabilities_dir: Optional[Pat
     # en su lugar, en vez de fallar limpiamente).
     cliente_cfg = config.get("cliente", {})
     gateway_cluster_name = f"sooniverse-{cliente_cfg.get('id', 'default')}-{cliente_cfg.get('entorno', 'prod')}-gw"
-    gateway_ssh_key = Path.home() / ".sky" / "generated" / "ssh-keys" / f"{gateway_cluster_name}.key"
-    ssh_key_volume = "      - ../../.ssh_bastion_key:/app/.ssh/bastion_key:ro\n" if gateway_ssh_key.exists() else ""
+    gateway_ssh_key = (
+        Path.home() / ".sky" / "generated" / "ssh-keys" / f"{gateway_cluster_name}.key"
+    )
+    ssh_key_volume = (
+        "      - ../../.ssh_bastion_key:/app/.ssh/bastion_key:ro\n"
+        if gateway_ssh_key.exists()
+        else ""
+    )
 
     litellm_cfg = gw.get("litellm", {}) or {}
-    litellm_base_url = (litellm_cfg.get("base_url") or "http://litellm:4000").rstrip("/")
+    litellm_base_url = (litellm_cfg.get("base_url") or "http://litellm:4000").rstrip(
+        "/"
+    )
     parsed_litellm = urlsplit(
         litellm_base_url if "://" in litellm_base_url else f"http://{litellm_base_url}"
     )
@@ -373,7 +387,8 @@ def render_docker_compose(config: Dict[str, Any], capabilities_dir: Optional[Pat
         owui_cfg, "code_interpreter", effective["any_tool_calling"]
     )
     task_generation_env = "\n".join(
-        f"      {key}: \"{_bool_env(tareas_automaticas_on)}\"" for key in OPEN_WEBUI_TASK_ENV_KEYS
+        f'      {key}: "{_bool_env(tareas_automaticas_on)}"'
+        for key in OPEN_WEBUI_TASK_ENV_KEYS
     )
 
     modo_tls = tls.get("modo", "self-signed")
@@ -394,13 +409,17 @@ def render_docker_compose(config: Dict[str, Any], capabilities_dir: Optional[Pat
             # --delete no debería borrar los certs, pero tampoco es el sitio
             # para depender de eso -certbot y renovación viven en un path del
             # host ajeno al árbol sincronizado.
-            proxy_volumes.append("      - /opt/sooniverse/letsencrypt:/etc/letsencrypt:ro")
-            proxy_volumes.append("      - /opt/sooniverse/certbot-www:/var/www/certbot:ro")
+            proxy_volumes.append(
+                "      - /opt/sooniverse/letsencrypt:/etc/letsencrypt:ro"
+            )
+            proxy_volumes.append(
+                "      - /opt/sooniverse/certbot-www:/var/www/certbot:ro"
+            )
             # nginx no relee ssl_certificate en caliente: recarga periódica para
             # tomar el certificado renovado por el sidecar 'certbot' sin caídas.
             proxy_command = (
                 '    command: ["sh", "-c", '
-                '"while :; do sleep 21600 & wait $!; nginx -s reload; done & nginx -g \'daemon off;\'"]\n'
+                "\"while :; do sleep 21600 & wait $!; nginx -s reload; done & nginx -g 'daemon off;'\"]\n"
             )
             certbot_service = """
   certbot:
@@ -548,6 +567,10 @@ services:
       WEBUI_AUTH_TRUSTED_EMAIL_HEADER: X-Sooniverse-Email
       WEBUI_AUTH_TRUSTED_NAME_HEADER: X-Sooniverse-Name
       ENABLE_LOGIN_FORM: "False"
+      # Destino del botón de navegación chat -> panel (overlay sooniverse-nav.js;
+      # entrypoint.sh lo escribe en sooniverse-nav-config.js en cada arranque).
+      # Default: nginx sirve el panel bajo /panel/ en el mismo origen que el chat.
+      SOONIVERSE_PANEL_URL: ${{SOONIVERSE_PANEL_URL:-/panel/}}
       # Persistencia relacional en el MISMO esquema que LiteLLM y Django (ver
       # docs/03_ESTADO_Y_BD.md). 'webui_data' se mantiene: ficheros subidos y
       # el vector store local (Chroma) no son relacionales y siguen en disco.
@@ -650,6 +673,9 @@ services:
       # apuntar sus llamadas a la API (panel /apikeys/, cabecera del panel),
       # nunca para las llamadas internas de litellm_client.py.
       PUBLIC_BASE_URL: ${{PUBLIC_BASE_URL:-}}
+      # Destino del botón de navegación panel -> chat (base.html .sv-iconbtn).
+      # Default: nginx sirve el chat en la raíz del mismo origen que el panel.
+      CHAT_URL: ${{CHAT_URL:-/}}
       LITELLM_MASTER_KEY: ${{LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}}
       CLIENTE_ID: ${{CLIENTE_ID:-default}}
       ENTORNO: ${{ENTORNO:-prod}}
@@ -734,20 +760,28 @@ def render(config: Dict[str, Any], capabilities_dir: Optional[Path] = None) -> N
     Fase 6). Si se omite, se asume que aún no hay sondeo (fail-closed)."""
     _derive_tls_from_dominio(config)
     NGINX_CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
-    NGINX_CONF_PATH.write_text(render_nginx_conf(config), encoding="utf-8", newline="\n")
+    NGINX_CONF_PATH.write_text(
+        render_nginx_conf(config), encoding="utf-8", newline="\n"
+    )
     print(f"[OK] nginx     -> {NGINX_CONF_PATH.relative_to(REPO_ROOT)}")
 
-    COMPOSE_PATH.write_text(render_docker_compose(config, capabilities_dir), encoding="utf-8", newline="\n")
+    COMPOSE_PATH.write_text(
+        render_docker_compose(config, capabilities_dir), encoding="utf-8", newline="\n"
+    )
     print(f"[OK] compose   -> {COMPOSE_PATH.relative_to(REPO_ROOT)}")
 
     gw = config.get("gateway", {})
     expose_direct = bool(gw.get("exponer_puertos_directos", False))
     if not expose_direct:
-        print("[INFO] exponer_puertos_directos=false -> 4000/8000/8080 solo accesibles "
-              "dentro de la red Docker; nginx (80/443) es la única puerta pública.")
+        print(
+            "[INFO] exponer_puertos_directos=false -> 4000/8000/8080 solo accesibles "
+            "dentro de la red Docker; nginx (80/443) es la única puerta pública."
+        )
     else:
-        print("[WARNING] exponer_puertos_directos=true -> litellm/open-webui/metrics "
-              "publican sus puertos directamente al host. Usar solo en dev/depuración.")
+        print(
+            "[WARNING] exponer_puertos_directos=true -> litellm/open-webui/metrics "
+            "publican sus puertos directamente al host. Usar solo en dev/depuración."
+        )
 
 
 def _artifacts_dir_for(config_path: Path, config: Dict[str, Any]) -> Path:
@@ -755,7 +789,9 @@ def _artifacts_dir_for(config_path: Path, config: Dict[str, Any]) -> Path:
     ver ese docstring): raíz del repo si --config es el config_global.yaml
     raíz, `.artifacts/<cliente>-<entorno>/` si no."""
     try:
-        is_default_root_config = config_path.resolve() == (REPO_ROOT / "config_global.yaml").resolve()
+        is_default_root_config = (
+            config_path.resolve() == (REPO_ROOT / "config_global.yaml").resolve()
+        )
     except OSError:
         is_default_root_config = False
     if is_default_root_config:
@@ -765,7 +801,9 @@ def _artifacts_dir_for(config_path: Path, config: Dict[str, Any]) -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Renderiza nginx/default.conf y docker-compose.yml del Gateway.")
+    parser = argparse.ArgumentParser(
+        description="Renderiza nginx/default.conf y docker-compose.yml del Gateway."
+    )
     parser.add_argument("--config", default=str(REPO_ROOT / "config_global.yaml"))
     args = parser.parse_args()
 

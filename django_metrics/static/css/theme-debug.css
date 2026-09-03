@@ -232,6 +232,8 @@ span.flatpickr-weekday { color: var(--text-muted); background: transparent; font
 .sv-tooltip--bottom-end:hover .sv-tooltip__bubble, .sv-tooltip--bottom-end:focus-within .sv-tooltip__bubble, .sv-tooltip--bottom-start:hover .sv-tooltip__bubble, .sv-tooltip--bottom-start:focus-within .sv-tooltip__bubble, .sv-tooltip--bottom:hover .sv-tooltip__bubble, .sv-tooltip--bottom:focus-within .sv-tooltip__bubble { opacity: 1; transform: translateY(0); }
 .sv-tooltip--top-start .sv-tooltip__bubble { transform: translateY(4px); }
 .sv-tooltip--top-start:hover .sv-tooltip__bubble, .sv-tooltip--top-start:focus-within .sv-tooltip__bubble { opacity: 1; transform: translateY(0); }
+.sv-tooltip--nav { margin-left: 0; }
+.sv-tooltip--nav .sv-tooltip__bubble { font-size: var(--text-xs); line-height: 1.4; white-space: nowrap; }
 
 .sv-card__summary { transition: background-color var(--dur-fast) var(--ease-out); }
 .sv-card__summary:hover { background-color: var(--surface-1); }

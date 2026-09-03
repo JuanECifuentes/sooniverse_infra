@@ -3,12 +3,11 @@
  * ==============================================================================
  * Tokens del Manual de imagen (ver .claude/skills/sooniverse-ui-identity).
  * Servido como estático en /sooniverse.css (SPAStaticFiles de Open WebUI sirve
- * cualquier archivo de FRONTEND_BUILD_DIR). AÚN NO enlazado desde index.html:
- * activarlo requiere un patch sobre el HTML servido, que es alcance de la
- * iteración de re-tematizado visual completo, no de esta (solo funcional).
+ * cualquier archivo de FRONTEND_BUILD_DIR) y enlazado desde index.html por el
+ * Dockerfile (mismo mecanismo sed que el splash SVG).
  *
- * Cuando se enlace: solo redefine custom properties y overrides puntuales con
- * estos tokens. Nunca edites el CSS de Tailwind generado por el build.
+ * Solo redefine custom properties y overrides puntuales con estos tokens.
+ * Nunca edites el CSS de Tailwind generado por el build.
  */
 
 :root {
@@ -27,10 +26,128 @@
   --sv-accent: #7c86ff;
   --sv-accent-hover: #919aff;
   --sv-accent-pressed: #615fff;
+  --sv-accent-soft: rgba(124, 134, 255, 0.14);
+  --sv-accent-border: rgba(124, 134, 255, 0.35);
 
   --sv-positive: #3fb968;
   --sv-warning: #d99a3d;
   --sv-negative: #e0616f;
+
+  --sv-radius-sm: 6px;
+  --sv-radius-md: 10px;
+  --sv-text-xs: 11px;
+
+  --sv-shadow-1: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+/* Botón de navegación chat -> panel (ver overlay/static/sooniverse-nav.js).
+   Misma geometría y estilo que .sv-iconbtn en el panel (theme-sooniverse.css):
+   llamativo pero sobrio (fondo acento soft translúcido + borde acento nítido,
+   relleno acento hover al interactuar), 34x34, radio 10px, icono 18px stroke 1.8. */
+.sv-navbtn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--sv-accent);
+  border-radius: var(--sv-radius-md);
+  background-color: var(--sv-accent-soft);
+  color: var(--sv-accent);
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    box-shadow 160ms ease;
+}
+.sv-navbtn:hover {
+  border-color: var(--sv-accent-hover);
+  background-color: var(--sv-accent-hover);
+  color: var(--sv-surface-0);
+  box-shadow: var(--sv-shadow-1);
+}
+.sv-navbtn:active {
+  border-color: var(--sv-accent-pressed);
+  background-color: var(--sv-accent-pressed);
+  color: var(--sv-surface-0);
+}
+.sv-navbtn:focus-visible {
+  outline: 2px solid var(--sv-accent-hover);
+  outline-offset: 2px;
+}
+.sv-navbtn svg {
+  width: 18px;
+  height: 18px;
+  stroke-width: 1.8;
+}
+
+/* Tooltip accesible (hover / focus-visible, nunca title="..."): mismo patrón
+   que .sv-tooltip del panel. Anclado a la derecha para no desbordar la esquina
+   superior derecha de la ventana. */
+.sv-navbtn::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  padding: 6px 10px;
+  background-color: var(--sv-surface-3);
+  border: 1px solid var(--sv-border-strong);
+  border-radius: var(--sv-radius-sm);
+  color: var(--sv-text-secondary);
+  font-size: var(--sv-text-xs);
+  line-height: 1.4;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+  z-index: 60;
+}
+.sv-navbtn:hover::after,
+.sv-navbtn:focus-visible::after {
+  opacity: 1;
+}
+
+/* Fallback flotante (páginas sin topbar del chat): abajo a la derecha, con el
+   tooltip por ENCIMA del botón. Única sombra permitida: --sv-shadow-1. */
+.sv-navbtn--float {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 40;
+  box-shadow: var(--sv-shadow-1);
+}
+.sv-navbtn--float::after {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
+
+/* Accesibilidad: movimiento reducido */
+@media (prefers-reduced-motion: reduce) {
+  .sv-navbtn,
+  .sv-navbtn::after {
+    transition: none !important;
+  }
+}
+
+/* Modo claro del chat (el tema del usuario manda): equivalentes neutros de los
+   tokens que consume el botón. Solo redefinición de tokens, nunca colores sueltos. */
+html:not(.dark) {
+  --sv-surface-0: #ffffff;
+  --sv-border-subtle: rgba(0, 0, 0, 0.1);
+  --sv-border-strong: rgba(0, 0, 0, 0.2);
+  --sv-surface-2: rgba(0, 0, 0, 0.04);
+  --sv-surface-3: rgba(0, 0, 0, 0.08);
+  --sv-text-primary: #1f1f22;
+  --sv-text-secondary: #5c5c63;
+  --sv-accent: #5e69ee;
+  --sv-accent-hover: #4e58db;
+  --sv-accent-pressed: #404ac5;
+  --sv-accent-soft: rgba(94, 105, 238, 0.12);
+  --sv-accent-border: rgba(94, 105, 238, 0.35);
 }
 
 /* Optimización para el Splash Screen con SVG Vectorial Animado */

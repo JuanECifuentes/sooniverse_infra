@@ -100,6 +100,7 @@ def artifacts_dir_for(config_path: Path, config: Dict[str, Any]) -> Path:
     per_client_dir.mkdir(parents=True, exist_ok=True)
     return per_client_dir
 
+
 REMOTE_ROOT = "/home/ubuntu/sooniverse_infra"
 
 
@@ -142,7 +143,9 @@ class ConfigValidator:
     @classmethod
     def validate(cls, config: Dict[str, Any]) -> None:
         if not isinstance(config, dict):
-            raise ConfigValidationError("El archivo de configuración debe ser un mapa YAML válido.")
+            raise ConfigValidationError(
+                "El archivo de configuración debe ser un mapa YAML válido."
+            )
 
         cls._validate_cliente(config)
         cls._validate_red(config)
@@ -184,7 +187,9 @@ class ConfigValidator:
     def _validate_red(cls, config: Dict[str, Any]) -> None:
         red = config.get("red_y_aislamiento")
         if not red or not isinstance(red, dict):
-            raise ConfigValidationError("Falta la sección obligatoria 'red_y_aislamiento'.")
+            raise ConfigValidationError(
+                "Falta la sección obligatoria 'red_y_aislamiento'."
+            )
 
         if not red.get("region"):
             raise ConfigValidationError("Falta 'red_y_aislamiento.region'.")
@@ -195,7 +200,9 @@ class ConfigValidator:
 
         privada = red.get("workers_en_subred_privada", True)
         if not isinstance(privada, bool):
-            raise ConfigValidationError("'red_y_aislamiento.workers_en_subred_privada' debe ser booleano.")
+            raise ConfigValidationError(
+                "'red_y_aislamiento.workers_en_subred_privada' debe ser booleano."
+            )
 
         gestion_red = red.get("gestion_red", "auto")
         if gestion_red not in cls.ALLOWED_GESTION_RED:
@@ -220,19 +227,27 @@ class ConfigValidator:
     def _validate_red_auto(cls, red: Dict[str, Any]) -> None:
         vpc_cidr_raw = red.get("vpc_cidr")
         if not vpc_cidr_raw:
-            raise ConfigValidationError("Falta 'red_y_aislamiento.vpc_cidr' (requerido en modo 'auto').")
+            raise ConfigValidationError(
+                "Falta 'red_y_aislamiento.vpc_cidr' (requerido en modo 'auto')."
+            )
         try:
             vpc_net = ipaddress.ip_network(vpc_cidr_raw, strict=True)
         except ValueError as exc:
-            raise ConfigValidationError(f"'red_y_aislamiento.vpc_cidr' inválido: {exc}") from exc
+            raise ConfigValidationError(
+                f"'red_y_aislamiento.vpc_cidr' inválido: {exc}"
+            ) from exc
 
         azs = red.get("azs", 1)
         if not isinstance(azs, int) or azs < 1:
-            raise ConfigValidationError("'red_y_aislamiento.azs' debe ser un entero >= 1.")
+            raise ConfigValidationError(
+                "'red_y_aislamiento.azs' debe ser un entero >= 1."
+            )
 
         nat = red.get("nat_gateway") or {}
         if not isinstance(nat, dict):
-            raise ConfigValidationError("'red_y_aislamiento.nat_gateway' debe ser un mapa.")
+            raise ConfigValidationError(
+                "'red_y_aislamiento.nat_gateway' debe ser un mapa."
+            )
         nat_modo = nat.get("modo", "single")
         if nat_modo not in cls.ALLOWED_NAT_MODOS:
             raise ConfigValidationError(
@@ -256,7 +271,9 @@ class ConfigValidator:
             if cidrs is None:
                 continue
             if not isinstance(cidrs, list) or not cidrs:
-                raise ConfigValidationError(f"'red_y_aislamiento.subredes.{clave}' debe ser una lista de CIDR.")
+                raise ConfigValidationError(
+                    f"'red_y_aislamiento.subredes.{clave}' debe ser una lista de CIDR."
+                )
             for cidr in cidrs:
                 try:
                     subnet = ipaddress.ip_network(cidr, strict=True)
@@ -270,7 +287,9 @@ class ConfigValidator:
                         f"'vpc_cidr' ({vpc_cidr_raw})."
                     )
 
-        all_subnet_cidrs = list(subredes.get("publicas") or []) + list(subredes.get("privadas") or [])
+        all_subnet_cidrs = list(subredes.get("publicas") or []) + list(
+            subredes.get("privadas") or []
+        )
         seen_networks = []
         for cidr in all_subnet_cidrs:
             net = ipaddress.ip_network(cidr, strict=True)
@@ -285,14 +304,22 @@ class ConfigValidator:
     def _validate_gateway(cls, config: Dict[str, Any]) -> None:
         gw = config.get("gateway")
         if not gw or not isinstance(gw, dict):
-            raise ConfigValidationError("Falta la sección obligatoria 'gateway' (Fase 1).")
+            raise ConfigValidationError(
+                "Falta la sección obligatoria 'gateway' (Fase 1)."
+            )
 
         if not isinstance(gw.get("habilitado", True), bool):
             raise ConfigValidationError("'gateway.habilitado' debe ser booleano.")
 
         puertos = gw.get("puertos_publicos")
-        if not puertos or not isinstance(puertos, list) or not all(isinstance(p, int) for p in puertos):
-            raise ConfigValidationError("'gateway.puertos_publicos' debe ser una lista de enteros.")
+        if (
+            not puertos
+            or not isinstance(puertos, list)
+            or not all(isinstance(p, int) for p in puertos)
+        ):
+            raise ConfigValidationError(
+                "'gateway.puertos_publicos' debe ser una lista de enteros."
+            )
 
         # El login único del clúster es SSO por cabecera de confianza: nginx
         # inyecta la identidad ya verificada por Django hacia Open WebUI
@@ -438,10 +465,14 @@ class ConfigValidator:
             raise ConfigValidationError("Falta la sección obligatoria 'base_de_datos'.")
 
         if "AUTO_INIT_DB" not in db:
-            raise ConfigValidationError("Falta el flag 'base_de_datos.AUTO_INIT_DB' (true | false).")
+            raise ConfigValidationError(
+                "Falta el flag 'base_de_datos.AUTO_INIT_DB' (true | false)."
+            )
 
         if not isinstance(db["AUTO_INIT_DB"], bool):
-            raise ConfigValidationError("'base_de_datos.AUTO_INIT_DB' debe ser booleano (true | false).")
+            raise ConfigValidationError(
+                "'base_de_datos.AUTO_INIT_DB' debe ser booleano (true | false)."
+            )
 
         schema_dir = db.get("schema_dir", "database")
         schema_path = REPO_ROOT / schema_dir
@@ -454,12 +485,16 @@ class ConfigValidator:
     def _validate_workloads(cls, config: Dict[str, Any]) -> None:
         workloads = config.get("workloads")
         if not workloads or not isinstance(workloads, list):
-            raise ConfigValidationError("Falta la sección 'workloads' o no contiene elementos.")
+            raise ConfigValidationError(
+                "Falta la sección 'workloads' o no contiene elementos."
+            )
 
         vistos = set()
         for idx, wl in enumerate(workloads):
             if not isinstance(wl, dict):
-                raise ConfigValidationError(f"El workload #{idx + 1} no es un objeto válido.")
+                raise ConfigValidationError(
+                    f"El workload #{idx + 1} no es un objeto válido."
+                )
 
             wl_id = wl.get("id")
             if not wl_id:
@@ -475,7 +510,9 @@ class ConfigValidator:
                 )
 
             if not wl.get("accelerator"):
-                raise ConfigValidationError(f"Workload '{wl_id}': Requiere el campo 'accelerator'.")
+                raise ConfigValidationError(
+                    f"Workload '{wl_id}': Requiere el campo 'accelerator'."
+                )
 
             cantidad_gpus = wl.get("cantidad_gpus", 0)
             if not isinstance(cantidad_gpus, int) or cantidad_gpus <= 0:
@@ -491,18 +528,26 @@ class ConfigValidator:
 
             puerto = wl.get("puerto")
             if not puerto or not isinstance(puerto, int):
-                raise ConfigValidationError(f"Workload '{wl_id}': Debe especificar un 'puerto' entero.")
+                raise ConfigValidationError(
+                    f"Workload '{wl_id}': Debe especificar un 'puerto' entero."
+                )
 
             capacidades = wl.get("capacidades", {})
             if capacidades:
                 if not isinstance(capacidades, dict):
-                    raise ConfigValidationError(f"Workload '{wl_id}': 'capacidades' debe ser un objeto.")
+                    raise ConfigValidationError(
+                        f"Workload '{wl_id}': 'capacidades' debe ser un objeto."
+                    )
                 for campo in ("vision", "tool_calling"):
-                    if campo in capacidades and not isinstance(capacidades[campo], bool):
+                    if campo in capacidades and not isinstance(
+                        capacidades[campo], bool
+                    ):
                         raise ConfigValidationError(
                             f"Workload '{wl_id}': 'capacidades.{campo}' debe ser booleano."
                         )
-                if capacidades.get("tool_calling") and not capacidades.get("tool_call_parser"):
+                if capacidades.get("tool_calling") and not capacidades.get(
+                    "tool_call_parser"
+                ):
                     raise ConfigValidationError(
                         f"Workload '{wl_id}': 'capacidades.tool_calling: true' requiere "
                         "'capacidades.tool_call_parser' (ej. 'hermes', 'qwen')."
@@ -518,10 +563,16 @@ class ConfigValidator:
         if conc is None:
             return
         if not isinstance(conc, dict):
-            raise ConfigValidationError(f"Workload '{wl_id}': 'concurrencia' debe ser un objeto.")
+            raise ConfigValidationError(
+                f"Workload '{wl_id}': 'concurrencia' debe ser un objeto."
+            )
 
         seqs = conc.get("max_num_seqs", DEFAULT_MAX_NUM_SEQS)
-        if not isinstance(seqs, int) or isinstance(seqs, bool) or not (1 <= seqs <= cls.MAX_NUM_SEQS_LIMITE):
+        if (
+            not isinstance(seqs, int)
+            or isinstance(seqs, bool)
+            or not (1 <= seqs <= cls.MAX_NUM_SEQS_LIMITE)
+        ):
             raise ConfigValidationError(
                 f"Workload '{wl_id}': 'concurrencia.max_num_seqs' debe ser un entero entre 1 y "
                 f"{cls.MAX_NUM_SEQS_LIMITE} (recibido: {seqs!r})."
@@ -557,9 +608,14 @@ class ConfigValidator:
             raise ConfigValidationError("'capacidad.habilitado' debe ser booleano.")
 
         niveles = cap.get("niveles_concurrencia", DEFAULT_NIVELES_CONCURRENCIA)
-        if (not isinstance(niveles, list) or not niveles
-                or any(not isinstance(n, int) or isinstance(n, bool) or n <= 0 for n in niveles)
-                or any(b <= a for a, b in zip(niveles, niveles[1:]))):
+        if (
+            not isinstance(niveles, list)
+            or not niveles
+            or any(
+                not isinstance(n, int) or isinstance(n, bool) or n <= 0 for n in niveles
+            )
+            or any(b <= a for a, b in zip(niveles, niveles[1:]))
+        ):
             raise ConfigValidationError(
                 "'capacidad.niveles_concurrencia' debe ser una lista de enteros positivos "
                 f"estrictamente creciente (ej. [1, 2, 4, 8, 16]). Recibido: {niveles!r}"
@@ -589,18 +645,27 @@ class ConfigValidator:
                 f"'capacidad.warmup_segundos' debe ser un entero >= 0 (recibido: {warmup!r})."
             )
 
-        for campo, defecto in (("umbral_p95_degradacion", 3.0),
-                               ("ganancia_minima_throughput_pct", 10.0),
-                               ("factor_usuarios_por_slot", 8)):
+        for campo, defecto in (
+            ("umbral_p95_degradacion", 3.0),
+            ("ganancia_minima_throughput_pct", 10.0),
+            ("factor_usuarios_por_slot", 8),
+        ):
             valor = cap.get(campo, defecto)
-            if isinstance(valor, bool) or not isinstance(valor, (int, float)) or valor <= 0:
+            if (
+                isinstance(valor, bool)
+                or not isinstance(valor, (int, float))
+                or valor <= 0
+            ):
                 raise ConfigValidationError(
                     f"'capacidad.{campo}' debe ser un número positivo (recibido: {valor!r})."
                 )
 
         error_pct = cap.get("umbral_error_pct", 5.0)
-        if isinstance(error_pct, bool) or not isinstance(error_pct, (int, float)) \
-                or not (0 < error_pct <= 100):
+        if (
+            isinstance(error_pct, bool)
+            or not isinstance(error_pct, (int, float))
+            or not (0 < error_pct <= 100)
+        ):
             raise ConfigValidationError(
                 f"'capacidad.umbral_error_pct' debe estar en (0, 100] (recibido: {error_pct!r})."
             )
@@ -886,6 +951,16 @@ fi
 sed -i '/^PUBLIC_BASE_URL=/d' .env
 echo "PUBLIC_BASE_URL=${{GATEWAY_PUBLIC_URL}}" >> .env
 
+# Botón de navegación chat ⇆ panel (base.html en Django; sooniverse-nav.js en
+# Open WebUI): derivados del MISMO host público recién calculado (dominio con
+# TLS o IP efímera), para que al levantar la infra apunten al dominio/IP
+# vigente y no a un default relativo. 'sky launch' reescribe estos valores en
+# cada despliegue: si la IP efímera cambia, el siguiente launch los actualiza.
+sed -i '/^CHAT_URL=/d' .env
+sed -i '/^SOONIVERSE_PANEL_URL=/d' .env
+echo "CHAT_URL=${{GATEWAY_PUBLIC_URL}}/" >> .env
+echo "SOONIVERSE_PANEL_URL=${{GATEWAY_PUBLIC_URL}}/panel/" >> .env
+
 cd {remote_root}/docker_images/gateway
 sudo -E docker compose --env-file {remote_root}/.env up -d --build
 sudo docker compose ps
@@ -927,7 +1002,9 @@ class TopologyBuilder:
         self.gateway = config.get("gateway", {})
         self.db = config.get("base_de_datos", {})
         self.workloads = config["workloads"]
-        self._network_outputs = None  # poblado por apply_network_outputs() en modo 'auto'
+        self._network_outputs = (
+            None  # poblado por apply_network_outputs() en modo 'auto'
+        )
 
     def apply_network_outputs(self, outputs: Any) -> None:
         """Inyecta los IDs/nombres reales creados por AwsNetworkManager (modo
@@ -958,7 +1035,9 @@ class TopologyBuilder:
         }
 
     # -- gateway --------------------------------------------------------------
-    def build_gateway(self, worker_endpoints: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    def build_gateway(
+        self, worker_endpoints: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
         gw = self.gateway
         tls_cfg = gw.get("tls", {}) or {}
         tls_enabled = bool(tls_cfg.get("habilitado", False))
@@ -988,9 +1067,13 @@ class TopologyBuilder:
             **self._base_envs(),
             "ROL_NODO": "gateway",
             "AUTO_INIT_DB": str(self.db.get("AUTO_INIT_DB", True)).lower(),
-            "AUTO_REFRESH_METRICS": str(self.db.get("auto_refresh_metrics", True)).lower(),
+            "AUTO_REFRESH_METRICS": str(
+                self.db.get("auto_refresh_metrics", True)
+            ).lower(),
             "LB_STRATEGY": gw.get("load_balancing_strategy", "latency-based-routing"),
-            "WEBUI_SIGNUP": str(gw.get("open_webui", {}).get("signup_habilitado", False)).lower(),
+            "WEBUI_SIGNUP": str(
+                gw.get("open_webui", {}).get("signup_habilitado", False)
+            ).lower(),
             "METRICS_REFRESH_INTERVAL": str(
                 gw.get("django_metrics", {}).get("metrics_refresh_interval", 300)
             ),
@@ -1022,7 +1105,13 @@ class TopologyBuilder:
         # existe (primer 'sky launch' de este clúster: SkyPilot la genera como
         # efecto secundario de esa misma corrida, no antes), el botón queda
         # deshabilitado hasta el siguiente '--only gateway'.
-        gateway_ssh_key = Path.home() / ".sky" / "generated" / "ssh-keys" / f"{self.gateway_cluster}.key"
+        gateway_ssh_key = (
+            Path.home()
+            / ".sky"
+            / "generated"
+            / "ssh-keys"
+            / f"{self.gateway_cluster}.key"
+        )
         if gateway_ssh_key.exists():
             file_mounts[f"{REMOTE_ROOT}/.ssh_bastion_key"] = str(gateway_ssh_key)
 
@@ -1032,7 +1121,8 @@ class TopologyBuilder:
         tls_modo = tls_cfg.get("modo", "self-signed")
         if tls_enabled and tls_modo == "self-signed":
             tls_setup = TLS_SELF_SIGNED_SETUP.format(
-                remote_root=REMOTE_ROOT, tls_domain=tls_cfg.get("dominio") or "sooniverse.local",
+                remote_root=REMOTE_ROOT,
+                tls_domain=tls_cfg.get("dominio") or "sooniverse.local",
             )
         elif tls_enabled and tls_modo == "letsencrypt":
             dominio_cfg = self.gateway.get("dominio") or {}
@@ -1044,7 +1134,7 @@ class TopologyBuilder:
             )
         elif tls_enabled:
             tls_setup = (
-                f'echo "===> TLS modo \'{tls_cfg.get("modo")}\' no implementado todavía; '
+                f"echo \"===> TLS modo '{tls_cfg.get('modo')}' no implementado todavía; "
                 'usa self-signed, letsencrypt, o deja tls.habilitado: false."'
             )
 
@@ -1054,8 +1144,12 @@ class TopologyBuilder:
             "num_nodes": 1,
             "file_mounts": file_mounts,
             "envs": envs,
-            "setup": GATEWAY_SETUP_SCRIPT.format(remote_root=REMOTE_ROOT, tls_setup=tls_setup).strip(),
-            "run": GATEWAY_RUN_SCRIPT.format(remote_root=REMOTE_ROOT, schema_dir=schema_dir).strip(),
+            "setup": GATEWAY_SETUP_SCRIPT.format(
+                remote_root=REMOTE_ROOT, tls_setup=tls_setup
+            ).strip(),
+            "run": GATEWAY_RUN_SCRIPT.format(
+                remote_root=REMOTE_ROOT, schema_dir=schema_dir
+            ).strip(),
         }
 
     # -- workers --------------------------------------------------------------
@@ -1067,7 +1161,11 @@ class TopologyBuilder:
             "cloud": "aws",
             "region": self.red["region"],
             "accelerators": f"{wl['accelerator']}:{wl['cantidad_gpus']}",
-            "labels": {**self.red.get("tags_obligatorios", {}), "rol": "worker", "workload": wl["id"]},
+            "labels": {
+                **self.red.get("tags_obligatorios", {}),
+                "rol": "worker",
+                "workload": wl["id"],
+            },
             # El puerto se declara para que SkyPilot abra la regla en el Security
             # Group; sin ella el Gateway tampoco podría alcanzar al worker DENTRO
             # de la VPC. La privacidad no la da esta lista, la da
@@ -1106,7 +1204,9 @@ class TopologyBuilder:
             # activas, para no anunciarle a un cliente (Open WebUI, LiteLLM) una
             # función que este modelo no soporta de verdad.
             "ENABLE_VISION": "1" if capacidades.get("vision", True) else "0",
-            "ENABLE_TOOL_CALLING": "1" if capacidades.get("tool_calling", False) else "0",
+            "ENABLE_TOOL_CALLING": "1"
+            if capacidades.get("tool_calling", False)
+            else "0",
             "TOOL_CALL_PARSER": capacidades.get("tool_call_parser") or "",
         }
 
@@ -1118,9 +1218,14 @@ class TopologyBuilder:
                 f"{REMOTE_ROOT}/docker_images/{modelo}": f"./docker_images/{modelo}",
             },
             "envs": envs,
-            "setup": GPU_SETUP_SCRIPT.format(remote_root=REMOTE_ROOT, modelo=modelo).strip(),
+            "setup": GPU_SETUP_SCRIPT.format(
+                remote_root=REMOTE_ROOT, modelo=modelo
+            ).strip(),
             "run": WORKER_RUN_SCRIPT.format(
-                remote_root=REMOTE_ROOT, modelo=modelo, wl_id=wl["id"], puerto=wl["puerto"]
+                remote_root=REMOTE_ROOT,
+                modelo=modelo,
+                wl_id=wl["id"],
+                puerto=wl["puerto"],
             ).strip(),
         }
 
@@ -1141,7 +1246,9 @@ class TopologyBuilder:
         net = self._network_outputs
 
         vpc_name = net.vpc_name if net else self.red.get("vpc_name")
-        sg_gateway = net.sg_gateway_name if net else self.red.get("security_group_gateway")
+        sg_gateway = (
+            net.sg_gateway_name if net else self.red.get("security_group_gateway")
+        )
 
         if vpc_name:
             aws_cfg["vpc_name"] = vpc_name
@@ -1151,7 +1258,9 @@ class TopologyBuilder:
         return {"aws": aws_cfg} if aws_cfg else {}
 
     # -- config de cliente SkyPilot para los workers privados ------------------
-    def build_sky_workers_config(self, gateway_ip: Optional[str] = None) -> Dict[str, Any]:
+    def build_sky_workers_config(
+        self, gateway_ip: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Genera la configuración de cliente de SkyPilot que fuerza a los workers a
         vivir dentro de la VPC sin IP pública, tunelizando SSH por el Gateway.
@@ -1165,7 +1274,9 @@ class TopologyBuilder:
 
         # Security Group: en modo 'auto' es el que crea AwsNetworkManager (SG->SG
         # con el gateway); en modo 'existente' es el pre-creado por el operador.
-        sg_workers = net.sg_workers_name if net else self.red.get("security_group_workers")
+        sg_workers = (
+            net.sg_workers_name if net else self.red.get("security_group_workers")
+        )
         if sg_workers:
             aws_cfg["security_group_name"] = sg_workers
 
@@ -1173,7 +1284,11 @@ class TopologyBuilder:
             aws_cfg["use_internal_ips"] = True
             if gateway_ip:
                 gateway_ssh_key = (
-                    Path.home() / ".sky" / "generated" / "ssh-keys" / f"{self.gateway_cluster}.key"
+                    Path.home()
+                    / ".sky"
+                    / "generated"
+                    / "ssh-keys"
+                    / f"{self.gateway_cluster}.key"
                 )
                 if gateway_ssh_key.exists():
                     os.chmod(gateway_ssh_key, 0o600)
@@ -1235,7 +1350,9 @@ def _derive_tls_from_dominio(config: Dict[str, Any]) -> None:
 def load_config(config_path: str) -> Dict[str, Any]:
     path = Path(config_path)
     if not path.exists():
-        raise FileNotFoundError(f"No se encontró el archivo de configuración: {config_path}")
+        raise FileNotFoundError(
+            f"No se encontró el archivo de configuración: {config_path}"
+        )
 
     with path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
@@ -1250,7 +1367,9 @@ def dump_yaml(data: Dict[str, Any], out_path: Path, header: bool = True) -> None
     with out_path.open("w", encoding="utf-8") as f:
         if header:
             f.write(HEADER)
-        yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        yaml.dump(
+            data, f, default_flow_style=False, sort_keys=False, allow_unicode=True
+        )
 
 
 def build_network_spec_from_config(config: Dict[str, Any]) -> "Any":
@@ -1290,11 +1409,15 @@ def build_network_spec_from_config(config: Dict[str, Any]) -> "Any":
         aws_profile=red.get("aws_profile"),
         gateway_eip=bool(dominio.get("habilitado", False)),
         gateway_eip_persistent=bool(dominio.get("eip_persistente", True)),
-        gateway_domain=dominio.get("seleccionado") if dominio.get("habilitado") else None,
+        gateway_domain=dominio.get("seleccionado")
+        if dominio.get("habilitado")
+        else None,
     )
 
 
-def load_network_outputs_from_state(config: Dict[str, Any], state: Any, deployment_id: str) -> Optional["Any"]:
+def load_network_outputs_from_state(
+    config: Dict[str, Any], state: Any, deployment_id: str
+) -> Optional["Any"]:
     """Reconstruye `aws_network.NetworkOutputs` a partir de lo YA registrado en
     PostgreSQL para `deployment_id`.
 
@@ -1330,7 +1453,10 @@ def load_network_outputs_from_state(config: Dict[str, Any], state: Any, deployme
 
     def resolved_name(row: Dict[str, Any], fallback_suffix: str) -> str:
         attrs = row.get("attributes") or {}
-        return attrs.get("name") or f"sooniverse-{cliente['id']}-{cliente['entorno']}-{fallback_suffix}"
+        return (
+            attrs.get("name")
+            or f"sooniverse-{cliente['id']}-{cliente['entorno']}-{fallback_suffix}"
+        )
 
     eip_gw_row = first("eip-gateway")
     eip_gw_attrs = (eip_gw_row or {}).get("attributes") or {}
@@ -1339,16 +1465,24 @@ def load_network_outputs_from_state(config: Dict[str, Any], state: Any, deployme
         deployment_id=deployment_id,
         vpc_id=vpc_row["aws_id"],
         vpc_name=resolved_name(vpc_row, "vpc"),
-        availability_zones=sorted({
-            r["availability_zone"] for r in by_component.get("subnet-public", []) if r.get("availability_zone")
-        }),
+        availability_zones=sorted(
+            {
+                r["availability_zone"]
+                for r in by_component.get("subnet-public", [])
+                if r.get("availability_zone")
+            }
+        ),
         public_subnet_ids=[r["aws_id"] for r in by_component.get("subnet-public", [])],
-        private_subnet_ids=[r["aws_id"] for r in by_component.get("subnet-private", [])],
+        private_subnet_ids=[
+            r["aws_id"] for r in by_component.get("subnet-private", [])
+        ],
         internet_gateway_id=(first("igw") or {}).get("aws_id"),
         nat_gateway_ids=[r["aws_id"] for r in by_component.get("nat", [])],
         elastic_ip_allocation_ids=[r["aws_id"] for r in by_component.get("eip", [])],
         public_route_table_id=(first("rtb-public") or {}).get("aws_id"),
-        private_route_table_ids=[r["aws_id"] for r in by_component.get("rtb-private", [])],
+        private_route_table_ids=[
+            r["aws_id"] for r in by_component.get("rtb-private", [])
+        ],
         sg_gateway_id=sg_gw_row["aws_id"],
         sg_gateway_name=resolved_name(sg_gw_row, "gateway"),
         sg_workers_id=sg_wk_row["aws_id"],
@@ -1359,7 +1493,9 @@ def load_network_outputs_from_state(config: Dict[str, Any], state: Any, deployme
     )
 
 
-def _suggest_free_cidr(existing_cidrs: List[str], prefix_len: int = 16) -> Optional[str]:
+def _suggest_free_cidr(
+    existing_cidrs: List[str], prefix_len: int = 16
+) -> Optional[str]:
     """Primer /16 dentro de 10.0.0.0/8 que no se solapa con ninguno de `existing_cidrs`."""
     existing_nets = [ipaddress.ip_network(c, strict=False) for c in existing_cidrs]
     for candidate in ipaddress.ip_network("10.0.0.0/8").subnets(new_prefix=prefix_len):
@@ -1456,7 +1592,16 @@ REQUIRES_DESTROY = "requires-destroy"
 # max_num_batched_tokens son banderas de arranque de vLLM: no se pueden aplicar
 # sobre un proceso vivo, hay que relanzar el worker (que reutiliza la instancia
 # y vuelve a correr setup+run; no destruye la máquina).
-WORKLOAD_RECREATE_KEYS = {"accelerator", "cantidad_gpus", "tipo_instancia", "puerto", "hf_repo", "modelo", "replicas", "concurrencia"}
+WORKLOAD_RECREATE_KEYS = {
+    "accelerator",
+    "cantidad_gpus",
+    "tipo_instancia",
+    "puerto",
+    "hf_repo",
+    "modelo",
+    "replicas",
+    "concurrencia",
+}
 # Campos que solo requieren re-renderizar litellm_config.yaml + reload (sin tocar SkyPilot).
 WORKLOAD_IN_PLACE_KEYS = {"nombre_publico", "peso_balanceo", "asignacion_fraccional"}
 
@@ -1484,7 +1629,13 @@ class ChangePlan:
 
     @property
     def clusters_to_recreate(self) -> List[str]:
-        return sorted({c.workload_id for c in self.changes if c.classification == RECREATE_CLUSTER and c.workload_id})
+        return sorted(
+            {
+                c.workload_id
+                for c in self.changes
+                if c.classification == RECREATE_CLUSTER and c.workload_id
+            }
+        )
 
     @property
     def is_no_op(self) -> bool:
@@ -1496,7 +1647,9 @@ class ChangePlan:
         return "\n".join(str(c) for c in self.changes)
 
 
-def plan_changes(current_snapshot: Optional[Dict[str, Any]], new_config: Dict[str, Any]) -> ChangePlan:
+def plan_changes(
+    current_snapshot: Optional[Dict[str, Any]], new_config: Dict[str, Any]
+) -> ChangePlan:
     """Clasifica cada diferencia entre `current_snapshot` (config_snapshot del
     despliegue activo registrado en PostgreSQL) y `new_config` (el contrato que
     se va a aplicar) en no-op | in-place | recreate-cluster | requires-destroy.
@@ -1514,20 +1667,35 @@ def plan_changes(current_snapshot: Optional[Dict[str, Any]], new_config: Dict[st
     for key in ("vpc_cidr", "azs"):
         if old_red.get(key) != new_red.get(key):
             plan.changes.append(
-                FieldChange(f"red_y_aislamiento.{key}", old_red.get(key), new_red.get(key), REQUIRES_DESTROY)
+                FieldChange(
+                    f"red_y_aislamiento.{key}",
+                    old_red.get(key),
+                    new_red.get(key),
+                    REQUIRES_DESTROY,
+                )
             )
 
     old_nat_modo = (old_red.get("nat_gateway") or {}).get("modo")
     new_nat_modo = (new_red.get("nat_gateway") or {}).get("modo")
     if old_nat_modo != new_nat_modo:
         plan.changes.append(
-            FieldChange("red_y_aislamiento.nat_gateway.modo", old_nat_modo, new_nat_modo, REQUIRES_DESTROY)
+            FieldChange(
+                "red_y_aislamiento.nat_gateway.modo",
+                old_nat_modo,
+                new_nat_modo,
+                REQUIRES_DESTROY,
+            )
         )
 
     for key in ("cidr_permitido_gateway", "cidr_admin_ssh"):
         if old_red.get(key) != new_red.get(key):
             plan.changes.append(
-                FieldChange(f"red_y_aislamiento.{key}", old_red.get(key), new_red.get(key), IN_PLACE)
+                FieldChange(
+                    f"red_y_aislamiento.{key}",
+                    old_red.get(key),
+                    new_red.get(key),
+                    IN_PLACE,
+                )
             )
 
     old_gw = current_snapshot.get("gateway", {}) or {}
@@ -1536,7 +1704,9 @@ def plan_changes(current_snapshot: Optional[Dict[str, Any]], new_config: Dict[st
         plan.changes.append(
             FieldChange(
                 "gateway.load_balancing_strategy",
-                old_gw.get("load_balancing_strategy"), new_gw.get("load_balancing_strategy"), IN_PLACE,
+                old_gw.get("load_balancing_strategy"),
+                new_gw.get("load_balancing_strategy"),
+                IN_PLACE,
             )
         )
 
@@ -1555,7 +1725,9 @@ def plan_changes(current_snapshot: Optional[Dict[str, Any]], new_config: Dict[st
         plan.changes.append(
             FieldChange(
                 "gateway.tls/gateway.dominio (re-correr --only network, luego gateway+dominio)",
-                {"tls": old_tls, "dominio": old_dominio}, {"tls": new_tls, "dominio": new_dominio}, IN_PLACE,
+                {"tls": old_tls, "dominio": old_dominio},
+                {"tls": new_tls, "dominio": new_dominio},
+                IN_PLACE,
             )
         )
 
@@ -1563,29 +1735,49 @@ def plan_changes(current_snapshot: Optional[Dict[str, Any]], new_config: Dict[st
     new_workloads = {wl["id"]: wl for wl in new_config.get("workloads", []) or []}
 
     for wl_id in old_workloads.keys() - new_workloads.keys():
-        plan.changes.append(FieldChange("workloads[].id", wl_id, None, RECREATE_CLUSTER, workload_id=wl_id))
+        plan.changes.append(
+            FieldChange(
+                "workloads[].id", wl_id, None, RECREATE_CLUSTER, workload_id=wl_id
+            )
+        )
     for wl_id in new_workloads.keys() - old_workloads.keys():
-        plan.changes.append(FieldChange("workloads[].id", None, wl_id, RECREATE_CLUSTER, workload_id=wl_id))
+        plan.changes.append(
+            FieldChange(
+                "workloads[].id", None, wl_id, RECREATE_CLUSTER, workload_id=wl_id
+            )
+        )
 
     for wl_id in old_workloads.keys() & new_workloads.keys():
         old_wl, new_wl = old_workloads[wl_id], new_workloads[wl_id]
         for key in WORKLOAD_RECREATE_KEYS:
             if old_wl.get(key) != new_wl.get(key):
                 plan.changes.append(
-                    FieldChange(f"workloads[{wl_id}].{key}", old_wl.get(key), new_wl.get(key),
-                                RECREATE_CLUSTER, workload_id=wl_id)
+                    FieldChange(
+                        f"workloads[{wl_id}].{key}",
+                        old_wl.get(key),
+                        new_wl.get(key),
+                        RECREATE_CLUSTER,
+                        workload_id=wl_id,
+                    )
                 )
         for key in WORKLOAD_IN_PLACE_KEYS:
             if old_wl.get(key) != new_wl.get(key):
                 plan.changes.append(
-                    FieldChange(f"workloads[{wl_id}].{key}", old_wl.get(key), new_wl.get(key),
-                                IN_PLACE, workload_id=wl_id)
+                    FieldChange(
+                        f"workloads[{wl_id}].{key}",
+                        old_wl.get(key),
+                        new_wl.get(key),
+                        IN_PLACE,
+                        workload_id=wl_id,
+                    )
                 )
 
     return plan
 
 
-def generate_manifests(config: Dict[str, Any], out_dir: Path, builder: Optional["TopologyBuilder"] = None) -> Dict[str, Any]:
+def generate_manifests(
+    config: Dict[str, Any], out_dir: Path, builder: Optional["TopologyBuilder"] = None
+) -> Dict[str, Any]:
     """Escribe todos los manifiestos de la topología y devuelve sus rutas."""
     builder = builder or TopologyBuilder(config)
     artefactos: Dict[str, Any] = {"gateway": None, "workers": {}, "sky_config": None}
@@ -1598,7 +1790,9 @@ def generate_manifests(config: Dict[str, Any], out_dir: Path, builder: Optional[
         gw_path = out_dir / GATEWAY_MANIFEST
         dump_yaml(builder.build_gateway(), gw_path)
         artefactos["gateway"] = gw_path
-        print(f"[OK] Gateway     -> {gw_path.name}  (cluster: {builder.gateway_cluster})")
+        print(
+            f"[OK] Gateway     -> {gw_path.name}  (cluster: {builder.gateway_cluster})"
+        )
 
     for wl in config["workloads"]:
         wk_path = out_dir / WORKER_MANIFEST_FMT.format(wl_id=wl["id"])
@@ -1663,14 +1857,22 @@ def _run_sky_with_retry(
             if attempt == max_attempts:
                 break
             wait = backoff_seconds[min(attempt - 1, len(backoff_seconds) - 1)]
-            print(f"[WARNING] 'sky {' '.join(args)}' falló (intento {attempt}/{max_attempts}): {exc}")
-            print(f"[REINTENTO] Esperando {wait}s (suele ser un mirror de paquetes caído o "
-                  "capacidad transitoria de AWS)...")
+            print(
+                f"[WARNING] 'sky {' '.join(args)}' falló (intento {attempt}/{max_attempts}): {exc}"
+            )
+            print(
+                f"[REINTENTO] Esperando {wait}s (suele ser un mirror de paquetes caído o "
+                "capacidad transitoria de AWS)..."
+            )
             time.sleep(wait)
-    raise RuntimeError(f"'sky {' '.join(args)}' falló tras {max_attempts} intento(s): {last_exc}") from last_exc
+    raise RuntimeError(
+        f"'sky {' '.join(args)}' falló tras {max_attempts} intento(s): {last_exc}"
+    ) from last_exc
 
 
-def _preclean_stale_file_mounts(cluster: str, aws_profile: Optional[str] = None) -> None:
+def _preclean_stale_file_mounts(
+    cluster: str, aws_profile: Optional[str] = None
+) -> None:
     """Antes de relanzar 'sky launch' sobre un clúster que pudo haber corrido
     antes (una '--run' completa repetida, o retomar tras un fallo a mitad de
     camino), borra los file_mounts de UN SOLO ARCHIVO que
@@ -1688,13 +1890,18 @@ def _preclean_stale_file_mounts(cluster: str, aws_profile: Optional[str] = None)
         return
     subprocess.run(
         [
-            sky, "exec", cluster,
+            sky,
+            "exec",
+            cluster,
             "for f in .env config_global.yaml .ssh_bastion_key; do "
             f"p={REMOTE_ROOT}/$f; "
-            "[ -f \"$p\" ] && [ ! -L \"$p\" ] && rm -f \"$p\"; "
+            '[ -f "$p" ] && [ ! -L "$p" ] && rm -f "$p"; '
             "done; true",
         ],
-        capture_output=True, text=True, timeout=60, env=_sky_env(aws_profile),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=_sky_env(aws_profile),
     )
 
 
@@ -1719,8 +1926,10 @@ def _ensure_db_schema(config: Dict[str, Any], dry_run: bool = False) -> None:
     rechaza un par de segundos."""
     db_cfg = config.get("base_de_datos", {}) or {}
     if not db_cfg.get("AUTO_INIT_DB", True):
-        print("[BD] AUTO_INIT_DB=false -> se omite la inicialización automática del esquema "
-              "(ejecuta 'python scripts/db_setup.py' manualmente).")
+        print(
+            "[BD] AUTO_INIT_DB=false -> se omite la inicialización automática del esquema "
+            "(ejecuta 'python scripts/db_setup.py' manualmente)."
+        )
         return
 
     from db_setup import connect, resolve_db_config
@@ -1739,7 +1948,9 @@ def _ensure_db_schema(config: Dict[str, Any], dry_run: bool = False) -> None:
             last_exc = exc
             if attempt == attempts:
                 break
-            print(f"[BD] Conexión falló (intento {attempt}/{attempts}): {exc}. Reintentando en 5s...")
+            print(
+                f"[BD] Conexión falló (intento {attempt}/{attempts}): {exc}. Reintentando en 5s..."
+            )
             time.sleep(5)
 
     if last_exc is not None:
@@ -1750,10 +1961,17 @@ def _ensure_db_schema(config: Dict[str, Any], dry_run: bool = False) -> None:
         ) from last_exc
 
     if dry_run:
-        print("[BD] --dry-run: se verificaría/aplicaría el esquema 'sooniverse' (sin tocar Postgres).")
+        print(
+            "[BD] --dry-run: se verificaría/aplicaría el esquema 'sooniverse' (sin tocar Postgres)."
+        )
         return
 
-    cmd = [sys.executable, str(REPO_ROOT / "scripts" / "db_setup.py"), "--env-file", str(env_path)]
+    cmd = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "db_setup.py"),
+        "--env-file",
+        str(env_path),
+    ]
     print("[BD] Verificando/aplicando el esquema 'sooniverse' (idempotente)...")
     print(f"[EXEC] {' '.join(cmd)}")
     try:
@@ -1773,13 +1991,18 @@ def _sky_env(aws_profile: Optional[str] = None) -> Optional[Dict[str, str]]:
     return {**os.environ, "AWS_PROFILE": aws_profile} if aws_profile else None
 
 
-def _gateway_public_ip(cluster: str, aws_profile: Optional[str] = None) -> Optional[str]:
+def _gateway_public_ip(
+    cluster: str, aws_profile: Optional[str] = None
+) -> Optional[str]:
     sky = _sky_binary()
     if not sky:
         return None
     try:
         out = subprocess.run(
-            [sky, "status", "--ip", cluster], check=True, capture_output=True, text=True,
+            [sky, "status", "--ip", cluster],
+            check=True,
+            capture_output=True,
+            text=True,
             env=_sky_env(aws_profile),
         )
         ip = out.stdout.strip().splitlines()[-1].strip()
@@ -1824,7 +2047,9 @@ def _associate_gateway_eip(
     Gateway."""
     import boto3
 
-    session = boto3.Session(profile_name=aws_profile) if aws_profile else boto3.Session()
+    session = (
+        boto3.Session(profile_name=aws_profile) if aws_profile else boto3.Session()
+    )
     ec2 = session.client("ec2", region_name=region)
 
     instance_id = None
@@ -1853,13 +2078,19 @@ def _associate_gateway_eip(
             f"del Gateway ({allocation_id}). El despliegue continuaría con una IP efímera."
         )
 
-    ec2.associate_address(AllocationId=allocation_id, InstanceId=instance_id, AllowReassociation=True)
+    ec2.associate_address(
+        AllocationId=allocation_id, InstanceId=instance_id, AllowReassociation=True
+    )
 
     sky_env = _sky_env(aws_profile)
     sky = _sky_binary()
     if sky:
         restart = subprocess.run(
-            [sky, "start", "-y", cluster], capture_output=True, text=True, timeout=300, env=sky_env,
+            [sky, "start", "-y", cluster],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=sky_env,
         )
         if restart.returncode != 0:
             raise GatewayEipAssociationError(
@@ -1884,13 +2115,18 @@ def _associate_gateway_eip(
         # de cara al siguiente 'sky launch' (comprobado empíricamente).
         subprocess.run(
             [
-                sky, "exec", cluster,
+                sky,
+                "exec",
+                cluster,
                 "for f in config_global.yaml .ssh_bastion_key; do "
                 "p=/home/ubuntu/sooniverse_infra/$f; "
-                "[ -f \"$p\" ] && [ ! -L \"$p\" ] && rm -f \"$p\"; "
+                '[ -f "$p" ] && [ ! -L "$p" ] && rm -f "$p"; '
                 "done; true",
             ],
-            capture_output=True, text=True, timeout=120, env=sky_env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=sky_env,
         )
         # '.env' no se deja solo borrado: fases posteriores en ESTA MISMA
         # corrida (sync_endpoints.py -> 'docker compose --env-file .env
@@ -1915,20 +2151,32 @@ def _associate_gateway_eip(
             preserve_keys = ("PUBLIC_BASE_URL", "OPENWEBUI_LITELLM_API_KEY")
             remote_current = subprocess.run(
                 [sky, "exec", cluster, f"cat {remote_env} 2>/dev/null || true"],
-                capture_output=True, text=True, timeout=60, env=sky_env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=sky_env,
             )
             for key in preserve_keys:
-                match = re.search(rf"^{key}=(.*)$", remote_current.stdout or "", re.MULTILINE)
+                match = re.search(
+                    rf"^{key}=(.*)$", remote_current.stdout or "", re.MULTILINE
+                )
                 if match and match.group(1).strip():
                     payload = re.sub(rf"(?m)^{key}=.*$", "", payload)
-                    payload = payload.rstrip("\n") + f"\n{key}={match.group(1).strip()}\n"
+                    payload = (
+                        payload.rstrip("\n") + f"\n{key}={match.group(1).strip()}\n"
+                    )
 
             script = (
                 f"rm -f {remote_env} && cat > {remote_env} <<'SOONIVERSE_ENV_EOF'\n"
                 f"{payload}\nSOONIVERSE_ENV_EOF\n"
             )
-            subprocess.run([sky, "exec", cluster, script], capture_output=True, text=True, timeout=120,
-                            env=sky_env)
+            subprocess.run(
+                [sky, "exec", cluster, script],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=sky_env,
+            )
 
     sky = _sky_binary()
     if sky:
@@ -1941,7 +2189,11 @@ def _associate_gateway_eip(
         last_check: Optional[subprocess.CompletedProcess] = None
         for attempt in range(1, 4):
             last_check = subprocess.run(
-                [sky, "exec", cluster, "true"], capture_output=True, text=True, timeout=120, env=sky_env,
+                [sky, "exec", cluster, "true"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=sky_env,
             )
             if last_check.returncode == 0:
                 break
@@ -1978,7 +2230,7 @@ def run_dominio_phase(
     (certbot, modo webroot -nginx ya está arriba desde la fase 'gateway') y
     recarga nginx. Best-effort en TODO: nunca aborta el despliegue, solo avisa
     -igual que 'endpoints'/'capabilities'/'capacidad'/'verify'."""
-    dominio_cfg = (config.get("gateway", {}).get("dominio") or {})
+    dominio_cfg = config.get("gateway", {}).get("dominio") or {}
     dominio = dominio_cfg["seleccionado"]
     espera = int(dominio_cfg.get("esperar_dns_segundos", 300))
 
@@ -1996,18 +2248,32 @@ def run_dominio_phase(
             "python scripts/generate_infra.py --run --only dominio"
         )
         if state and deployment_id:
-            state.log_event(deployment_id, "dominio", "verify_dns", "warning",
-                             message=f"{dominio} -> {resuelto or '(sin resolver)'}, esperado {gateway_ip}")
+            state.log_event(
+                deployment_id,
+                "dominio",
+                "verify_dns",
+                "warning",
+                message=f"{dominio} -> {resuelto or '(sin resolver)'}, esperado {gateway_ip}",
+            )
         return
 
-    print(f"[DOMINIO] '{dominio}' resuelve correctamente a {gateway_ip}. Emitiendo/renovando certificado...")
+    print(
+        f"[DOMINIO] '{dominio}' resuelve correctamente a {gateway_ip}. Emitiendo/renovando certificado..."
+    )
 
     tls_cfg = config.get("gateway", {}).get("tls") or {}
     email = tls_cfg.get("email_acme") or next(
-        (e["email_acme"] for e in dominio_cfg.get("disponibles", []) if e["nombre"] == dominio), None
+        (
+            e["email_acme"]
+            for e in dominio_cfg.get("disponibles", [])
+            if e["nombre"] == dominio
+        ),
+        None,
     )
     if not email:
-        print(f"[WARNING] No hay 'email_acme' para '{dominio}'; se omite la emisión del certificado.")
+        print(
+            f"[WARNING] No hay 'email_acme' para '{dominio}'; se omite la emisión del certificado."
+        )
         return
 
     staging_flag = "--staging" if dominio_cfg.get("staging", False) else ""
@@ -2049,22 +2315,31 @@ def run_dominio_phase(
 
     try:
         result = subprocess.run(
-            [sky, "exec", gateway_cluster, remote_cmd], capture_output=True, text=True, timeout=180,
+            [sky, "exec", gateway_cluster, remote_cmd],
+            capture_output=True,
+            text=True,
+            timeout=180,
             env=_sky_env(config["red_y_aislamiento"].get("aws_profile")),
         )
     except subprocess.TimeoutExpired:
         print("[WARNING] 'sky exec' del certbot excedió el tiempo de espera (180s).")
         if state and deployment_id:
-            state.log_event(deployment_id, "dominio", "certbot", "warning", message="timeout")
+            state.log_event(
+                deployment_id, "dominio", "certbot", "warning", message="timeout"
+            )
         return
 
     if result.returncode != 0:
         detalle = (result.stderr.strip() or result.stdout.strip())[-500:]
         print(f"[WARNING] certbot falló (código {result.returncode}): {detalle}")
         if state and deployment_id:
-            state.log_event(deployment_id, "dominio", "certbot", "warning", message=detalle)
+            state.log_event(
+                deployment_id, "dominio", "certbot", "warning", message=detalle
+            )
     else:
-        print(f"[OK] Certificado Let's Encrypt emitido/renovado y nginx recargado para '{dominio}'.")
+        print(
+            f"[OK] Certificado Let's Encrypt emitido/renovado y nginx recargado para '{dominio}'."
+        )
         if state and deployment_id:
             state.log_event(deployment_id, "dominio", "certbot", "ok", message=dominio)
 
@@ -2074,10 +2349,23 @@ def run_dominio_phase(
 # 'dominio' va justo después de 'gateway' (necesita el Gateway ya levantado y
 # con su Elastic IP asociada -sky exec funcionando-) y antes de 'workers' (no
 # depende de ellos ni ellos de él).
-PHASE_ORDER = ["network", "gateway", "dominio", "workers", "endpoints", "capabilities", "capacidad", "verify"]
+PHASE_ORDER = [
+    "network",
+    "gateway",
+    "dominio",
+    "workers",
+    "endpoints",
+    "capabilities",
+    "capacidad",
+    "verify",
+]
 
 # Compatibilidad con los valores antiguos de --only (antes de la Fase 3).
-_ONLY_LEGACY_ALIASES = {"all": set(PHASE_ORDER), "gateway": {"gateway"}, "workers": {"workers"}}
+_ONLY_LEGACY_ALIASES = {
+    "all": set(PHASE_ORDER),
+    "gateway": {"gateway"},
+    "workers": {"workers"},
+}
 
 
 def _phases_for(only: str) -> set:
@@ -2117,23 +2405,33 @@ def _open_state_store(config: Dict[str, Any]):
     store = PostgresInfraStateStore()
     store.ping()  # aborta aquí si PostgreSQL no responde
 
-    existing = store.get_active_deployment(cliente["id"], cliente["entorno"], red["region"])
+    existing = store.get_active_deployment(
+        cliente["id"], cliente["entorno"], red["region"]
+    )
     config_hash = config_hash_of(config)
 
     if existing and existing.get("config_snapshot"):
         plan = plan_changes(existing["config_snapshot"], config)
         if not plan.is_no_op:
-            print("[CAMBIOS] plan_changes detectó diferencias respecto al despliegue activo:")
+            print(
+                "[CAMBIOS] plan_changes detectó diferencias respecto al despliegue activo:"
+            )
             print("\n".join(f"  {line}" for line in plan.summary().splitlines()))
             if plan.requires_destroy:
                 raise RequiresDestroyError(
                     "Uno o más cambios requieren destroy + provision (no son modificables en "
-                    "caliente): " + "; ".join(
-                        c.field for c in plan.changes if c.classification == REQUIRES_DESTROY
-                    ) + ". Corre 'destroy_infra.py' y luego 'generate_infra.py --run' de nuevo."
+                    "caliente): "
+                    + "; ".join(
+                        c.field
+                        for c in plan.changes
+                        if c.classification == REQUIRES_DESTROY
+                    )
+                    + ". Corre 'destroy_infra.py' y luego 'generate_infra.py --run' de nuevo."
                 )
             if plan.clusters_to_recreate:
-                print(f"[CAMBIOS] Clústeres worker a relanzar: {', '.join(plan.clusters_to_recreate)}")
+                print(
+                    f"[CAMBIOS] Clústeres worker a relanzar: {', '.join(plan.clusters_to_recreate)}"
+                )
 
     deployment_id = store.open_deployment(
         client_id=cliente["id"],
@@ -2209,18 +2507,28 @@ def deploy(
                 config["cliente"]["id"], config["cliente"]["entorno"], red["region"]
             )
             deployment_id = existing["deployment_id"] if existing else None
-            print(f"[ESTADO] (dry-run, solo lectura) deployment_id={deployment_id or '(ninguno todavía)'}")
+            print(
+                f"[ESTADO] (dry-run, solo lectura) deployment_id={deployment_id or '(ninguno todavía)'}"
+            )
             if existing and existing.get("config_snapshot"):
                 plan = plan_changes(existing["config_snapshot"], config)
                 if not plan.is_no_op:
-                    print("[CAMBIOS] (dry-run) plan_changes respecto al despliegue activo:")
-                    print("\n".join(f"  {line}" for line in plan.summary().splitlines()))
+                    print(
+                        "[CAMBIOS] (dry-run) plan_changes respecto al despliegue activo:"
+                    )
+                    print(
+                        "\n".join(f"  {line}" for line in plan.summary().splitlines())
+                    )
                     if plan.requires_destroy:
-                        print("[CAMBIOS] Requeriría destroy + provision (no aplicable en caliente).")
+                        print(
+                            "[CAMBIOS] Requeriría destroy + provision (no aplicable en caliente)."
+                        )
         else:
             t0 = time.monotonic()
             state, deployment_id = _open_state_store(config)
-            print(f"[ESTADO] deployment_id={deployment_id} ({time.monotonic() - t0:.1f}s)")
+            print(
+                f"[ESTADO] deployment_id={deployment_id} ({time.monotonic() - t0:.1f}s)"
+            )
 
         # Si la red ya fue aprovisionada en una corrida anterior (o en una invocación
         # separada de --only network), reconstruye vpc_name/SG reales desde el estado
@@ -2228,7 +2536,9 @@ def deploy(
         # invocados solos siguen apuntando a la VPC correcta, no a la que SkyPilot
         # elegiría por defecto.
         if deployment_id and state:
-            loaded_outputs = load_network_outputs_from_state(config, state, deployment_id)
+            loaded_outputs = load_network_outputs_from_state(
+                config, state, deployment_id
+            )
             if loaded_outputs:
                 builder.apply_network_outputs(loaded_outputs)
 
@@ -2240,9 +2550,11 @@ def deploy(
             # Sin despliegue previo: no hay nada que leer y, para no escribir en
             # PostgreSQL durante un dry-run, no se instancia AwsNetworkManager
             # (su constructor abriría un deployment_id nuevo si no se le pasa uno).
-            print("[RED] --dry-run: no existe un despliegue previo para "
-                  f"{config['cliente']['id']}/{config['cliente']['entorno']}/{red['region']}. "
-                  "Se crearía una VPC, subredes, NAT, route tables y Security Groups nuevos.")
+            print(
+                "[RED] --dry-run: no existe un despliegue previo para "
+                f"{config['cliente']['id']}/{config['cliente']['entorno']}/{red['region']}. "
+                "Se crearía una VPC, subredes, NAT, route tables y Security Groups nuevos."
+            )
         elif red.get("gestion_red", "auto") == "auto":
             from aws_network import AwsNetworkManager
 
@@ -2255,9 +2567,11 @@ def deploy(
             else:
                 t0 = time.monotonic()
                 network_outputs = mgr.provision()
-                print(f"[RED] VPC={network_outputs.vpc_id} ({network_outputs.vpc_name}) "
-                      f"SG-gateway={network_outputs.sg_gateway_id} SG-workers={network_outputs.sg_workers_id} "
-                      f"({time.monotonic() - t0:.1f}s)")
+                print(
+                    f"[RED] VPC={network_outputs.vpc_id} ({network_outputs.vpc_name}) "
+                    f"SG-gateway={network_outputs.sg_gateway_id} SG-workers={network_outputs.sg_workers_id} "
+                    f"({time.monotonic() - t0:.1f}s)"
+                )
                 if network_outputs.gateway_eip_public_ip:
                     print(
                         f"[RED] Elastic IP del Gateway reservada: {network_outputs.gateway_eip_public_ip} "
@@ -2269,12 +2583,16 @@ def deploy(
                 # El render de manifiestos depende de los IDs reales de red: regenerarlos ahora.
                 artefactos = generate_manifests(config, out_dir, builder=builder)
         else:
-            print("[SKIP] 'gestion_red: existente' -> se omite AwsNetworkManager (VPC/SGs manuales).")
+            print(
+                "[SKIP] 'gestion_red: existente' -> se omite AwsNetworkManager (VPC/SGs manuales)."
+            )
 
     # --- FASE: gateway ----------------------------------------------------------
     if "gateway" in phases and artefactos.get("gateway") and dry_run:
-        print("\n--- [GATEWAY] --dry-run: se lanzaría "
-              f"'sky launch -y -c {builder.gateway_cluster} {artefactos['gateway']}' ---")
+        print(
+            "\n--- [GATEWAY] --dry-run: se lanzaría "
+            f"'sky launch -y -c {builder.gateway_cluster} {artefactos['gateway']}' ---"
+        )
     elif "gateway" in phases and artefactos.get("gateway"):
         print("\n--- [GATEWAY] Nodo Gateway (público) ---")
 
@@ -2296,7 +2614,9 @@ def deploy(
             gw_cfg_path = out_dir / SKY_GATEWAY_CONFIG
             dump_yaml(gw_cfg, gw_cfg_path)
             gateway_env["SKYPILOT_CONFIG"] = str(gw_cfg_path)
-            print(f"[INFO] SkyPilot usará {gw_cfg_path.name} (misma VPC que los workers)")
+            print(
+                f"[INFO] SkyPilot usará {gw_cfg_path.name} (misma VPC que los workers)"
+            )
         if red.get("aws_profile"):
             # BYOC: sin esto, SkyPilot resuelve credenciales AWS con la cadena por
             # defecto (la cuenta de Sooniverse) y lanzaría el gateway ahí en vez de
@@ -2317,48 +2637,81 @@ def deploy(
             env=gateway_env,
         )
         if state and deployment_id:
-            state.log_event(deployment_id, "gateway", "sky_launch", "ok",
-                             message=builder.gateway_cluster, duration_ms=int((time.monotonic() - t0) * 1000))
+            state.log_event(
+                deployment_id,
+                "gateway",
+                "sky_launch",
+                "ok",
+                message=builder.gateway_cluster,
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
 
         net_outputs = getattr(builder, "_network_outputs", None)
         eip_alloc_id = getattr(net_outputs, "gateway_eip_allocation_id", None)
         if eip_alloc_id:
             try:
                 associated_ip = _associate_gateway_eip(
-                    builder.gateway_cluster, eip_alloc_id, red["region"], red.get("aws_profile"),
+                    builder.gateway_cluster,
+                    eip_alloc_id,
+                    red["region"],
+                    red.get("aws_profile"),
                 )
                 print(f"[GATEWAY] Elastic IP asociada: {associated_ip}")
                 if state and deployment_id:
-                    state.log_event(deployment_id, "gateway", "associate_eip", "ok", message=associated_ip)
+                    state.log_event(
+                        deployment_id,
+                        "gateway",
+                        "associate_eip",
+                        "ok",
+                        message=associated_ip,
+                    )
             except GatewayEipAssociationError as exc:
                 if state and deployment_id:
-                    state.log_event(deployment_id, "gateway", "associate_eip", "error", message=str(exc))
+                    state.log_event(
+                        deployment_id,
+                        "gateway",
+                        "associate_eip",
+                        "error",
+                        message=str(exc),
+                    )
                 raise
 
     if artefactos.get("gateway") and not dry_run:
-        gateway_ip = _gateway_public_ip(builder.gateway_cluster, aws_profile=red.get("aws_profile"))
+        gateway_ip = _gateway_public_ip(
+            builder.gateway_cluster, aws_profile=red.get("aws_profile")
+        )
         print(f"[INFO] IP pública del Gateway: {gateway_ip or 'no disponible'}")
 
     # --- FASE: dominio (DNS + certbot; best-effort, nunca aborta) ---------------
-    dominio_cfg_top = (config.get("gateway", {}).get("dominio") or {})
+    dominio_cfg_top = config.get("gateway", {}).get("dominio") or {}
     if "dominio" in phases and dry_run:
         if dominio_cfg_top.get("habilitado", False):
-            print(f"\n--- [DOMINIO] --dry-run: se verificaría el DNS de "
-                  f"'{dominio_cfg_top.get('seleccionado')}' y se emitiría/renovaría el certificado ---")
+            print(
+                f"\n--- [DOMINIO] --dry-run: se verificaría el DNS de "
+                f"'{dominio_cfg_top.get('seleccionado')}' y se emitiría/renovaría el certificado ---"
+            )
         else:
-            print("\n--- [DOMINIO] --dry-run: 'gateway.dominio.habilitado: false' -> [SKIP] ---")
+            print(
+                "\n--- [DOMINIO] --dry-run: 'gateway.dominio.habilitado: false' -> [SKIP] ---"
+            )
     elif "dominio" in phases:
         print("\n--- [DOMINIO] Dominio propio + certificado (Let's Encrypt) ---")
         if not dominio_cfg_top.get("habilitado", False):
             print("[SKIP] 'gateway.dominio.habilitado: false' -> IP efímera, HTTP.")
         elif not gateway_ip:
-            print("[WARNING] Sin IP del Gateway disponible (¿corriste antes la fase 'gateway'?); se omite.")
+            print(
+                "[WARNING] Sin IP del Gateway disponible (¿corriste antes la fase 'gateway'?); se omite."
+            )
         else:
-            run_dominio_phase(config, builder.gateway_cluster, gateway_ip, state, deployment_id)
+            run_dominio_phase(
+                config, builder.gateway_cluster, gateway_ip, state, deployment_id
+            )
 
     # --- FASE: workers (regenera el bastion con la IP real del gateway) --------
     if "workers" in phases and dry_run:
-        clusters = ", ".join(builder.worker_cluster(wl["id"]) for wl in config["workloads"])
+        clusters = ", ".join(
+            builder.worker_cluster(wl["id"]) for wl in config["workloads"]
+        )
         print(f"\n--- [WORKERS] --dry-run: se lanzarían: {clusters} ---")
     elif "workers" in phases:
         print("\n--- [WORKERS] Workers vLLM (subred privada) ---")
@@ -2378,7 +2731,9 @@ def deploy(
             worker_env["SKYPILOT_CONFIG"] = str(cfg_path)
             print(f"[INFO] SkyPilot usará {cfg_path.name} (use_internal_ips + bastion)")
         if red.get("aws_profile"):
-            worker_env["AWS_PROFILE"] = red["aws_profile"]  # BYOC, ver comentario en fase [GATEWAY]
+            worker_env["AWS_PROFILE"] = red[
+                "aws_profile"
+            ]  # BYOC, ver comentario en fase [GATEWAY]
 
         for wl in config["workloads"]:
             cluster = builder.worker_cluster(wl["id"])
@@ -2394,15 +2749,25 @@ def deploy(
             # solo existe en una, y SkyPilot está anclado a ella por
             # `use_internal_ips`. Si esto se vuelve crónico, la salida es subir
             # `red_y_aislamiento.azs`.
-            _run_sky_with_retry(["launch", "-y", "--retry-until-up", "-c", cluster, str(manifest)],
-                                 env=worker_env)
+            _run_sky_with_retry(
+                ["launch", "-y", "--retry-until-up", "-c", cluster, str(manifest)],
+                env=worker_env,
+            )
             if state and deployment_id:
-                state.log_event(deployment_id, "workers", "sky_launch", "ok",
-                                 message=cluster, duration_ms=int((time.monotonic() - t0) * 1000))
+                state.log_event(
+                    deployment_id,
+                    "workers",
+                    "sky_launch",
+                    "ok",
+                    message=cluster,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                )
 
     # --- FASE: endpoints --------------------------------------------------------
     if "endpoints" in phases and dry_run:
-        print("\n--- [ENDPOINTS] --dry-run: se ejecutaría sync_endpoints.py --apply ---")
+        print(
+            "\n--- [ENDPOINTS] --dry-run: se ejecutaría sync_endpoints.py --apply ---"
+        )
     elif "endpoints" in phases:
         print("\n--- [ENDPOINTS] Sincronización de endpoints en LiteLLM ---")
         # sync_endpoints.py devuelve 0 aunque 0 workers queden sanos (solo
@@ -2413,7 +2778,13 @@ def deploy(
         # se entera de que el pool quedó vacío hasta que prueba el chat.
         expected_healthy = sum(wl.get("replicas", 1) for wl in config["workloads"])
         sync_script = REPO_ROOT / "scripts" / "sync_endpoints.py"
-        cmd = [sys.executable, str(sync_script), "--config", str(config_path), "--apply"]
+        cmd = [
+            sys.executable,
+            str(sync_script),
+            "--config",
+            str(config_path),
+            "--apply",
+        ]
         deadline = time.monotonic() + ENDPOINTS_HEALTH_TIMEOUT_SECONDS
         attempt = 0
         while True:
@@ -2423,47 +2794,72 @@ def deploy(
             try:
                 subprocess.run(cmd, check=True)
             except subprocess.CalledProcessError as exc:
-                print(f"[WARNING] La sincronización automática falló (código {exc.returncode}).")
-                print("          Reintenta manualmente: python scripts/sync_endpoints.py --apply")
+                print(
+                    f"[WARNING] La sincronización automática falló (código {exc.returncode})."
+                )
+                print(
+                    "          Reintenta manualmente: python scripts/sync_endpoints.py --apply"
+                )
                 break
 
             healthy_count = _count_healthy_endpoints(out_dir)
             if healthy_count >= expected_healthy and expected_healthy > 0:
-                print(f"[OK] {healthy_count}/{expected_healthy} worker(s) sano(s) en el pool.")
+                print(
+                    f"[OK] {healthy_count}/{expected_healthy} worker(s) sano(s) en el pool."
+                )
                 break
             if time.monotonic() >= deadline:
-                print(f"[WARNING] Solo {healthy_count}/{expected_healthy} worker(s) sano(s) tras "
-                      f"{ENDPOINTS_HEALTH_TIMEOUT_SECONDS}s (¿el modelo sigue cargando?). "
-                      "Reintenta manualmente: python scripts/sync_endpoints.py --apply")
+                print(
+                    f"[WARNING] Solo {healthy_count}/{expected_healthy} worker(s) sano(s) tras "
+                    f"{ENDPOINTS_HEALTH_TIMEOUT_SECONDS}s (¿el modelo sigue cargando?). "
+                    "Reintenta manualmente: python scripts/sync_endpoints.py --apply"
+                )
                 break
-            print(f"[ESPERA] {healthy_count}/{expected_healthy} worker(s) sano(s) todavía; "
-                  f"reintentando en {ENDPOINTS_HEALTH_POLL_INTERVAL_SECONDS}s "
-                  "(vLLM puede seguir cargando el modelo)...")
+            print(
+                f"[ESPERA] {healthy_count}/{expected_healthy} worker(s) sano(s) todavía; "
+                f"reintentando en {ENDPOINTS_HEALTH_POLL_INTERVAL_SECONDS}s "
+                "(vLLM puede seguir cargando el modelo)..."
+            )
             time.sleep(ENDPOINTS_HEALTH_POLL_INTERVAL_SECONDS)
 
     # --- FASE: capabilities (best-effort; no aborta el resto del pipeline) -----
     if "capabilities" in phases and dry_run:
-        print("\n--- [CAPABILITIES] --dry-run: se ejecutaría test_model_capabilities.py --write-db ---")
+        print(
+            "\n--- [CAPABILITIES] --dry-run: se ejecutaría test_model_capabilities.py --write-db ---"
+        )
     elif "capabilities" in phases:
-        print("\n--- [CAPABILITIES] Sondeo de capacidades reales + sincronización con Open WebUI ---")
+        print(
+            "\n--- [CAPABILITIES] Sondeo de capacidades reales + sincronización con Open WebUI ---"
+        )
         caps_script = REPO_ROOT / "scripts" / "test_model_capabilities.py"
         caps_json = out_dir / ".sooniverse_capabilities.json"
         cmd = [
-            sys.executable, str(caps_script),
-            "--config", str(config_path),
+            sys.executable,
+            str(caps_script),
+            "--config",
+            str(config_path),
             "--write-db",
-            "--json", str(caps_json),
+            "--json",
+            str(caps_json),
         ]
         print(f"[EXEC] {' '.join(cmd)}")
         result = subprocess.run(cmd)
         if result.returncode != 0:
-            print(f"[WARNING] test_model_capabilities.py reportó un mismatch peligroso "
-                  f"(código {result.returncode}); revisa la tabla impresa arriba y "
-                  "sooniverse.model_capability. No se aborta el despliegue.")
+            print(
+                f"[WARNING] test_model_capabilities.py reportó un mismatch peligroso "
+                f"(código {result.returncode}); revisa la tabla impresa arriba y "
+                "sooniverse.model_capability. No se aborta el despliegue."
+            )
 
         sync_owui_script = REPO_ROOT / "scripts" / "sync_openwebui_models.py"
         if sync_owui_script.exists():
-            sync_cmd = [sys.executable, str(sync_owui_script), "--config", str(config_path), "--apply"]
+            sync_cmd = [
+                sys.executable,
+                str(sync_owui_script),
+                "--config",
+                str(config_path),
+                "--apply",
+            ]
             # 2 intentos: la causa más común de un fallo aquí es una carrera
             # de arranque (Open WebUI/litellm todavía terminando su propio
             # healthcheck cuando llega la petición de bootstrap), no un error
@@ -2477,41 +2873,61 @@ def deploy(
                 if sync_result.returncode == 0:
                     break
                 if sync_attempt == 1:
-                    print(f"[WARNING] sync_openwebui_models.py falló (código {sync_result.returncode}); "
-                          "reintentando en 20s...")
+                    print(
+                        f"[WARNING] sync_openwebui_models.py falló (código {sync_result.returncode}); "
+                        "reintentando en 20s..."
+                    )
                     time.sleep(20)
             if sync_result is not None and sync_result.returncode != 0:
-                print(f"[WARNING] sync_openwebui_models.py siguió fallando (código {sync_result.returncode}); "
-                      "reintenta manualmente: python scripts/sync_openwebui_models.py --apply")
+                print(
+                    f"[WARNING] sync_openwebui_models.py siguió fallando (código {sync_result.returncode}); "
+                    "reintenta manualmente: python scripts/sync_openwebui_models.py --apply"
+                )
         else:
             print("[SKIP] scripts/sync_openwebui_models.py no existe todavía.")
 
     # --- FASE: capacidad (best-effort; no aborta el resto del pipeline) --------
     cap_cfg = config.get("capacidad") or {}
     if "capacidad" in phases and not cap_cfg.get("habilitado", True):
-        print("\n[SKIP] 'capacidad.habilitado: false' -> se omite el benchmark de capacidad.")
+        print(
+            "\n[SKIP] 'capacidad.habilitado: false' -> se omite el benchmark de capacidad."
+        )
     elif "capacidad" in phases and dry_run:
-        print("\n--- [CAPACIDAD] --dry-run: se ejecutaría benchmark_capacity.py --write-db ---")
+        print(
+            "\n--- [CAPACIDAD] --dry-run: se ejecutaría benchmark_capacity.py --write-db ---"
+        )
         bench_script = REPO_ROOT / "scripts" / "benchmark_capacity.py"
         if bench_script.exists():
-            subprocess.run([sys.executable, str(bench_script),
-                            "--config", str(config_path), "--dry-run"])
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(bench_script),
+                    "--config",
+                    str(config_path),
+                    "--dry-run",
+                ]
+            )
     elif "capacidad" in phases:
         print("\n--- [CAPACIDAD] Benchmark de capacidad (rampa acotada) ---")
         bench_script = REPO_ROOT / "scripts" / "benchmark_capacity.py"
         if bench_script.exists():
             bench_json = out_dir / CAPACITY_CACHE
             cmd = [
-                sys.executable, str(bench_script),
-                "--config", str(config_path),
+                sys.executable,
+                str(bench_script),
+                "--config",
+                str(config_path),
                 "--write-db",
-                "--json", str(bench_json),
+                "--json",
+                str(bench_json),
             ]
             print(f"[EXEC] {' '.join(cmd)}")
             result = subprocess.run(cmd)
             if result.returncode != 0:
-                print(f"[WARNING] benchmark_capacity.py terminó con código {result.returncode}; "
-                      "revisa sooniverse.capacity_benchmark. No se aborta el despliegue.")
+                print(
+                    f"[WARNING] benchmark_capacity.py terminó con código {result.returncode}; "
+                    "revisa sooniverse.capacity_benchmark. No se aborta el despliegue."
+                )
         else:
             print("[SKIP] scripts/benchmark_capacity.py no existe todavía.")
 
@@ -2526,7 +2942,9 @@ def deploy(
                 [sys.executable, str(verify_script), "--config", str(config_path)]
             )
             if result.returncode != 0:
-                print(f"[WARNING] verify_deployment.py reportó fallos (código {result.returncode}).")
+                print(
+                    f"[WARNING] verify_deployment.py reportó fallos (código {result.returncode})."
+                )
         else:
             print("[SKIP] scripts/verify_deployment.py no existe todavía.")
 
@@ -2534,9 +2952,13 @@ def deploy(
         try:
             resources = state.list_resources(deployment_id)
             healthy = all(r.get("state") in ("active", "creating") for r in resources)
-            state.set_deployment_status(deployment_id, "active" if healthy else "degraded")
+            state.set_deployment_status(
+                deployment_id, "active" if healthy else "degraded"
+            )
         except Exception as exc:  # noqa: BLE001 - no debe tumbar el reporte final por un fallo de estado
-            print(f"[WARNING] No se pudo actualizar el estado final del despliegue: {exc}")
+            print(
+                f"[WARNING] No se pudo actualizar el estado final del despliegue: {exc}"
+            )
 
     if gateway_ip:
         gw_cfg_final = config.get("gateway", {})
@@ -2551,10 +2973,14 @@ def deploy(
         print(f" Panel (Django)    : {scheme}://{host}/panel/")
         print(f" Salud (nginx)     : {scheme}://{host}/healthz")
         if scheme == "https":
-            print(f" Acceso directo por IP (sin certificado válido): http://{gateway_ip}/")
+            print(
+                f" Acceso directo por IP (sin certificado válido): http://{gateway_ip}/"
+            )
         if gw_cfg_final.get("exponer_puertos_directos"):
-            print(" [exponer_puertos_directos=true] También alcanzables: "
-                  f":4000 (LiteLLM), :8080 (Open WebUI), :8000 (Django)")
+            print(
+                " [exponer_puertos_directos=true] También alcanzables: "
+                f":4000 (LiteLLM), :8080 (Open WebUI), :8000 (Django)"
+            )
         if deployment_id:
             print(f" deployment_id: {deployment_id}")
         print("=" * 74)
@@ -2567,31 +2993,46 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generador y aprovisionador multi-nodo de infraestructura Sooniverse (SkyPilot)."
     )
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH),
-                        help="Ruta al contrato central de configuración (p.ej. clients/acme/config_global.yaml)")
     parser.add_argument(
-        "--out-dir", default=None,
-        help="Directorio donde se escriben los manifiestos generados. Por defecto: la raíz del repo "
-             "si --config es el config_global.yaml raíz (compatibilidad), o "
-             ".artifacts/<cliente.id>-<entorno>/ para cualquier otro --config (multi-cliente).",
+        "--config",
+        default=str(DEFAULT_CONFIG_PATH),
+        help="Ruta al contrato central de configuración (p.ej. clients/acme/config_global.yaml)",
     )
-    parser.add_argument("--run", action="store_true",
-                        help="Aprovisiona la topología completa en AWS tras generar los manifiestos")
+    parser.add_argument(
+        "--out-dir",
+        default=None,
+        help="Directorio donde se escriben los manifiestos generados. Por defecto: la raíz del repo "
+        "si --config es el config_global.yaml raíz (compatibilidad), o "
+        ".artifacts/<cliente.id>-<entorno>/ para cualquier otro --config (multi-cliente).",
+    )
+    parser.add_argument(
+        "--run",
+        action="store_true",
+        help="Aprovisiona la topología completa en AWS tras generar los manifiestos",
+    )
     parser.add_argument(
         # Derivado de PHASE_ORDER, no repetido a mano: añadir una fase nueva solo
         # exige tocar esa lista.
-        "--only", choices=["all", *PHASE_ORDER],
+        "--only",
+        choices=["all", *PHASE_ORDER],
         default="all",
         help="Limita el aprovisionamiento a una fase de la topología",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Con --run: solo genera manifiestos e imprime lo que se haría, sin llamadas mutantes a AWS/SkyPilot",
     )
-    parser.add_argument("--init-db", action="store_true",
-                        help="Ejecuta scripts/db_setup.py localmente (ignora el flag AUTO_INIT_DB)")
-    parser.add_argument("--no-auto-init-db", action="store_true",
-                        help="Fuerza AUTO_INIT_DB=false en esta ejecución sin editar el YAML")
+    parser.add_argument(
+        "--init-db",
+        action="store_true",
+        help="Ejecuta scripts/db_setup.py localmente (ignora el flag AUTO_INIT_DB)",
+    )
+    parser.add_argument(
+        "--no-auto-init-db",
+        action="store_true",
+        help="Fuerza AUTO_INIT_DB=false en esta ejecución sin editar el YAML",
+    )
 
     args = parser.parse_args()
 
@@ -2603,31 +3044,55 @@ def main() -> int:
             config.setdefault("base_de_datos", {})["AUTO_INIT_DB"] = False
             print("[INFO] Override de CLI: AUTO_INIT_DB=false")
 
-        out_dir = Path(args.out_dir) if args.out_dir else artifacts_dir_for(Path(args.config), config)
+        out_dir = (
+            Path(args.out_dir)
+            if args.out_dir
+            else artifacts_dir_for(Path(args.config), config)
+        )
         if out_dir != REPO_ROOT:
-            print(f"[INFO] Artefactos de este cliente en: {out_dir.relative_to(REPO_ROOT)}/")
+            print(
+                f"[INFO] Artefactos de este cliente en: {out_dir.relative_to(REPO_ROOT)}/"
+            )
         artefactos = generate_manifests(config, out_dir)
 
         auto_init = config.get("base_de_datos", {}).get("AUTO_INIT_DB", True)
-        print(f"[INFO] AUTO_INIT_DB = {str(auto_init).lower()} "
-              f"({'la BD se inicializa en el despliegue' if auto_init else 'inicialización manual'})")
+        print(
+            f"[INFO] AUTO_INIT_DB = {str(auto_init).lower()} "
+            f"({'la BD se inicializa en el despliegue' if auto_init else 'inicialización manual'})"
+        )
 
         if args.init_db:
             print("\n--- Inicialización local de la base de datos ---")
-            subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "db_setup.py"), "--refresh"], check=True)
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "db_setup.py"),
+                    "--refresh",
+                ],
+                check=True,
+            )
 
         if args.run:
             deploy(
-                config, artefactos, only=args.only,
-                out_dir=out_dir, config_path=Path(args.config),
+                config,
+                artefactos,
+                only=args.only,
+                out_dir=out_dir,
+                config_path=Path(args.config),
                 dry_run=args.dry_run,
             )
         else:
             print("\n[INFO] Para aprovisionar la topología en AWS:")
             print("       python scripts/generate_infra.py --run")
-            print("       python scripts/generate_infra.py --run --dry-run          # plan, sin tocar AWS")
-            print("       python scripts/generate_infra.py --run --only network     # solo la capa de red")
-            print("       python scripts/generate_infra.py --run --only gateway     # solo el gateway")
+            print(
+                "       python scripts/generate_infra.py --run --dry-run          # plan, sin tocar AWS"
+            )
+            print(
+                "       python scripts/generate_infra.py --run --only network     # solo la capa de red"
+            )
+            print(
+                "       python scripts/generate_infra.py --run --only gateway     # solo el gateway"
+            )
 
     except ConfigValidationError as e:
         print(f"\n[ERROR DE CONFIGURACIÓN] {e}", file=sys.stderr)
