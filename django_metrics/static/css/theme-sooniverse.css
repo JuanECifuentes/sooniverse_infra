@@ -408,6 +408,33 @@ a:hover {
     stroke-width: 1.8;
 }
 
+/* Variante ghost (logout, base.html): sobria de base, affordance de peligro
+   en hover, igual que .sv-btn--danger del manual (transparente + negative). */
+.sv-iconbtn--ghost {
+    border-color: var(--border-subtle);
+    background-color: transparent;
+    color: var(--text-secondary);
+    box-shadow: none;
+}
+.sv-iconbtn--ghost:hover {
+    border-color: var(--negative);
+    background-color: var(--negative-soft);
+    color: var(--negative);
+    box-shadow: none;
+}
+.sv-iconbtn--ghost:active {
+    border-color: var(--negative);
+    background-color: transparent;
+    color: var(--negative);
+}
+
+/* Checkbox bloqueado (rol/estado en autoedición, credencial_editar.html):
+   mismo convenio de :disabled que los botones del manual. */
+.sv-check--locked {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 /* El tooltip de navegación no lleva el margen del trigger de ayuda inline y
    mantiene la misma escala compacta que .sv-navbtn::after en el chat */
 .sv-tooltip--nav {
