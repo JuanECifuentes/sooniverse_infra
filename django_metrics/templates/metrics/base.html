@@ -36,6 +36,16 @@
                 </nav>
 
                 <div class="l-header__meta">
+                    <span class="sv-tooltip sv-tooltip--bottom-end sv-tooltip--nav">
+                        <a class="sv-iconbtn" href="{{ CHAT_URL }}" aria-label="Ir al chat">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+                                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                                 stroke-linejoin="round" aria-hidden="true">
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                            </svg>
+                        </a>
+                        <span class="sv-tooltip__bubble" role="tooltip">Ir al chat</span>
+                    </span>
                     <span class="sv-badge sv-badge--info">{{ CLIENTE_ID }}</span>
                     <span class="sv-badge {% if ENTORNO == 'prod' %}sv-badge--success{% else %}sv-badge--muted{% endif %}">{{ ENTORNO }}</span>
                     <form method="post" action="{% url 'metrics:logout' %}" class="l-inline-form">
