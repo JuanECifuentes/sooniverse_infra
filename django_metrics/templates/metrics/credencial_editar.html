@@ -1,0 +1,84 @@
+{% extends "metrics/base.html" %}
+
+{% block titulo %}Editar credencial · {{ usuario.username }}{% endblock %}
+
+{% block contenido %}
+<div class="l-page-head">
+    <div class="l-page-head__text">
+        <span class="sv-eyebrow">Credenciales</span>
+        <h2>Editar usuario</h2>
+        <p class="sv-body">
+            Cuenta <span class="sv-mono sv-strong">{{ usuario.username }}</span>.
+            El nombre de usuario no se puede cambiar: es el identificador en sesiones y logs.
+        </p>
+    </div>
+    <div class="l-page-head__actions">
+        <a class="sv-btn sv-btn--ghost sv-btn--sm" href="{% url 'metrics:credenciales' %}">Volver</a>
+    </div>
+</div>
+
+<section class="sv-card">
+    <form method="post" novalidate data-spinner-submit>
+        {% csrf_token %}
+
+        {% if form.non_field_errors %}
+            <div class="sv-alert sv-alert--error l-mb-md">{{ form.non_field_errors }}</div>
+        {% endif %}
+
+        <div class="l-grid l-grid--form">
+            <div class="l-field">
+                <label class="sv-label" for="{{ form.email.id_for_label }}">{{ form.email.label }}</label>
+                {{ form.email }}
+                {% if form.email.help_text %}<span class="sv-help">{{ form.email.help_text }}</span>{% endif %}
+                {% for error in form.email.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form.first_name.id_for_label }}">{{ form.first_name.label }}</label>
+                {{ form.first_name }}
+                {% for error in form.first_name.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form.last_name.id_for_label }}">{{ form.last_name.label }}</label>
+                {{ form.last_name }}
+                {% for error in form.last_name.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form.password.id_for_label }}">{{ form.password.label }}</label>
+                {{ form.password }}
+                {% if form.password.help_text %}<span class="sv-help">{{ form.password.help_text }}</span>{% endif %}
+                {% for error in form.password.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form.password2.id_for_label }}">{{ form.password2.label }}</label>
+                {{ form.password2 }}
+                {% for error in form.password2.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field l-field--wide">
+                <label class="sv-check {% if es_propia %}sv-check--locked{% endif %}">
+                    {{ form.is_staff }}
+                    <span>{{ form.is_staff.label }}</span>
+                    {% include "metrics/_tooltip.html" with text="Sin esto, la cuenta solo podrá usar el chat, no este panel." %}
+                </label>
+                <label class="sv-check {% if es_propia %}sv-check--locked{% endif %}">
+                    {{ form.is_active }}
+                    <span>{{ form.is_active.label }}</span>
+                </label>
+                {% if es_propia %}
+                    <span class="sv-help">No puedes cambiar tu propio rol o estado desde tu sesión actual.</span>
+                {% endif %}
+                {% for error in form.is_staff.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+                {% for error in form.is_active.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+        </div>
+
+        <div class="l-form-actions">
+            <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm" data-loading-text="Guardando…">Guardar cambios</button>
+        </div>
+    </form>
+</section>
+{% endblock %}

@@ -225,6 +225,25 @@ SESSION_COOKIE_HTTPONLY = True
 USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
+# -----------------------------------------------------------------------------
+# Rate limiting por IP (metrics/ratelimit.py, ventana fija sobre el cache de
+# Django). Blinda los endpoints que extraen información y el login contra
+# automatizaciones. Formato '<N>/<s|m|h>'; clave vacía o ausente = sin límite.
+# Con el LocMemCache por defecto el contador es por proceso gunicorn (3 workers
+# => ~3x el límite efectivo); los defaults ya asumen esa holgura. auth_check NO
+# se limita a propósito: lo consume nginx 'auth_request' en CADA petición del
+# clúster desde una sola IP (la del proxy) y un límite ahí sería un self-DoS.
+# -----------------------------------------------------------------------------
+RATELIMITS = {
+    "login": _env("RATELIMIT_LOGIN", "10/m"),  # intentos de login (POST)
+    "page": _env("RATELIMIT_PAGE", "120/m"),  # páginas HTML del panel
+    "api": _env("RATELIMIT_API", "120/m"),  # JSON que alimenta gráficas
+    "action": _env(
+        "RATELIMIT_ACTION", "30/m"
+    ),  # POSTs de mutación (keys, workers, credenciales)
+    "refresh": _env("RATELIMIT_REFRESH", "6/m"),  # ETL manual (caro por diseño)
+}
+
 # Con dominio propio (HTTPS real, ver gateway.dominio en config_global.yaml) las
 # cookies deben marcarse Secure; en dev local (HTTP puro) NO, o el navegador
 # las descarta y el login/CSRF dejan de funcionar por completo.

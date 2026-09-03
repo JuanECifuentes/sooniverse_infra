@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.db.models import Q
-from django.test import RequestFactory, SimpleTestCase
+from django.test import RequestFactory, SimpleTestCase, override_settings
 
 from metrics import views
 from metrics.auth_backends import UsernameOrEmailBackend
@@ -26,8 +26,14 @@ rf = RequestFactory()
 
 def _fake_user(**overrides):
     defaults = dict(
-        id=1, username="operador", email="operador@acme.com", password="hash",
-        is_active=True, is_staff=False, first_name="", last_name="",
+        id=1,
+        username="operador",
+        email="operador@acme.com",
+        password="hash",
+        is_active=True,
+        is_staff=False,
+        first_name="",
+        last_name="",
     )
     defaults.update(overrides)
 
@@ -62,13 +68,17 @@ class UsernameOrEmailBackendTests(SimpleTestCase):
     def test_autentica_por_username_o_correo(self):
         with patch("metrics.auth_backends.get_user_model") as get_model:
             get_model.return_value.objects = self._manager(get_return=self.user)
-            resultado = self.backend.authenticate(None, username="operador", password="clave-correcta")
+            resultado = self.backend.authenticate(
+                None, username="operador", password="clave-correcta"
+            )
         self.assertEqual(resultado, self.user)
 
     def test_password_incorrecta_no_autentica(self):
         with patch("metrics.auth_backends.get_user_model") as get_model:
             get_model.return_value.objects = self._manager(get_return=self.user)
-            resultado = self.backend.authenticate(None, username="operador", password="mala")
+            resultado = self.backend.authenticate(
+                None, username="operador", password="mala"
+            )
         self.assertIsNone(resultado)
 
     def test_usuario_inexistente_no_autentica(self):
@@ -77,8 +87,12 @@ class UsernameOrEmailBackendTests(SimpleTestCase):
         User = real_get_user_model()
         with patch("metrics.auth_backends.get_user_model") as get_model:
             get_model.return_value = User
-            get_model.return_value.objects = self._manager(get_side_effect=User.DoesNotExist)
-            resultado = self.backend.authenticate(None, username="fantasma", password="x")
+            get_model.return_value.objects = self._manager(
+                get_side_effect=User.DoesNotExist
+            )
+            resultado = self.backend.authenticate(
+                None, username="fantasma", password="x"
+            )
         self.assertIsNone(resultado)
 
     def test_email_duplicado_no_autentica_ninguna(self):
@@ -87,17 +101,26 @@ class UsernameOrEmailBackendTests(SimpleTestCase):
         User = real_get_user_model()
         with patch("metrics.auth_backends.get_user_model") as get_model:
             get_model.return_value = User
-            get_model.return_value.objects = self._manager(get_side_effect=User.MultipleObjectsReturned)
-            resultado = self.backend.authenticate(None, username="operador@acme.com", password="clave-correcta")
+            get_model.return_value.objects = self._manager(
+                get_side_effect=User.MultipleObjectsReturned
+            )
+            resultado = self.backend.authenticate(
+                None, username="operador@acme.com", password="clave-correcta"
+            )
         self.assertIsNone(resultado)
 
     def test_consulta_por_username_o_email_case_insensitive(self):
         manager = self._manager(get_return=self.user)
         with patch("metrics.auth_backends.get_user_model") as get_model:
             get_model.return_value.objects = manager
-            self.backend.authenticate(None, username="OPERADOR@ACME.COM", password="clave-correcta")
+            self.backend.authenticate(
+                None, username="OPERADOR@ACME.COM", password="clave-correcta"
+            )
         filtro = manager.get.call_args.args[0]
-        self.assertEqual(filtro, Q(username="OPERADOR@ACME.COM") | Q(email__iexact="OPERADOR@ACME.COM"))
+        self.assertEqual(
+            filtro,
+            Q(username="OPERADOR@ACME.COM") | Q(email__iexact="OPERADOR@ACME.COM"),
+        )
 
     def test_sin_username_o_password_no_autentica(self):
         self.assertIsNone(self.backend.authenticate(None, username=None, password="x"))
@@ -121,8 +144,10 @@ class LoginViewTests(SimpleTestCase):
     def test_credenciales_validas_inicia_sesion_y_redirige(self):
         user = _fake_user()
         req = _request(identificador="operador", password="clave-correcta")
-        with patch("metrics.views.authenticate", return_value=user) as auth, \
-             patch("metrics.views.auth_login") as login_fn:
+        with (
+            patch("metrics.views.authenticate", return_value=user) as auth,
+            patch("metrics.views.auth_login") as login_fn,
+        ):
             resp = views.login_view(req)
         auth.assert_called_once()
         login_fn.assert_called_once_with(req, user)
@@ -137,9 +162,15 @@ class LoginViewTests(SimpleTestCase):
 
     def test_respeta_next(self):
         user = _fake_user()
-        req = _request(identificador="operador", password="clave-correcta", next="/panel/metrics/api-keys/")
-        with patch("metrics.views.authenticate", return_value=user), \
-             patch("metrics.views.auth_login"):
+        req = _request(
+            identificador="operador",
+            password="clave-correcta",
+            next="/panel/metrics/api-keys/",
+        )
+        with (
+            patch("metrics.views.authenticate", return_value=user),
+            patch("metrics.views.auth_login"),
+        ):
             resp = views.login_view(req)
         self.assertEqual(resp.url, "/panel/metrics/api-keys/")
 
@@ -189,13 +220,20 @@ class AuthCheckTests(SimpleTestCase):
         self.assertEqual(resp["X-Sooniverse-Email"], "sinemail@sooniverse.local")
 
 
+@override_settings(ALLOWED_HOSTS=["testserver"])
 class PanelLoginRequiredTests(SimpleTestCase):
+    """El redirect de user_passes_test construye la URL de retorno con
+    build_absolute_uri -> get_host, que exige que 'testserver' (el host de
+    RequestFactory) esté en ALLOWED_HOSTS -el .env local suele traer el host
+    real del despliegue y bloquearía el redirect con DisallowedHost."""
+
     def test_usuario_no_staff_rechazado(self):
         req = _request("get", path="/panel/metrics/", user=_fake_user(is_staff=False))
 
         @views.panel_login_required
         def _vista(request):
             from django.http import HttpResponse
+
             return HttpResponse("ok")
 
         resp = _vista(req)
@@ -208,6 +246,7 @@ class PanelLoginRequiredTests(SimpleTestCase):
         @views.panel_login_required
         def _vista(request):
             from django.http import HttpResponse
+
             return HttpResponse("ok")
 
         resp = _vista(req)

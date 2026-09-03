@@ -17,6 +17,7 @@ from datetime import date, timedelta
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate
+from django.contrib.auth import get_user_model
 from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
 from django.contrib.auth.decorators import user_passes_test
@@ -27,9 +28,10 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from . import analytics, capacidad as cap_mod, filtros as ft, services
-from .forms import ApiKeyForm, LoginForm
+from .forms import ApiKeyForm, CredencialCreateForm, CredencialEditForm, LoginForm
 from .litellm_client import LiteLLMError
 from .models import ApiKeyRegistry, TokenUsageRollup, WorkerNode
+from .ratelimit import rate_limit
 from .workers import WorkerActionError
 
 logger = logging.getLogger(__name__)
@@ -83,7 +85,8 @@ def _peticiones_payload(resultado):
                 "output": e.completion_tokens,
                 "total": e.total_tokens,
                 "status": e.status,
-                "api_key": (e.api_key.key_alias if e.api_key_id and e.api_key else None) or "(sin registro)",
+                "api_key": (e.api_key.key_alias if e.api_key_id and e.api_key else None)
+                or "(sin registro)",
             }
             for e in resultado["items"]
         ],
@@ -116,12 +119,18 @@ def _parse_filtros(request):
     desde, hasta = _date_or_none(desde_raw), _date_or_none(hasta_raw)
     if desde_raw and not desde:
         return None, JsonResponse(
-            {"error": f"Fecha 'desde' inválida: '{desde_raw}'. Usa AAAA-MM-DD."}, status=400)
+            {"error": f"Fecha 'desde' inválida: '{desde_raw}'. Usa AAAA-MM-DD."},
+            status=400,
+        )
     if hasta_raw and not hasta:
         return None, JsonResponse(
-            {"error": f"Fecha 'hasta' inválida: '{hasta_raw}'. Usa AAAA-MM-DD."}, status=400)
+            {"error": f"Fecha 'hasta' inválida: '{hasta_raw}'. Usa AAAA-MM-DD."},
+            status=400,
+        )
     if desde and hasta and desde > hasta:
-        return None, JsonResponse({"error": "'desde' no puede ser posterior a 'hasta'."}, status=400)
+        return None, JsonResponse(
+            {"error": "'desde' no puede ser posterior a 'hasta'."}, status=400
+        )
     if not desde and not hasta:
         desde, hasta = _rango_por_defecto()
     desde = desde or hasta
@@ -133,8 +142,11 @@ def _parse_filtros(request):
         d = _int_or_none(valor)
         if d is None or not (1 <= d <= 7):
             return None, JsonResponse(
-                {"error": f"Día de la semana inválido: '{valor}'. Usa 1 (lunes) a 7 (domingo)."},
-                status=400)
+                {
+                    "error": f"Día de la semana inválido: '{valor}'. Usa 1 (lunes) a 7 (domingo)."
+                },
+                status=400,
+            )
         dias.append(d)
 
     hora_desde = _int_or_none(request.POST.get("hora_desde"))
@@ -142,15 +154,19 @@ def _parse_filtros(request):
     hora_desde = 0 if hora_desde is None else hora_desde
     hora_hasta = 23 if hora_hasta is None else hora_hasta
     if not (0 <= hora_desde <= 23) or not (0 <= hora_hasta <= 23):
-        return None, JsonResponse({"error": "La franja horaria debe estar entre 0 y 23."}, status=400)
+        return None, JsonResponse(
+            {"error": "La franja horaria debe estar entre 0 y 23."}, status=400
+        )
     if hora_desde > hora_hasta:
         return None, JsonResponse(
-            {"error": "'hora_desde' no puede ser posterior a 'hora_hasta'."}, status=400)
+            {"error": "'hora_desde' no puede ser posterior a 'hora_hasta'."}, status=400
+        )
 
     estado = request.POST.get("estado") or ft.ESTADO_TODAS
     if estado not in dict(ft.ESTADOS):
         return None, JsonResponse(
-            {"error": "'estado' inválido. Usa 'todas' o 'errores'."}, status=400)
+            {"error": "'estado' inválido. Usa 'todas' o 'errores'."}, status=400
+        )
 
     return ft.FiltrosTemporales(
         desde=desde,
@@ -169,6 +185,7 @@ def _parse_filtros(request):
 # MÓDULO DE MÉTRICAS
 # =============================================================================
 @panel_login_required
+@rate_limit("page")
 def dashboard(request):
     """
     Panel de consumo de tokens con particiones Diaria / Semanal / Mensual y
@@ -184,7 +201,9 @@ def dashboard(request):
     granularity = TokenUsageRollup.DAILY
     desde, hasta = _rango_por_defecto()
 
-    metricas = services.obtener_metricas(granularity=granularity, desde=desde, hasta=hasta)
+    metricas = services.obtener_metricas(
+        granularity=granularity, desde=desde, hasta=hasta
+    )
     peticiones = services.obtener_peticiones(desde=desde, hasta=hasta)
 
     f = ft.FiltrosTemporales(desde=desde, hasta=hasta)
@@ -218,6 +237,7 @@ def dashboard(request):
 
 
 @panel_login_required
+@rate_limit("api")
 def serie_json(request):
     """Endpoint JSON de la serie temporal (para integraciones externas).
     Contrato heredado: valores únicos de `api_key`/`modelo` y ventana en `dias`."""
@@ -235,38 +255,45 @@ def serie_json(request):
         hasta=hasta if dias else None,
     )
 
-    return JsonResponse({
-        "granularity": metricas.granularity,
-        "api_key_id": metricas.api_key_ids[0] if len(metricas.api_key_ids) == 1 else None,
-        "desde": metricas.desde.isoformat(),
-        "hasta": metricas.hasta.isoformat(),
-        "totales": {
-            "prompt_tokens": metricas.prompt_tokens,
-            "completion_tokens": metricas.completion_tokens,
-            "total_tokens": metricas.total_tokens,
-            "request_count": metricas.request_count,
-            "spend_usd": float(metricas.spend_usd),
-            "error_count": metricas.error_count,
-        },
-        "serie": [
-            {
-                "periodo": p.periodo.isoformat(),
-                "etiqueta": p.etiqueta,
-                "prompt_tokens": p.prompt_tokens,
-                "completion_tokens": p.completion_tokens,
-                "total_tokens": p.total_tokens,
-                "request_count": p.request_count,
-                "spend_usd": float(p.spend_usd),
-            }
-            for p in metricas.serie
-        ],
-        "por_modelo": [
-            {**m, "spend_usd": float(m.get("spend_usd") or 0)} for m in metricas.por_modelo
-        ],
-    })
+    return JsonResponse(
+        {
+            "granularity": metricas.granularity,
+            "api_key_id": metricas.api_key_ids[0]
+            if len(metricas.api_key_ids) == 1
+            else None,
+            "desde": metricas.desde.isoformat(),
+            "hasta": metricas.hasta.isoformat(),
+            "totales": {
+                "prompt_tokens": metricas.prompt_tokens,
+                "completion_tokens": metricas.completion_tokens,
+                "total_tokens": metricas.total_tokens,
+                "request_count": metricas.request_count,
+                "spend_usd": float(metricas.spend_usd),
+                "error_count": metricas.error_count,
+            },
+            "serie": [
+                {
+                    "periodo": p.periodo.isoformat(),
+                    "etiqueta": p.etiqueta,
+                    "prompt_tokens": p.prompt_tokens,
+                    "completion_tokens": p.completion_tokens,
+                    "total_tokens": p.total_tokens,
+                    "request_count": p.request_count,
+                    "spend_usd": float(p.spend_usd),
+                }
+                for p in metricas.serie
+            ],
+            "por_modelo": [
+                {**m, "spend_usd": float(m.get("spend_usd") or 0)}
+                for m in metricas.por_modelo
+            ],
+        }
+    )
 
 
-def _metricas_payload(metricas, api_key_ids, *, ocio=None, filtros_eco=None, comparativa=None):
+def _metricas_payload(
+    metricas, api_key_ids, *, ocio=None, filtros_eco=None, comparativa=None
+):
     """Serializa un ResumenMetricas al contrato JSON que consume el panel
     (metrics-filters.js/metrics-charts.js). Usado tanto por `metrics_api` como
     por el bootstrap inicial que renderiza `dashboard` para el primer pintado.
@@ -302,11 +329,15 @@ def _metricas_payload(metricas, api_key_ids, *, ocio=None, filtros_eco=None, com
             "periodos": [p.periodo.isoformat() for p in metricas.serie],
         },
         "por_modelo": [
-            {**m, "spend_usd": float(m.get("spend_usd") or 0)} for m in metricas.por_modelo
+            {**m, "spend_usd": float(m.get("spend_usd") or 0)}
+            for m in metricas.por_modelo
         ],
         "por_api_key": [
-            {**k, "spend_usd": float(k.get("spend_usd") or 0)} for k in metricas.por_api_key
-        ] if metricas.por_api_key else [],
+            {**k, "spend_usd": float(k.get("spend_usd") or 0)}
+            for k in metricas.por_api_key
+        ]
+        if metricas.por_api_key
+        else [],
         "mostrar_desglose_api_key": not (api_key_ids and len(api_key_ids) == 1),
     }
     # Claves nuevas, todas aditivas: ninguna existente cambia de nombre ni forma.
@@ -320,6 +351,7 @@ def _metricas_payload(metricas, api_key_ids, *, ocio=None, filtros_eco=None, com
 
 
 @panel_login_required
+@rate_limit("api")
 @require_POST
 def metrics_api(request):
     """
@@ -332,8 +364,10 @@ def metrics_api(request):
     granularity = request.POST.get("granularity") or TokenUsageRollup.DAILY
     if granularity not in dict(ft.GRANULARIDADES_PANEL):
         return JsonResponse(
-            {"error": f"Agrupación inválida: '{granularity}'. Usa uno de: "
-                      f"{', '.join(v for v, _ in ft.GRANULARIDADES_PANEL)}."},
+            {
+                "error": f"Agrupación inválida: '{granularity}'. Usa uno de: "
+                f"{', '.join(v for v, _ in ft.GRANULARIDADES_PANEL)}."
+            },
             status=400,
         )
 
@@ -349,18 +383,24 @@ def metrics_api(request):
     if page < 1:
         return JsonResponse({"error": "'page' debe ser mayor o igual a 1."}, status=400)
     if not (1 <= page_size <= 200):
-        return JsonResponse({"error": "'page_size' debe estar entre 1 y 200."}, status=400)
+        return JsonResponse(
+            {"error": "'page_size' debe estar entre 1 y 200."}, status=400
+        )
 
     sort_by = request.POST.get("sort") or "fecha"
     if sort_by not in services.PETICIONES_SORT_FIELDS:
         return JsonResponse(
-            {"error": f"'sort' inválido: '{sort_by}'. Usa uno de: "
-                      f"{', '.join(services.PETICIONES_SORT_FIELDS)}."},
+            {
+                "error": f"'sort' inválido: '{sort_by}'. Usa uno de: "
+                f"{', '.join(services.PETICIONES_SORT_FIELDS)}."
+            },
             status=400,
         )
     sort_dir = request.POST.get("dir") or "desc"
     if sort_dir not in ("asc", "desc"):
-        return JsonResponse({"error": "'dir' inválido. Usa 'asc' o 'desc'."}, status=400)
+        return JsonResponse(
+            {"error": "'dir' inválido. Usa 'asc' o 'desc'."}, status=400
+        )
 
     metricas = services.obtener_metricas(
         granularity=granularity,
@@ -398,8 +438,9 @@ def metrics_api(request):
     if _bool_post(request, "comparar"):
         comparativa = _comparativa(f, granularity)
 
-    payload = _metricas_payload(metricas, api_key_ids, ocio=ocio,
-                                filtros_eco=f.eco(), comparativa=comparativa)
+    payload = _metricas_payload(
+        metricas, api_key_ids, ocio=ocio, filtros_eco=f.eco(), comparativa=comparativa
+    )
     payload["requests"] = _peticiones_payload(peticiones)
     return JsonResponse(payload)
 
@@ -447,13 +488,16 @@ def _comparativa(f, granularity):
         "delta_pct": {
             "total_tokens": _delta_pct(actual.total_tokens, m.total_tokens),
             "request_count": _delta_pct(actual.request_count, m.request_count),
-            "tokens_por_request": _delta_pct(actual.tokens_por_request, m.tokens_por_request),
+            "tokens_por_request": _delta_pct(
+                actual.tokens_por_request, m.tokens_por_request
+            ),
             "tasa_error": _delta_pct(actual.tasa_error, m.tasa_error),
         },
     }
 
 
 @panel_login_required
+@rate_limit("api")
 @require_POST
 def lente_api(request):
     """Mapa de calor y perfil horario.
@@ -473,19 +517,25 @@ def lente_api(request):
 
     lente = request.POST.get("lente") or "heatmap"
     if lente not in ("heatmap", "perfil"):
-        return JsonResponse({"error": "'lente' inválida. Usa 'heatmap' o 'perfil'."}, status=400)
+        return JsonResponse(
+            {"error": "'lente' inválida. Usa 'heatmap' o 'perfil'."}, status=400
+        )
 
     metrica = request.POST.get("metrica") or "peticiones"
     if metrica not in analytics.METRICAS_HEATMAP:
         return JsonResponse(
-            {"error": f"'metrica' inválida: '{metrica}'. Usa uno de: "
-                      f"{', '.join(analytics.METRICAS_HEATMAP)}."},
+            {
+                "error": f"'metrica' inválida: '{metrica}'. Usa uno de: "
+                f"{', '.join(analytics.METRICAS_HEATMAP)}."
+            },
             status=400,
         )
     if metrica == "p95" and f.dias > ft.P95_MAX_DIAS:
         return JsonResponse(
-            {"error": f"La latencia p95 solo se puede calcular sobre rangos de hasta "
-                      f"{ft.P95_MAX_DIAS} días (pediste {f.dias})."},
+            {
+                "error": f"La latencia p95 solo se puede calcular sobre rangos de hasta "
+                f"{ft.P95_MAX_DIAS} días (pediste {f.dias})."
+            },
             status=400,
         )
 
@@ -502,6 +552,7 @@ def lente_api(request):
 
 
 @panel_login_required
+@rate_limit("page")
 def capacidad(request):
     """Techo medido de la infraestructura, margen y proyección.
 
@@ -511,19 +562,24 @@ def capacidad(request):
     desde, hasta = _rango_por_defecto()
     f = ft.FiltrosTemporales(desde=desde, hasta=hasta)
     payload = cap_mod.payload_capacidad(settings.CLIENTE_ID, settings.ENTORNO, f)
-    return render(request, "metrics/capacidad.html", {
-        "seccion": "capacidad",
-        "desde_activa": desde,
-        "hasta_activa": hasta,
-        "capacidad_payload": payload,
-        "corrida": payload["corrida"],
-        "margen": payload["margen"],
-        "proyeccion": payload["proyeccion"],
-        "corridas": payload["corridas"],
-    })
+    return render(
+        request,
+        "metrics/capacidad.html",
+        {
+            "seccion": "capacidad",
+            "desde_activa": desde,
+            "hasta_activa": hasta,
+            "capacidad_payload": payload,
+            "corrida": payload["corrida"],
+            "margen": payload["margen"],
+            "proyeccion": payload["proyeccion"],
+            "corridas": payload["corridas"],
+        },
+    )
 
 
 @panel_login_required
+@rate_limit("api")
 @require_POST
 def capacidad_api(request):
     """Recalcula la ficha de capacidad al cambiar de corrida o de rango."""
@@ -532,11 +588,14 @@ def capacidad_api(request):
         return error
     run_id = request.POST.get("corrida") or None
     return JsonResponse(
-        cap_mod.payload_capacidad(settings.CLIENTE_ID, settings.ENTORNO, f, run_id=run_id)
+        cap_mod.payload_capacidad(
+            settings.CLIENTE_ID, settings.ENTORNO, f, run_id=run_id
+        )
     )
 
 
 @panel_login_required
+@rate_limit("refresh")
 @require_POST
 def refrescar(request):
     """Fuerza el ETL desde LiteLLM y el recálculo de agregaciones."""
@@ -561,6 +620,7 @@ def refrescar(request):
 # GESTOR DE API KEYS
 # =============================================================================
 @panel_login_required
+@rate_limit("page")
 def api_keys(request):
     """Listado, creación y monitoreo de consumo por API Key."""
     modelos_disponibles = services.modelos_unicos()
@@ -617,6 +677,7 @@ def api_keys(request):
 
 
 @panel_login_required
+@rate_limit("page")
 def api_key_detalle(request, key_id: int):
     """Consumo histórico y auditoría de una API Key concreta.
 
@@ -625,7 +686,9 @@ def api_key_detalle(request, key_id: int):
     a `metrics_api` vía apikey-detail.js, nunca por querystring."""
     desde, hasta = _rango_por_defecto()
     try:
-        contexto = services.detalle_api_key(key_id, granularity=TokenUsageRollup.DAILY, desde=desde, hasta=hasta)
+        contexto = services.detalle_api_key(
+            key_id, granularity=TokenUsageRollup.DAILY, desde=desde, hasta=hasta
+        )
     except ApiKeyRegistry.DoesNotExist:
         messages.error(request, "La API Key solicitada no existe.")
         return redirect("metrics:api_keys")
@@ -638,16 +701,21 @@ def api_key_detalle(request, key_id: int):
 
 
 @panel_login_required
+@rate_limit("action")
 @require_POST
 def api_key_toggle(request, key_id: int):
     """Desactiva o reactiva una API Key (nunca la borra: preserva el histórico)."""
     accion = request.POST.get("accion", "desactivar")
     try:
         if accion == "reactivar":
-            registro = services.reactivar_api_key(key_id, actor=_actor(request), ip=_ip(request))
+            registro = services.reactivar_api_key(
+                key_id, actor=_actor(request), ip=_ip(request)
+            )
             messages.success(request, f"API Key '{registro.key_alias}' reactivada.")
         else:
-            registro = services.desactivar_api_key(key_id, actor=_actor(request), ip=_ip(request))
+            registro = services.desactivar_api_key(
+                key_id, actor=_actor(request), ip=_ip(request)
+            )
             messages.warning(request, f"API Key '{registro.key_alias}' desactivada.")
     except ApiKeyRegistry.DoesNotExist:
         messages.error(request, "La API Key solicitada no existe.")
@@ -664,6 +732,7 @@ ACCIONES_WORKER_VALIDAS = ("health", "restart", "stop", "start")
 
 
 @panel_login_required
+@rate_limit("action")
 @require_POST
 def worker_accion(request, node_id: int, accion: str):
     """Ejecuta una acción sobre un worker (comprobar salud, reiniciar,
@@ -679,12 +748,16 @@ def worker_accion(request, node_id: int, accion: str):
     worker = get_object_or_404(WorkerNode, pk=node_id, cluster_name__startswith=prefix)
 
     try:
-        mensaje = services.ejecutar_accion_worker(worker, accion, actor=_actor(request), ip=_ip(request))
+        mensaje = services.ejecutar_accion_worker(
+            worker, accion, actor=_actor(request), ip=_ip(request)
+        )
         messages.success(request, mensaje)
     except WorkerActionError as exc:
         messages.error(request, str(exc))
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Fallo ejecutando la acción '%s' sobre el worker %s", accion, node_id)
+        logger.exception(
+            "Fallo ejecutando la acción '%s' sobre el worker %s", accion, node_id
+        )
         messages.error(request, f"Error inesperado: {exc}")
 
     return redirect(request.POST.get("next") or reverse("metrics:dashboard"))
@@ -693,12 +766,17 @@ def worker_accion(request, node_id: int, accion: str):
 # =============================================================================
 # LOGIN ÚNICO DEL CLÚSTER
 # =============================================================================
+@rate_limit("login", methods=("POST",))
 def login_view(request):
     """Única pantalla de login del clúster (panel + chat). El chat nunca
     muestra su propio formulario -Open WebUI recibe la identidad ya resuelta
     vía la cabecera de confianza que inyecta nginx (ver `auth_check` y
     docker_images/openwebui/README.md)."""
-    next_url = request.POST.get("next") or request.GET.get("next") or reverse("metrics:dashboard")
+    next_url = (
+        request.POST.get("next")
+        or request.GET.get("next")
+        or reverse("metrics:dashboard")
+    )
     if request.user.is_authenticated:
         return redirect(next_url)
 
@@ -715,7 +793,9 @@ def login_view(request):
             return redirect(next_url)
         error = "Usuario/correo o contraseña incorrectos."
 
-    return render(request, "metrics/login.html", {"form": form, "error": error, "next": next_url})
+    return render(
+        request, "metrics/login.html", {"form": form, "error": error, "next": next_url}
+    )
 
 
 @require_POST
@@ -735,6 +815,185 @@ def auth_check(request):
         return HttpResponse(status=401)
 
     resp = HttpResponse(status=200)
-    resp["X-Sooniverse-Email"] = request.user.email or f"{request.user.username}@sooniverse.local"
+    resp["X-Sooniverse-Email"] = (
+        request.user.email or f"{request.user.username}@sooniverse.local"
+    )
     resp["X-Sooniverse-Name"] = request.user.get_full_name() or request.user.username
     return resp
+
+
+# =============================================================================
+# CREDENCIALES (CRUD de usuarios del clúster — solo staff)
+# =============================================================================
+# Django es la única fuente de identidad de TODO el clúster: una cuenta creada
+# aquí sirve para el CHAT inmediatamente (Open WebUI auto-aprovisiona vía SSO
+# por cabecera de confianza, ver auth_check y docker_images/openwebui/
+# README.md) y para el PANEL si además es staff (panel_login_required). Por eso
+# el email es obligatorio: es la identidad que nginx/Open WebUI reciben en
+# X-Sooniverse-Email.
+#
+# Guardrails deliberados:
+#   · Superusers: intocables desde aquí (se gestionan vía Django admin) — así
+#     la cuenta técnica de despliegue no puede quedarse sin acceso por un click.
+#   · Autobloqueo: nadie puede borrarse, desactivarse ni quitarse el rol desde
+#     su propia sesión.
+#   · Solo staff llega a este módulo (panel_login_required); las mutaciones son
+#     POST + CSRF, así que no hay creación de usuarios por GET/enlaces.
+
+
+def _usuarios_del_cluster():
+    return get_user_model().objects.order_by("-is_staff", "username")
+
+
+@panel_login_required
+@rate_limit("page")
+def credenciales(request):
+    """Listado + alta de usuarios. El acceso YA exige staff (decorador); el
+    rol 'Administrador' del formulario solo decide si la NUEVA cuenta podrá
+    entrar al panel o únicamente al chat."""
+    usuarios = _usuarios_del_cluster()
+    return render(
+        request,
+        "metrics/credenciales.html",
+        {
+            "seccion": "credenciales",
+            "form": CredencialCreateForm(),
+            "usuarios": usuarios,
+            "total_usuarios": usuarios.count(),
+            "total_admins": usuarios.filter(is_staff=True).count(),
+        },
+    )
+
+
+@panel_login_required
+@rate_limit("action")
+def credencial_crear(request):
+    if request.method != "POST":
+        return redirect("metrics:credenciales")
+
+    form = CredencialCreateForm(request.POST)
+    if not form.is_valid():
+        usuarios = _usuarios_del_cluster()
+        return render(
+            request,
+            "metrics/credenciales.html",
+            {
+                "seccion": "credenciales",
+                "form": form,
+                "usuarios": usuarios,
+                "total_usuarios": usuarios.count(),
+                "total_admins": usuarios.filter(is_staff=True).count(),
+            },
+            status=400,
+        )
+
+
+@panel_login_required
+@rate_limit("action")
+def credencial_crear(request):
+    if request.method != "POST":
+        return redirect("metrics:credenciales")
+
+    form = CredencialCreateForm(request.POST)
+    if not form.is_valid():
+        usuarios = _usuarios_del_cluster()
+        return render(
+            request,
+            "metrics/credenciales.html",
+            {
+                "seccion": "credenciales",
+                "form": form,
+                "usuarios": usuarios,
+                "total_usuarios": usuarios.count(),
+                "total_admins": usuarios.filter(is_staff=True).count(),
+            },
+            status=400,
+        )
+
+    datos = form.cleaned_data
+    usuario = get_user_model().objects.create_user(
+        username=datos["username"],
+        email=datos["email"],
+        password=datos["password"],
+        first_name=datos["first_name"],
+        last_name=datos["last_name"],
+        is_staff=datos["is_staff"],
+        is_active=datos["is_active"],
+    )
+    alcance = "el panel y el chat" if usuario.is_staff else "el chat"
+    messages.success(
+        request,
+        f"Usuario '{usuario.username}' creado. Puede entrar a {alcance} con sus credenciales.",
+    )
+    return redirect("metrics:credenciales")
+
+
+@panel_login_required
+@rate_limit("page")
+def credencial_editar(request, user_id: int):
+    usuario = get_object_or_404(get_user_model(), pk=user_id)
+    if usuario.is_superuser:
+        messages.error(
+            request,
+            "Las cuentas técnicas (superuser) se gestionan vía Django admin, no desde el panel.",
+        )
+        return redirect("metrics:credenciales")
+
+    es_propia = request.user.pk == usuario.pk
+    if request.method == "POST":
+        form = CredencialEditForm(request.POST, usuario=usuario)
+        if form.is_valid():
+            if es_propia and (
+                not form.cleaned_data["is_active"] or not form.cleaned_data["is_staff"]
+            ):
+                messages.error(
+                    request,
+                    "No puedes quitarte a ti mismo el acceso al panel desde tu propia sesión.",
+                )
+            else:
+                form.guardar_en(usuario)
+                messages.success(request, f"Usuario '{usuario.username}' actualizado.")
+                return redirect("metrics:credenciales")
+    else:
+        form = CredencialEditForm(usuario=usuario)
+
+    # Red de seguridad contra el autobloqueo: en la propia sesión, rol y estado
+    # van disabled (Django usa el initial, ignora lo que llegue por POST) y el
+    # guard del POST de arriba cubre el caso forzado.
+    if es_propia:
+        form.fields["is_staff"].disabled = True
+        form.fields["is_active"].disabled = True
+
+    return render(
+        request,
+        "metrics/credencial_editar.html",
+        {
+            "seccion": "credenciales",
+            "form": form,
+            "usuario": usuario,
+            "es_propia": es_propia,
+        },
+        status=400 if request.method == "POST" and form.errors else 200,
+    )
+
+
+@panel_login_required
+@rate_limit("action")
+@require_POST
+def credencial_eliminar(request, user_id: int):
+    usuario = get_object_or_404(get_user_model(), pk=user_id)
+    if usuario.pk == request.user.pk:
+        messages.error(request, "No puedes eliminar tu propia cuenta desde aquí.")
+    elif usuario.is_superuser:
+        messages.error(
+            request,
+            "Las cuentas técnicas (superuser) se gestionan vía Django admin, no desde el panel.",
+        )
+    else:
+        nombre = usuario.username
+        usuario.delete()
+        messages.success(
+            request,
+            f"Usuario '{nombre}' eliminado. Su acceso al chat y al panel queda revocado.",
+        )
+    return redirect("metrics:credenciales")

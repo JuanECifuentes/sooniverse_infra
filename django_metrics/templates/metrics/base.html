@@ -32,7 +32,11 @@
                        href="{% url 'metrics:capacidad' %}">Capacidad</a>
                     <a class="sv-nav__link {% if seccion == 'apikeys' %}sv-nav__link--active{% endif %}"
                        href="{% url 'metrics:api_keys' %}">API Keys</a>
-                    <a class="sv-nav__link" href="{% url 'admin:index' %}">Admin</a>
+                    {# Solo cuentas administrativas: el módulo entero exige staff #}
+                    {% if user.is_staff %}
+                        <a class="sv-nav__link {% if seccion == 'credenciales' %}sv-nav__link--active{% endif %}"
+                           href="{% url 'metrics:credenciales' %}">Credenciales</a>
+                    {% endif %}
                 </nav>
 
                 <div class="l-header__meta">
@@ -50,7 +54,18 @@
                     <span class="sv-badge {% if ENTORNO == 'prod' %}sv-badge--success{% else %}sv-badge--muted{% endif %}">{{ ENTORNO }}</span>
                     <form method="post" action="{% url 'metrics:logout' %}" class="l-inline-form">
                         {% csrf_token %}
-                        <button type="submit" class="sv-btn sv-btn--ghost sv-btn--sm">Salir</button>
+                        <span class="sv-tooltip sv-tooltip--bottom-end sv-tooltip--nav">
+                            <button type="submit" class="sv-iconbtn sv-iconbtn--ghost" aria-label="Cerrar sesión">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+                                     stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                                     stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                                    <path d="m16 17 5-5-5-5"/>
+                                    <path d="M21 12H9"/>
+                                </svg>
+                            </button>
+                            <span class="sv-tooltip__bubble" role="tooltip">Cerrar sesión</span>
+                        </span>
                     </form>
                 </div>
             </div>
