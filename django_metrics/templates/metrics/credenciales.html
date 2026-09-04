@@ -1,0 +1,340 @@
+{% extends "metrics/base.html" %}{% load static %}{% load metrics_extras %}
+
+{% block titulo %}Credenciales{% endblock %}
+
+{% block contenido %}
+<div class="l-page-head">
+    <div class="l-page-head__text">
+        <span class="sv-eyebrow">Credenciales</span>
+        <h2>Usuarios</h2>
+
+    </div>
+    <div class="l-page-head__actions">
+        <span class="sv-badge sv-badge--info">{{ total_admins }} admin(s)</span>
+        <span class="sv-badge sv-badge--muted">{{ total_usuarios }} en total</span>
+    </div>
+</div>
+
+{# --------------------------------------------------------------- ALTA #}
+<section class="sv-card l-mb-lg">
+    <div class="l-stack l-stack--tight l-mb-md">
+        <span class="sv-eyebrow">Nueva credencial</span>
+        <h3>Crear usuario</h3>
+    </div>
+
+    <form method="post" action="{% url 'metrics:credencial_crear' %}" novalidate data-spinner-submit>
+        {% csrf_token %}
+
+        {% if form.non_field_errors %}
+            <div class="sv-alert sv-alert--error l-mb-md">{{ form.non_field_errors }}</div>
+        {% endif %}
+
+        <div class="l-grid l-grid--form">
+            <div class="l-field">
+                <label class="sv-label" for="{{ form.username.id_for_label }}">{{ form.username.label }}</label>
+                {{ form.username }}
+                {% if form.username.help_text %}<span class="sv-help">{{ form.username.help_text }}</span>{% endif %}
+                {% for error in form.username.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form.email.id_for_label }}">{{ form.email.label }}</label>
+                {{ form.email }}
+                {% if form.email.help_text %}<span class="sv-help">{{ form.email.help_text }}</span>{% endif %}
+                {% for error in form.email.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form.first_name.id_for_label }}">{{ form.first_name.label }}</label>
+                {{ form.first_name }}
+                {% for error in form.first_name.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form.last_name.id_for_label }}">{{ form.last_name.label }}</label>
+                {{ form.last_name }}
+                {% for error in form.last_name.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form.password.id_for_label }}">{{ form.password.label }}</label>
+                {{ form.password }}
+                {% for error in form.password.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form.password2.id_for_label }}">{{ form.password2.label }}</label>
+                {{ form.password2 }}
+                {% for error in form.password2.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field l-field--wide">
+                <label class="sv-check">
+                    {{ form.is_staff }}
+                    <span>{{ form.is_staff.label }}</span>
+                    {% include "metrics/_tooltip.html" with text="Entra al panel de métricas y gestiona API Keys." %}
+                </label>
+                <label class="sv-check">
+                    {{ form.es_admin }}
+                    <span>{{ form.es_admin.label }}</span>
+                    {% include "metrics/_tooltip.html" with text="Crea y modifica usuarios y accede al panel admin de Django." %}
+                </label>
+                {% for error in form.is_staff.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+                {% for error in form.es_admin.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+        </div>
+
+        <div class="l-form-actions">
+            <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm" data-loading-text="Creando…">Crear usuario</button>
+            <!-- <span class="sv-help">La contraseña pasa por los validadores de Django. No se admite la ñ en ningún campo.</span> -->
+        </div>
+    </form>
+</section>
+
+{# ------------------------------------------------------------ FILTROS #}
+<section class="sv-panel l-mb-lg">
+    <form method="get" action="{% url 'metrics:credenciales' %}" class="l-grid l-grid--filters" style="margin-bottom: 0;">
+        <div class="l-field">
+            <label class="sv-label" for="filtro-usuario">Usuario</label>
+            <input class="sv-input" type="text" id="filtro-usuario" name="usuario"
+                   value="{{ filtros.usuario }}" placeholder="coincidencia de texto…" autocomplete="off">
+        </div>
+
+        <div class="l-field">
+            <label class="sv-label" for="filtro-correo">Correo</label>
+            <input class="sv-input" type="text" id="filtro-correo" name="correo"
+                   value="{{ filtros.correo }}" placeholder="coincidencia de texto…" autocomplete="off">
+        </div>
+
+        <div class="l-field">
+            <label class="sv-label" for="filtro-nombre">Nombre</label>
+            <input class="sv-input" type="text" id="filtro-nombre" name="nombre"
+                   value="{{ filtros.nombre }}" placeholder="coincidencia de texto…" autocomplete="off">
+        </div>
+
+        <div class="l-field">
+            <span class="sv-label" id="label-filtro-rol">Rol</span>
+            <details class="sv-disclosure sv-multiselect" aria-labelledby="label-filtro-rol">
+                <summary class="sv-multiselect__trigger">
+                    <span>Rol{% if filtros.roles %}<span class="sv-multiselect__count">{{ filtros.roles|length }}</span>{% endif %}</span>
+                    <span class="sv-multiselect__chevron" aria-hidden="true"></span>
+                </summary>
+                <div class="sv-multiselect__panel">
+                    {# Mismos textos que las badges de la columna ROL #}
+                    <label class="sv-multiselect__option">
+                        <input type="checkbox" name="rol" value="superuser" {% if 'superuser' in filtros.roles %}checked{% endif %}>
+                        <span>Superuser</span>
+                    </label>
+                    <label class="sv-multiselect__option">
+                        <input type="checkbox" name="rol" value="admin" {% if 'admin' in filtros.roles %}checked{% endif %}>
+                        <span>Admin</span>
+                    </label>
+                    <label class="sv-multiselect__option">
+                        <input type="checkbox" name="rol" value="panel" {% if 'panel' in filtros.roles %}checked{% endif %}>
+                        <span>Panel</span>
+                    </label>
+                    <label class="sv-multiselect__option">
+                        <input type="checkbox" name="rol" value="chat" {% if 'chat' in filtros.roles %}checked{% endif %}>
+                        <span>Chat</span>
+                    </label>
+                </div>
+            </details>
+        </div>
+
+        <div class="l-field">
+            <span class="sv-label">&nbsp;</span>
+            <div class="l-row">
+                <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm">Filtrar</button>
+                <a class="sv-btn sv-btn--ghost sv-btn--sm" href="{% url 'metrics:credenciales' %}">Limpiar</a>
+            </div>
+        </div>
+    </form>
+</section>
+
+{# ------------------------------------------------------------ LISTADO #}
+<section class="sv-card l-card--flush">
+    <div class="l-card__head">
+        <div class="l-stack l-stack--tight">
+            <span class="sv-eyebrow">Inventario</span>
+            <h3>Cuentas registradas</h3>
+        </div>
+        <div class="l-row">
+            <span class="sv-badge sv-badge--muted">{{ page_obj.paginator.count }} coincidencia(s)</span>
+            <span class="sv-help">Página {{ page_obj.number }} de {{ page_obj.paginator.num_pages }}</span>
+        </div>
+    </div>
+
+    <div class="l-table-wrap">
+        <table class="sv-table" id="tabla-cuentas">
+            <thead>
+                <tr>
+                    <th aria-sort="none"><button type="button" class="sv-sort" data-sort="usuario">Usuario<span class="sv-sort__flecha" aria-hidden="true"></span></button></th>
+                    <th aria-sort="none"><button type="button" class="sv-sort" data-sort="correo">Correo<span class="sv-sort__flecha" aria-hidden="true"></span></button></th>
+                    <th aria-sort="none"><button type="button" class="sv-sort" data-sort="nombre">Nombre<span class="sv-sort__flecha" aria-hidden="true"></span></button></th>
+                    <th aria-sort="none"><button type="button" class="sv-sort" data-sort="rol">Rol<span class="sv-sort__flecha" aria-hidden="true"></span></button></th>
+                    <th aria-sort="none"><button type="button" class="sv-sort" data-sort="estado">Estado<span class="sv-sort__flecha" aria-hidden="true"></span></button></th>
+                    <th aria-sort="none"><button type="button" class="sv-sort" data-sort="ultimo_login">Último login<span class="sv-sort__flecha" aria-hidden="true"></span></button></th>
+                    <th class="sv-num">Acciones</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for u in page_obj %}
+                    <tr {% if not u.is_active %}class="sv-row--inactiva"{% endif %}
+                        data-id="{{ u.id }}" data-username="{{ u.username }}" data-email="{{ u.email }}"
+                        data-first="{{ u.first_name }}" data-last="{{ u.last_name }}"
+                        data-staff="{% if u.is_staff %}1{% else %}0{% endif %}"
+                        data-admin="{% if u|es_admin_cred %}1{% else %}0{% endif %}">
+                        <td class="sv-mono sv-strong">{{ u.username }}</td>
+                        <td class="sv-mono">{{ u.email|default:"—" }}</td>
+                        <td>{{ u.get_full_name|default:"—" }}</td>
+                        <td>
+                            {% if u.is_superuser %}
+                                <span class="sv-badge sv-badge--info">Superuser</span>
+                            {% elif u|es_admin_cred %}
+                                <span class="sv-badge sv-badge--success">Admin</span>
+                            {% elif u.is_staff %}
+                                <span class="sv-badge sv-badge--info">Panel</span>
+                            {% else %}
+                                <span class="sv-badge sv-badge--muted">Chat</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if u.is_active %}
+                                <span class="sv-badge sv-badge--success"><span class="sv-dot sv-dot--on"></span>Activa</span>
+                            {% else %}
+                                <span class="sv-badge sv-badge--danger"><span class="sv-dot sv-dot--off"></span>Deshabilitada</span>
+                            {% endif %}
+                        </td>
+                        <td class="sv-mono">
+                            {% if u.last_login %}{{ u.last_login|date:"d/m/Y H:i" }}{% else %}nunca{% endif %}
+                        </td>
+                        <td class="sv-num">
+                            {% if u.is_superuser %}
+                                <span class="sv-help">Vía Django admin</span>
+                            {% else %}
+                                <div class="l-table-actions">
+                                    <button type="button" class="sv-btn sv-btn--secondary sv-btn--sm" data-editar>Modificar</button>
+                                    {% if u.is_active %}
+                                        <button type="button" class="sv-btn sv-btn--danger sv-btn--sm" data-estado="deshabilitar">Deshabilitar</button>
+                                    {% else %}
+                                        <button type="button" class="sv-btn sv-btn--secondary sv-btn--sm" data-estado="habilitar">Habilitar</button>
+                                    {% endif %}
+                                </div>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="7" class="sv-help">Ninguna cuenta coincide con los filtros aplicados.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="l-pagination">
+        {% if page_obj.has_previous %}
+            <a class="sv-btn sv-btn--ghost sv-btn--sm" href="?{{ qs_filtros }}{% if qs_filtros %}&{% endif %}page={{ page_obj.previous_page_number }}">Anterior</a>
+        {% else %}
+            <span class="sv-btn sv-btn--ghost sv-btn--sm sv-btn--disabled" aria-disabled="true">Anterior</span>
+        {% endif %}
+        <span class="sv-help">{{ page_obj.paginator.count }} cuenta(s) · 30 por página</span>
+        {% if page_obj.has_next %}
+            <a class="sv-btn sv-btn--ghost sv-btn--sm" href="?{{ qs_filtros }}{% if qs_filtros %}&{% endif %}page={{ page_obj.next_page_number }}">Siguiente</a>
+        {% else %}
+            <span class="sv-btn sv-btn--ghost sv-btn--sm sv-btn--disabled" aria-disabled="true">Siguiente</span>
+        {% endif %}
+    </div>
+</section>
+
+{# --------------------------------------------- MODAL: MODIFICAR CREDENCIAL #}
+<dialog id="credencial-editar-dialog" class="sv-dialog sv-dialog--wide"
+        data-url-template="{% url 'metrics:credencial_editar' 0 %}"
+        {% if editar_abierto %}data-autoopen="1"{% endif %}>
+    <form method="post" action="{% url 'metrics:credencial_editar' 0 %}" novalidate data-spinner-submit>
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <div class="l-stack l-stack--tight l-mb-md">
+            <span class="sv-eyebrow">Modificar credencial</span>
+            <h3 class="sv-mono" id="editar-titulo">{% if editar_usuario %}{{ editar_usuario.username }}{% else %}—{% endif %}</h3>
+            <!-- <p class="sv-help">El usuario no se puede cambiar; el estado se alterna con Habilitar/Deshabilitar en la tabla.</p> -->
+        </div>
+
+        {% if form_edicion.non_field_errors %}
+            <div class="sv-alert sv-alert--error l-mb-md">{{ form_edicion.non_field_errors }}</div>
+        {% endif %}
+
+        <div class="l-stack l-stack--tight">
+            <div class="l-field">
+                <label class="sv-label" for="{{ form_edicion.email.id_for_label }}">{{ form_edicion.email.label }}</label>
+                {{ form_edicion.email }}
+                {% if form_edicion.email.help_text %}<span class="sv-help">{{ form_edicion.email.help_text }}</span>{% endif %}
+                {% for error in form_edicion.email.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form_edicion.first_name.id_for_label }}">{{ form_edicion.first_name.label }}</label>
+                {{ form_edicion.first_name }}
+                {% for error in form_edicion.first_name.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form_edicion.last_name.id_for_label }}">{{ form_edicion.last_name.label }}</label>
+                {{ form_edicion.last_name }}
+                {% for error in form_edicion.last_name.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form_edicion.password.id_for_label }}">{{ form_edicion.password.label }}</label>
+                {{ form_edicion.password }}
+                {% if form_edicion.password.help_text %}<span class="sv-help">{{ form_edicion.password.help_text }}</span>{% endif %}
+                {% for error in form_edicion.password.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-label" for="{{ form_edicion.password2.id_for_label }}">{{ form_edicion.password2.label }}</label>
+                {{ form_edicion.password2 }}
+                {% for error in form_edicion.password2.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+
+            <div class="l-field">
+                <label class="sv-check">
+                    {{ form_edicion.is_staff }}
+                    <span>{{ form_edicion.is_staff.label }}</span>
+                    {% include "metrics/_tooltip.html" with text="Entra al panel de métricas y gestiona API Keys." %}
+                </label>
+                <label class="sv-check">
+                    {{ form_edicion.es_admin }}
+                    <span>{{ form_edicion.es_admin.label }}</span>
+                    {% include "metrics/_tooltip.html" with text="Crea y modifica usuarios y accede al panel admin de Django." %}
+                </label>
+                {% if es_propia %}<span class="sv-help">No puedes cambiar tu propio rol desde tu sesión actual.</span>{% endif %}
+                {% for error in form_edicion.is_staff.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+                {% for error in form_edicion.es_admin.errors %}<span class="sv-error">{{ error }}</span>{% endfor %}
+            </div>
+        </div>
+
+        <div class="l-form-actions">
+            <button type="button" class="sv-btn sv-btn--ghost sv-btn--sm" data-cerrar-dialog="credencial-editar-dialog">Cancelar</button>
+            <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm" data-loading-text="Guardando…">Guardar cambios</button>
+        </div>
+    </form>
+</dialog>
+
+{# --------------------------------- MODAL: CONFIRMAR DESHABILITAR/HABILITAR #}
+<dialog id="credencial-estado-dialog" class="sv-dialog"
+        data-url-template="{% url 'metrics:credencial_estado' 0 %}">
+    <form method="post" action="" data-spinner-submit>
+        {% csrf_token %}
+        <input type="hidden" name="accion" value="">
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <p class="sv-body" id="estado-mensaje">¿Confirmas esta acción?</p>
+        <div class="l-form-actions">
+            <button type="button" class="sv-btn sv-btn--ghost sv-btn--sm" data-cerrar-dialog="credencial-estado-dialog">Cancelar</button>
+            <button type="submit" class="sv-btn sv-btn--danger sv-btn--sm" id="estado-confirmar">Confirmar</button>
+        </div>
+    </form>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'js/credenciales.js' %}"></script>
+{% endblock %}
