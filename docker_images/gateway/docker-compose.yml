@@ -134,6 +134,10 @@ services:
       WEBUI_AUTH_TRUSTED_EMAIL_HEADER: X-Sooniverse-Email
       WEBUI_AUTH_TRUSTED_NAME_HEADER: X-Sooniverse-Name
       ENABLE_LOGIN_FORM: "False"
+      # Destino del botón de navegación chat -> panel (overlay sooniverse-nav.js;
+      # entrypoint.sh lo escribe en sooniverse-nav-config.js en cada arranque).
+      # Default: nginx sirve el panel bajo /panel/ en el mismo origen que el chat.
+      SOONIVERSE_PANEL_URL: ${SOONIVERSE_PANEL_URL:-/panel/}
       # Persistencia relacional en el MISMO esquema que LiteLLM y Django (ver
       # docs/03_ESTADO_Y_BD.md). 'webui_data' se mantiene: ficheros subidos y
       # el vector store local (Chroma) no son relacionales y siguen en disco.
@@ -243,6 +247,9 @@ services:
       # apuntar sus llamadas a la API (panel /apikeys/, cabecera del panel),
       # nunca para las llamadas internas de litellm_client.py.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      # Destino del botón de navegación panel -> chat (base.html .sv-iconbtn).
+      # Default: nginx sirve el chat en la raíz del mismo origen que el panel.
+      CHAT_URL: ${CHAT_URL:-/}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}
       CLIENTE_ID: ${CLIENTE_ID:-default}
       ENTORNO: ${ENTORNO:-prod}
