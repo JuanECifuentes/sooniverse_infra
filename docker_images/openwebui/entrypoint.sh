@@ -44,8 +44,10 @@ fi
 # en producción nginx sirve el panel bajo /panel/ en el mismo origen; en
 # desarrollo local el panel vive en otro puerto (p. ej. http://localhost:8000).
 PANEL_URL_CFG="${SOONIVERSE_PANEL_URL:-/panel/}"
+LOGOUT_URL_CFG="${SOONIVERSE_LOGOUT_URL:-${PANEL_URL_CFG%/}/metrics/logout/}"
 echo "[openwebui] Botón de navegación chat -> panel: ${PANEL_URL_CFG}"
-printf 'window.__SOONIVERSE_PANEL_URL__ = "%s";\n' "${PANEL_URL_CFG}" > /app/build/sooniverse-nav-config.js
+echo "[openwebui] Endpoint de logout: ${LOGOUT_URL_CFG}"
+printf 'window.__SOONIVERSE_PANEL_URL__ = "%s";\nwindow.__SOONIVERSE_LOGOUT_URL__ = "%s";\n' "${PANEL_URL_CFG}" "${LOGOUT_URL_CFG}" > /app/build/sooniverse-nav-config.js
 
 echo "[openwebui] Delegando arranque a la imagen base (Alembic + uvicorn)."
 cd /app/backend

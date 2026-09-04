@@ -183,6 +183,13 @@ class LogoutViewTests(SimpleTestCase):
         logout_fn.assert_called_once_with(req)
         self.assertEqual(resp.status_code, 302)
 
+    def test_logout_get_tambien_cierra_sesion_y_redirige(self):
+        req = _request("get", user=_fake_user())
+        with patch("metrics.views.auth_logout") as logout_fn:
+            resp = views.logout_view(req)
+        logout_fn.assert_called_once_with(req)
+        self.assertEqual(resp.status_code, 302)
+
 
 class AuthCheckTests(SimpleTestCase):
     """El endpoint que consume nginx 'auth_request' para proteger el chat."""

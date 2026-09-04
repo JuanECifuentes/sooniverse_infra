@@ -467,15 +467,32 @@ Desde `/metrics/api-keys/` pulsa el alias para ver serie propia, cuotas, las 50
 
 ### 8.5 Credenciales (usuarios del clúster)
 
-El tab **Credenciales** (`/metrics/credenciales/`, solo visible para cuentas
-administrativas) crea y gestiona los usuarios del clúster. Django es la única
-fuente de identidad de la infraestructura: una cuenta creada ahí sirve
-inmediatamente para el **chat** (Open WebUI la auto-aprovisiona vía SSO por
-cabecera de confianza, ver `docker_images/openwebui/README.md`) y, si se marca
-como **Administrador**, también para el panel. Guardrails: las cuentas
-superuser se gestionan solo vía Django admin y nadie puede borrarse,
-desactivarse o quitarse el rol desde su propia sesión. El logout está en el
-header (botón de flecha, arriba a la derecha).
+El tab **Credenciales** (`/metrics/credenciales/`) crea y gestiona los usuarios
+del clúster. Django es la única fuente de identidad de la infraestructura: una
+cuenta creada ahí sirve inmediatamente para el **chat** (Open WebUI la
+auto-aprovisiona vía SSO por cabecera de confianza, ver
+`docker_images/openwebui/README.md`). Los roles son dos checkboxes separados:
+
+| Casilla | Campo | Da acceso a |
+|---|---|---|
+| **Acceso al panel de métricas** | `is_staff` | Panel (métricas + API Keys) |
+| **Administrador** | Group `Administrador` | Todo lo anterior + tab de credenciales + admin de Django (`/admin/`) |
+
+Un administrador exige acceso al panel (lo valida el formulario). Solo el rol
+Administrador ve la tab y alcanza sus endpoints; un usuario de panel que los
+llamara "por API" recibe redirect al dashboard. Reglas de la tabla: paginación
+de 30 en 30, filtros por usuario/correo/nombre y selector de rol, columnas
+ordenables clickeando el encabezado (reordenamiento 100% cliente con JS sobre
+las filas visibles —sin queryparams ni recargas—; el servidor aporta solo el
+orden base: activos, admins, alfabético). **No hay borrado de usuarios**: solo
+deshabilitar (con modal de confirmación) y habilitar de nuevo; las cuentas
+deshabilitadas se listan al final y conservan el botón Habilitar y Modificar.
+La edición va en un modal (usuario y estado no se cambian ahí). Guardrails:
+las cuentas superuser se gestionan solo vía Django admin y nadie puede
+deshabilitarse ni quitarse el rol desde su propia sesión. Validaciones de
+credencial: sin ñ en ningún campo y correo con estructura estricta
+(`nombre@dominio.tld`). El logout está en el header (botón de flecha, arriba a
+la derecha).
 
 ### 8.6 Botón de navegación chat ⇆ panel
 
