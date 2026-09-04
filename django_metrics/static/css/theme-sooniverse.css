@@ -376,25 +376,22 @@ a:hover {
     width: 34px;
     height: 34px;
     border-radius: var(--radius-md);
-    border: 1px solid var(--accent);
+    border: none;
     background-color: var(--accent-soft);
     color: var(--accent);
     cursor: pointer;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
     transition:
         background-color var(--dur-fast) var(--ease-out),
-        border-color var(--dur-fast) var(--ease-out),
         color var(--dur-fast) var(--ease-out),
         box-shadow var(--dur-fast) var(--ease-out);
 }
 .sv-iconbtn:hover {
-    border-color: var(--accent-hover);
     background-color: var(--accent-hover);
     color: var(--surface-0);
     box-shadow: var(--shadow-1);
 }
 .sv-iconbtn:active {
-    border-color: var(--accent-pressed);
     background-color: var(--accent-pressed);
     color: var(--surface-0);
 }
@@ -411,19 +408,16 @@ a:hover {
 /* Variante ghost (logout, base.html): sobria de base, affordance de peligro
    en hover, igual que .sv-btn--danger del manual (transparente + negative). */
 .sv-iconbtn--ghost {
-    border-color: var(--border-subtle);
     background-color: transparent;
     color: var(--text-secondary);
     box-shadow: none;
 }
 .sv-iconbtn--ghost:hover {
-    border-color: var(--negative);
     background-color: var(--negative-soft);
     color: var(--negative);
     box-shadow: none;
 }
 .sv-iconbtn--ghost:active {
-    border-color: var(--negative);
     background-color: transparent;
     color: var(--negative);
 }

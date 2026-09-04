@@ -38,6 +38,20 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Con stdout/stderr redirigidos a un archivo (el patrón real de uso: 'nohup
+# ... --run > deploy.log 2>&1 &'), Python usa buffering POR BLOQUE en vez de
+# por línea -confirmado en un despliegue real: los `print()` de ESTE script
+# (p.ej. "[RED] VPC=...", el resumen de la fase 'network') podían quedarse
+# horas en el buffer sin escribirse, mientras que la salida de los
+# subprocesos ('sky launch', etc., que escriben directo al fd heredado, sin
+# pasar por el buffer de Python) sí aparecía de inmediato -dando la
+# impresión, leyendo el log en caliente o después, de que fases enteras se
+# habían saltado o de que el despliegue se había reiniciado solo. Forzar
+# line-buffering aquí hace que el log refleje el orden real en el que
+# ocurrieron las cosas.
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 CLIENT_ID_RE = re.compile(r"^[a-z0-9-]{1,20}$")
 
 try:
@@ -2086,6 +2100,25 @@ def _ensure_db_schema(config: Dict[str, Any], dry_run: bool = False) -> None:
     print("[BD] Esquema 'sooniverse' listo.")
 
 
+def _upsert_local_env_vars(env_path: Path, values: Dict[str, str]) -> None:
+    """Reemplaza (o añade si no existía) cada `CLAVE=...` en el `.env` LOCAL
+    del operador -a diferencia del resto de mutaciones de `.env` en este
+    archivo (todas remotas, vía heredoc en el Gateway), esta corre en la
+    máquina que ejecuta `--run`, antes de que ese `.env` se sincronice al
+    Gateway por `file_mounts` en el próximo `sky launch`."""
+    if not env_path.exists():
+        env_path.write_text("", encoding="utf-8")
+    lineas = env_path.read_text(encoding="utf-8").splitlines()
+    pendientes = dict(values)
+    for i, linea in enumerate(lineas):
+        for clave in list(pendientes):
+            if linea.startswith(f"{clave}="):
+                lineas[i] = f"{clave}={pendientes.pop(clave)}"
+                break
+    lineas.extend(f"{clave}={valor}" for clave, valor in pendientes.items())
+    env_path.write_text("\n".join(lineas) + "\n", encoding="utf-8")
+
+
 def _sky_env(aws_profile: Optional[str] = None) -> Optional[Dict[str, str]]:
     """Entorno para subprocess.run([sky, ...]) que fuerza AWS_PROFILE cuando el
     cliente es BYOC (ver comentario en la fase [GATEWAY] de generate_infra)."""
@@ -2715,6 +2748,41 @@ def deploy(
 
                 # El render de manifiestos depende de los IDs reales de red: regenerarlos ahora.
                 artefactos = generate_manifests(config, out_dir, builder=builder)
+
+                # Usuario IAM SEPARADO del despliegue, solo start/stop/describe
+                # sobre los workers de este cliente/entorno -ver el docstring
+                # de aws_iam_worker_control.py para el porqué. Best-effort:
+                # nunca aborta el despliegue si las credenciales de ESTE
+                # despliegue no tienen permiso IAM para crearlo.
+                try:
+                    from aws_iam_worker_control import ensure_worker_control_user
+
+                    env_path = REPO_ROOT / ".env"
+                    tags_ob = red.get("tags_obligatorios", {}) or {}
+                    existing_key_id = None
+                    if env_path.exists():
+                        for linea in env_path.read_text(encoding="utf-8").splitlines():
+                            if linea.startswith("AWS_ACCESS_KEY_ID="):
+                                existing_key_id = linea.split("=", 1)[1].strip() or None
+                    nuevas_credenciales = ensure_worker_control_user(
+                        mgr.session,
+                        red["region"],
+                        cliente_id=tags_ob.get("cliente_id", config["cliente"]["id"]),
+                        entorno=tags_ob.get("entorno", config["cliente"]["entorno"]),
+                        deployment_id=deployment_id,
+                        existing_access_key_id=existing_key_id,
+                    )
+                    if nuevas_credenciales:
+                        _upsert_local_env_vars(env_path, nuevas_credenciales)
+                        print(
+                            "[IAM] Credenciales del usuario de control de workers guardadas en .env "
+                            "(se sincronizan al Gateway en el próximo 'sky launch')."
+                        )
+                except Exception as exc:  # noqa: BLE001 - best-effort, igual que 'dominio'/'capacidad'
+                    print(
+                        f"[WARNING] No se pudo aprovisionar el usuario IAM de control de workers: {exc}. "
+                        "El botón 'Apagar'/'Arrancar' del panel quedará deshabilitado."
+                    )
         else:
             print(
                 "[SKIP] 'gestion_red: existente' -> se omite AwsNetworkManager (VPC/SGs manuales)."

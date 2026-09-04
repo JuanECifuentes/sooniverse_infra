@@ -486,10 +486,25 @@ def estado_pool() -> Dict[str, Any]:
             logger.warning("No se pudo leer /health de LiteLLM: %s", exc)
 
     umbral_frescura = timedelta(seconds=2 * settings.METRICS_REFRESH_INTERVAL)
+    gracia_reinicio = timedelta(seconds=settings.WORKER_RESTART_GRACE_SECONDS)
     ahora = timezone.now()
 
     for nodo in nodos:
         if nodo.estado_operativo == "apagado":
+            continue
+        # 'reiniciando' es un estado DE TRÁNSITO que fija una acción manual
+        # (Reiniciar/Arrancar, ver ejecutar_accion_worker) -sin esta excepción,
+        # recargar el panel un segundo después lo pisaba con 'sano' calculado
+        # sobre datos DE ANTES del reinicio (is_healthy/last_seen_at todavía
+        # no se habían actualizado), aunque vLLM siguiera cargando el modelo.
+        # Pasada la gracia sin que nada lo corrija (un chequeo de salud manual
+        # o el próximo sync_endpoints.py), cae al recálculo normal de abajo
+        # -nunca se queda 'reiniciando' para siempre.
+        if (
+            nodo.estado_operativo == "reiniciando"
+            and nodo.last_health_check
+            and (ahora - nodo.last_health_check) < gracia_reinicio
+        ):
             continue
         obsoleto = not nodo.last_seen_at or (ahora - nodo.last_seen_at) > umbral_frescura
         if obsoleto:
@@ -503,17 +518,24 @@ def estado_pool() -> Dict[str, Any]:
         else:
             nodo.estado_operativo = "sano"
 
+    # DryRun real contra un worker de verdad (ver workers.py::ec2_disponible):
+    # cualquiera del pool sirve, la política IAM se otorga por tag de
+    # cliente/entorno, no por instancia individual.
+    primer_instance_id = next((n.instance_id for n in nodos if n.instance_id), None)
+
     estado = {
         "nodos": nodos,
         "nodos_totales": len(nodos),
         "nodos_sanos": sum(1 for n in nodos if n.estado_operativo == "sano"),
         "litellm_ok": litellm_ok,
         "modelos": [],
-        # Degradación explícita: si falta la clave SSH o boto3/el permiso IAM,
-        # los botones correspondientes se deshabilitan en la plantilla en vez
-        # de fallar al pulsarlos.
+        # Degradación explícita: si falta la clave SSH o las credenciales
+        # AWS/el permiso IAM de verdad, los botones correspondientes se
+        # deshabilitan en la plantilla en vez de fallar al pulsarlos.
         "restart_disponible": workers_mod.restart_disponible(),
-        "ec2_disponible": workers_mod.ec2_disponible(),
+        "ec2_disponible": workers_mod.ec2_disponible(
+            instance_id=primer_instance_id, region=settings.AWS_REGION
+        ),
     }
     if litellm_ok:
         try:
@@ -539,8 +561,10 @@ def _worker_audit(worker_node: Optional[WorkerNode], accion: str, estado: str, a
 
 
 # Estado que deja cada acción exitosa en 'sano en tránsito': el siguiente
-# sync_endpoints.py lo corrige a 'sano'/'degradado'/'desincronizado' según lo
-# que de verdad encuentre. 'health' no muta nada -es de solo diagnóstico.
+# sync_endpoints.py (o un chequeo de salud manual) lo corrige a
+# 'sano'/'degradado'/'desincronizado' según lo que de verdad encuentre.
+# 'health' no está aquí: escribe su propio estado según el resultado del
+# ping, ver `_ejecutar_health()`.
 _ESTADO_TRAS_ACCION = {"restart": "reiniciando", "stop": "apagado", "start": "reiniciando"}
 
 
@@ -551,10 +575,11 @@ def ejecutar_accion_worker(worker: WorkerNode, accion: str, actor: str, ip: Opti
     if accion not in ("health", "restart", "stop", "start"):
         raise WorkerActionError(f"Acción desconocida: {accion}")
 
+    if accion == "health":
+        return _ejecutar_health(worker, actor, ip)
+
     try:
-        if accion == "health":
-            mensaje = workers_mod.comprobar_salud(worker)
-        elif accion == "restart":
+        if accion == "restart":
             mensaje = workers_mod.reiniciar_vllm(worker)
         elif accion == "stop":
             mensaje = workers_mod.apagar_worker(worker, settings.AWS_REGION)
@@ -569,8 +594,50 @@ def ejecutar_accion_worker(worker: WorkerNode, accion: str, actor: str, ip: Opti
     nuevo_estado = _ESTADO_TRAS_ACCION.get(accion)
     if nuevo_estado:
         worker.estado_operativo = nuevo_estado
-        worker.save(update_fields=["estado_operativo"])
+        campos = ["estado_operativo"]
+        if nuevo_estado == "reiniciando":
+            # Ancla el temporizador de gracia que respeta estado_pool() antes
+            # de volver a recalcular 'reiniciando' desde cero (ver ahí).
+            worker.last_health_check = timezone.now()
+            campos.append("last_health_check")
+        worker.save(update_fields=campos)
 
+    return mensaje
+
+
+def _ejecutar_health(worker: WorkerNode, actor: str, ip: Optional[str] = None) -> str:
+    """La acción 'Comprobar salud' es la única que escribe estado en función
+    de su PROPIO resultado (a diferencia de restart/stop/start, que dejan un
+    estado 'en tránsito' fijo sin importar el detalle) -un ping manual
+    exitoso debe reflejarse YA en el panel como sincronizado
+    (`estado_operativo='sano'`), sin esperar al próximo `sync_endpoints.py`;
+    y uno fallido por conexión debe verse YA como `desincronizado`, no dejar
+    el último estado bueno conocido colgado indefinidamente."""
+    ahora = timezone.now()
+    try:
+        mensaje = workers_mod.comprobar_salud(worker)
+    except WorkerActionError as exc:
+        _worker_audit(worker, "health", "error", actor, str(exc), ip)
+        worker.is_healthy = False
+        worker.last_health_check = ahora
+        worker.health_status = "unhealthy"
+        worker.estado_operativo = "desincronizado"
+        worker.save(
+            update_fields=["is_healthy", "last_health_check", "health_status", "estado_operativo"]
+        )
+        raise
+
+    _worker_audit(worker, "health", "ok", actor, mensaje, ip)
+    worker.is_healthy = True
+    worker.last_seen_at = ahora
+    worker.last_health_check = ahora
+    worker.health_status = "healthy"
+    worker.estado_operativo = "sano"
+    worker.save(
+        update_fields=[
+            "is_healthy", "last_seen_at", "last_health_check", "health_status", "estado_operativo",
+        ]
+    )
     return mensaje
 
 
