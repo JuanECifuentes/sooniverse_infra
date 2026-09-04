@@ -27,8 +27,9 @@ from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
-from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST, require_http_methods
+from django.utils.http import url_has_allowed_host_and_scheme
+from django.views.decorators.csrf import ensure_csrf_cookie
+from django.views.decorators.http import require_POST
 
 from . import analytics, capacidad as cap_mod, filtros as ft, services
 from .credenciales import es_admin_credenciales, sincronizar_grupo_admin
@@ -58,6 +59,18 @@ def _actor(request) -> str:
 def _ip(request):
     forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
     return (forwarded.split(",")[0].strip() or request.META.get("REMOTE_ADDR")) or None
+
+
+def _safe_redirect_url(request, target_url: str | None, default_url: str) -> str:
+    """Valida que la URL de redirección pertenezca al mismo host o sea relativa,
+    evitando vulnerabilidades de Open Redirect."""
+    if target_url and url_has_allowed_host_and_scheme(
+        url=target_url,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        return target_url
+    return default_url
 
 
 def _int_or_none(value):
@@ -616,7 +629,9 @@ def refrescar(request):
         logger.exception("Fallo al refrescar métricas")
         messages.error(request, f"No se pudo refrescar: {exc}")
 
-    destino = request.POST.get("next") or reverse("metrics:dashboard")
+    destino = _safe_redirect_url(
+        request, request.POST.get("next"), reverse("metrics:dashboard")
+    )
     return redirect(destino)
 
 
@@ -729,7 +744,11 @@ def api_key_toggle(request, key_id: int):
         logger.exception("Fallo cambiando el estado de la API Key %s", key_id)
         messages.error(request, f"No se pudo cambiar el estado: {exc}")
 
-    return redirect(request.POST.get("next") or reverse("metrics:api_keys"))
+    return redirect(
+        _safe_redirect_url(
+            request, request.POST.get("next"), reverse("metrics:api_keys")
+        )
+    )
 
 
 ACCIONES_WORKER_VALIDAS = ("health", "restart", "stop", "start")
@@ -746,7 +765,11 @@ def worker_accion(request, node_id: int, accion: str):
     despliegue que comparta la misma base de datos."""
     if accion not in ACCIONES_WORKER_VALIDAS:
         messages.error(request, f"Acción desconocida: '{accion}'.")
-        return redirect(request.POST.get("next") or reverse("metrics:dashboard"))
+        return redirect(
+            _safe_redirect_url(
+                request, request.POST.get("next"), reverse("metrics:dashboard")
+            )
+        )
 
     prefix = f"sooniverse-{settings.CLIENTE_ID}-{settings.ENTORNO}-"
     worker = get_object_or_404(WorkerNode, pk=node_id, cluster_name__startswith=prefix)
@@ -764,23 +787,25 @@ def worker_accion(request, node_id: int, accion: str):
         )
         messages.error(request, f"Error inesperado: {exc}")
 
-    return redirect(request.POST.get("next") or reverse("metrics:dashboard"))
+    return redirect(
+        _safe_redirect_url(
+            request, request.POST.get("next"), reverse("metrics:dashboard")
+        )
+    )
 
 
 # =============================================================================
 # LOGIN ÚNICO DEL CLÚSTER
 # =============================================================================
+@ensure_csrf_cookie
 @rate_limit("login", methods=("POST",))
 def login_view(request):
     """Única pantalla de login del clúster (panel + chat). El chat nunca
     muestra su propio formulario -Open WebUI recibe la identidad ya resuelta
     vía la cabecera de confianza que inyecta nginx (ver `auth_check` y
     docker_images/openwebui/README.md)."""
-    next_url = (
-        request.POST.get("next")
-        or request.GET.get("next")
-        or reverse("metrics:dashboard")
-    )
+    raw_next = request.POST.get("next") or request.GET.get("next")
+    next_url = _safe_redirect_url(request, raw_next, reverse("metrics:dashboard"))
     if request.user.is_authenticated:
         return redirect(next_url)
 
@@ -802,8 +827,7 @@ def login_view(request):
     )
 
 
-@csrf_exempt
-@require_http_methods(["GET", "POST"])
+@require_POST
 def logout_view(request):
     auth_logout(request)
     return redirect("metrics:login")
@@ -1057,7 +1081,11 @@ def credencial_editar(request, user_id: int):
         else:
             form.guardar_en(usuario)
             messages.success(request, f"Usuario '{usuario.username}' actualizado.")
-            return redirect(request.POST.get("next") or "metrics:credenciales")
+            return redirect(
+                _safe_redirect_url(
+                    request, request.POST.get("next"), reverse("metrics:credenciales")
+                )
+            )
 
     # Errores: se re-muestra el listado con el modal abierto y los errores.
     return render(
@@ -1106,4 +1134,8 @@ def credencial_estado(request, user_id: int):
         messages.success(request, f"Usuario '{usuario.username}' habilitado de nuevo.")
     else:
         messages.error(request, "Acción desconocida sobre la cuenta.")
-    return redirect(request.POST.get("next") or "metrics:credenciales")
+    return redirect(
+        _safe_redirect_url(
+            request, request.POST.get("next"), reverse("metrics:credenciales")
+        )
+    )

@@ -323,24 +323,6 @@ class CredencialEditForm(_CredencialBaseMixin, _PasswordMixin, forms.Form):
     es_admin = forms.BooleanField(
         label="Administrador", required=False, help_text="Requiere acceso al panel."
     )
-    last_name = forms.CharField(
-        label="Apellido",
-        max_length=150,
-        required=False,
-        validators=[_sin_enie],
-        widget=forms.TextInput(attrs=_INPUT),
-    )
-    password = forms.CharField(
-        label="Nueva contraseña (opcional)",
-        required=False,
-        widget=forms.PasswordInput(attrs={**_INPUT, "autocomplete": "new-password"}),
-        help_text="Déjalo vacío para mantener la contraseña actual.",
-    )
-    password2 = forms.CharField(
-        label="Confirmar nueva contraseña",
-        required=False,
-        widget=forms.PasswordInput(attrs={**_INPUT, "autocomplete": "new-password"}),
-    )
 
     def __init__(self, *args, usuario=None, **kwargs):
         super().__init__(*args, **kwargs)

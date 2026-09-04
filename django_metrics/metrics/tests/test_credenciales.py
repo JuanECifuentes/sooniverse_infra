@@ -22,7 +22,7 @@ from django.contrib.messages.storage.fallback import FallbackStorage
 from django.test import RequestFactory, SimpleTestCase, override_settings
 
 from metrics import views
-from metrics.forms import CredencialCreateForm
+from metrics.forms import CredencialCreateForm, CredencialEditForm
 
 rf = RequestFactory()
 
@@ -440,3 +440,16 @@ class CredencialEditarTests(SimpleTestCase):
     def test_get_redirige_al_listado(self):
         resp = views.credencial_editar(_request(user=_admin()), user_id=1)
         self.assertEqual(resp.status_code, 302)
+
+    def test_campos_y_orden_credencial_edit_form(self):
+        form = CredencialEditForm()
+        esperados = [
+            "email",
+            "first_name",
+            "last_name",
+            "password",
+            "password2",
+            "is_staff",
+            "es_admin",
+        ]
+        self.assertEqual(list(form.fields.keys()), esperados)
