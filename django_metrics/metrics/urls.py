@@ -26,9 +26,10 @@ urlpatterns = [
         views.worker_accion,
         name="worker_accion",
     ),
-    # Credenciales: CRUD de usuarios del clúster (solo staff, ver views.py).
-    # Las cuentas creadas aquí sirven para el chat (SSO) y, si son staff,
-    # también para el panel.
+    # Credenciales: gestión de usuarios del clúster (solo rol Administrador,
+    # ver views.py). Las cuentas creadas aquí sirven para el chat (SSO) y, si
+    # tienen acceso al panel, también para el panel. Sin borrado: solo se
+    # deshabilita/habilita (credencial_estado).
     path("credenciales/", views.credenciales, name="credenciales"),
     path("credenciales/crear/", views.credencial_crear, name="credencial_crear"),
     path(
@@ -37,9 +38,9 @@ urlpatterns = [
         name="credencial_editar",
     ),
     path(
-        "credenciales/<int:user_id>/eliminar/",
-        views.credencial_eliminar,
-        name="credencial_eliminar",
+        "credenciales/<int:user_id>/estado/",
+        views.credencial_estado,
+        name="credencial_estado",
     ),
     # Login único del clúster (panel + chat, ver views.py::auth_check)
     path("login/", views.login_view, name="login"),

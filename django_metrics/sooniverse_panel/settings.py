@@ -244,6 +244,11 @@ RATELIMITS = {
     "refresh": _env("RATELIMIT_REFRESH", "6/m"),  # ETL manual (caro por diseño)
 }
 
+# Nombre del Group que marca el rol 'Administrador' (tab de credenciales +
+# admin de Django, ver metrics/credenciales.py). 'Acceso al panel' es is_staff,
+# bandera aparte del propio User -dos checkboxes deliberadamente separados.
+GRUPO_ADMIN_CREDENCIALES = _env("GRUPO_ADMIN_CREDENCIALES", "Administrador")
+
 # Con dominio propio (HTTPS real, ver gateway.dominio en config_global.yaml) las
 # cookies deben marcarse Secure; en dev local (HTTP puro) NO, o el navegador
 # las descarta y el login/CSRF dejan de funcionar por completo.

@@ -552,6 +552,73 @@ a:hover {
 .sv-dialog::backdrop {
     background-color: rgba(0, 0, 0, 0.55);
 }
+/* Diálogo de formulario (modal de modificación de credenciales) */
+.sv-dialog--wide {
+    max-width: 560px;
+}
+
+/* Diálogo con contenido centrado (modal de logout y confirmaciones directas) */
+.sv-dialog--center {
+    text-align: center;
+}
+.sv-dialog--center .l-stack {
+    align-items: center;
+    text-align: center;
+}
+.sv-dialog--center .l-form-actions {
+    justify-content: center;
+}
+
+/* Orden de columnas (tabla de credenciales): botón de JS, sin queryparams */
+.sv-sort {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: inherit;
+    text-decoration: none;
+    transition: color var(--dur-fast) var(--ease-out);
+}
+button.sv-sort {
+    appearance: none;
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    cursor: pointer;
+}
+.sv-sort:hover { color: var(--text-primary); }
+.sv-sort--activa { color: var(--accent); }
+.sv-sort__flecha {
+    width: 7px;
+    height: 7px;
+    border-left: 1.5px solid var(--text-muted);
+    border-bottom: 1.5px solid var(--text-muted);
+    transform: rotate(-45deg) translate(1px, -1px);
+    transition:
+        transform var(--dur-fast) var(--ease-out),
+        border-color var(--dur-fast) var(--ease-out);
+}
+.sv-sort--activa .sv-sort__flecha { border-color: var(--accent); }
+/* Dirección descendente: flecha invertida (la marca credenciales.js) */
+.sv-sort__flecha--desc { transform: rotate(-225deg) translate(2px, 0); }
+
+/* Fila de cuenta deshabilitada: apagada pero legible */
+.sv-row--inactiva td { color: var(--text-muted); }
+.sv-row--inactiva .sv-strong { color: var(--text-secondary); }
+
+/* Paginación de tabla (credenciales) */
+.l-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--border-subtle);
+}
+.sv-btn--disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
 
 /* ----------------------------------------------------------------------------
    10. FORMULARIOS

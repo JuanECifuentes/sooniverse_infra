@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, timedelta
+from functools import wraps
 
 from django.conf import settings
 from django.contrib import messages
@@ -21,13 +22,16 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
 from django.contrib.auth.decorators import user_passes_test
+from django.core.paginator import Paginator
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
-from django.views.decorators.http import require_POST
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST, require_http_methods
 
 from . import analytics, capacidad as cap_mod, filtros as ft, services
+from .credenciales import es_admin_credenciales, sincronizar_grupo_admin
 from .forms import ApiKeyForm, CredencialCreateForm, CredencialEditForm, LoginForm
 from .litellm_client import LiteLLMError
 from .models import ApiKeyRegistry, TokenUsageRollup, WorkerNode
@@ -798,7 +802,8 @@ def login_view(request):
     )
 
 
-@require_POST
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
 def logout_view(request):
     auth_logout(request)
     return redirect("metrics:login")
@@ -823,49 +828,158 @@ def auth_check(request):
 
 
 # =============================================================================
-# CREDENCIALES (CRUD de usuarios del clúster — solo staff)
+# CREDENCIALES (CRUD de usuarios del clúster — solo rol Administrador)
 # =============================================================================
 # Django es la única fuente de identidad de TODO el clúster: una cuenta creada
 # aquí sirve para el CHAT inmediatamente (Open WebUI auto-aprovisiona vía SSO
 # por cabecera de confianza, ver auth_check y docker_images/openwebui/
-# README.md) y para el PANEL si además es staff (panel_login_required). Por eso
-# el email es obligatorio: es la identidad que nginx/Open WebUI reciben en
-# X-Sooniverse-Email.
+# README.md). Los roles van SEPARADOS (ver metrics/credenciales.py):
+#   · 'Acceso al panel' (is_staff): métricas + API Keys.
+#   · 'Administrador' (Group): lo anterior + esta tab + admin de Django.
+# Un usuario de panel (staff sin grupo) que llamara a estos endpoints por la
+# URL recibe redirect al dashboard con mensaje: NUNCA puede crear/modificar
+# usuarios "por consumo de API".
 #
 # Guardrails deliberados:
 #   · Superusers: intocables desde aquí (se gestionan vía Django admin) — así
 #     la cuenta técnica de despliegue no puede quedarse sin acceso por un click.
-#   · Autobloqueo: nadie puede borrarse, desactivarse ni quitarse el rol desde
-#     su propia sesión.
-#   · Solo staff llega a este módulo (panel_login_required); las mutaciones son
-#     POST + CSRF, así que no hay creación de usuarios por GET/enlaces.
+#   · Autobloqueo: nadie puede deshabilitarse ni quitarse el rol desde su
+#     propia sesión.
+#   · No existe borrado de usuarios: solo deshabilitación reversible (auditable
+#     y menos destructivo); las mutaciones son POST + CSRF.
+
+# Paginación de la tabla de cuentas (registros por página, pedido explícito).
+CREDENCIALES_POR_PAGINA = 30
+
+# Roles con los MISMOS textos que pintan las badges de la columna ROL
+# (Superuser / Admin / Panel / Chat): whitelist del filtro GET ?rol=. El
+# ordenamiento por columnas es 100% cliente (credenciales.js reordena las
+# filas ya renderizadas), así que aquí no hay claves de orden.
+_ROLES_VALIDOS = {"superuser", "admin", "panel", "chat"}
+
+
+def _rol_de(usuario) -> str:
+    """Rol de una cuenta para filtros/badges: superuser > admin > panel > chat."""
+    if getattr(usuario, "is_superuser", False):
+        return "superuser"
+    if es_admin_credenciales(usuario):
+        return "admin"
+    if usuario.is_staff:
+        return "panel"
+    return "chat"
+
+
+def admin_credenciales_required(view_func):
+    """Blindaje del módulo entero: sesión activa + staff (panel_login_required)
+    + rol Administrador (grupo). Un usuario de panel sin el grupo cae al
+    dashboard con mensaje —los endpoints de credenciales no son alcanzables
+    'por API' para quien solo tiene acceso al panel."""
+
+    @wraps(view_func)
+    def wrapped(request, *args, **kwargs):
+        if not es_admin_credenciales(request.user):
+            messages.error(
+                request,
+                "Solo un administrador puede gestionar credenciales de usuarios.",
+            )
+            return redirect("metrics:dashboard")
+        return view_func(request, *args, **kwargs)
+
+    return panel_login_required(wrapped)
 
 
 def _usuarios_del_cluster():
-    return get_user_model().objects.order_by("-is_staff", "username")
+    """Orden base del listado: activos primero, luego admins, luego alfabético.
+    El orden por columna clickeada es 100% cliente (credenciales.js reordena
+    las filas ya renderizadas): el servidor no usa queryparams de orden."""
+    return get_user_model().objects.order_by("-is_active", "-is_staff", "username")
 
 
-@panel_login_required
+def _contexto_credenciales(request, form, extra=None):
+    """Listado filtrado + paginado (30/página) y querystring de filtros para
+    que la paginación los conserve. El orden por columnas NO se server-side:
+    es un reordenamiento visual en JS de la página visible."""
+    get = request.GET
+    filtro_usuario = (get.get("usuario") or "").strip()
+    filtro_correo = (get.get("correo") or "").strip()
+    filtro_nombre = (get.get("nombre") or "").strip()
+    roles = [r for r in get.getlist("rol") if r in _ROLES_VALIDOS]
+
+    usuarios = list(_usuarios_del_cluster())
+    total_usuarios = len(usuarios)
+
+    # ---- Filtros (coincidencia de texto, independiente por campo) ----
+    texto = (
+        filtro_usuario.lower(),
+        filtro_correo.lower(),
+        filtro_nombre.lower(),
+    )
+    if any(texto) or roles:
+        filtrados = []
+        for u in usuarios:
+            if texto[0] and texto[0] not in (u.username or "").lower():
+                continue
+            if texto[1] and texto[1] not in (u.email or "").lower():
+                continue
+            if texto[2] and texto[2] not in (u.get_full_name() or "").lower():
+                continue
+            if roles and _rol_de(u) not in roles:
+                continue
+            filtrados.append(u)
+    else:
+        filtrados = usuarios
+
+    # ---- Paginación (30 en 30) ----
+    paginador = Paginator(filtrados, CREDENCIALES_POR_PAGINA)
+    page_obj = paginador.get_page(get.get("page"))
+
+    # ---- Querystring de filtros (para los enlaces de paginación) ----
+    qd = get.copy()
+    qd.pop("page", None)
+    qs_filtros = qd.urlencode()
+
+    contexto = {
+        "seccion": "credenciales",
+        "form": form,
+        # El modal de edición SIEMPRE está en la página (IDs prefijados 'ed_'
+        # para no chocar con el formulario de alta); se rellena por fila con
+        # credenciales.js. En errores de POST llega el bound form + auto-open.
+        "form_edicion": CredencialEditForm(auto_id="ed_%s"),
+        "editar_usuario": None,
+        "es_propia": False,
+        "editar_abierto": False,
+        "page_obj": page_obj,
+        "total_usuarios": total_usuarios,
+        "total_admins": sum(
+            1 for u in usuarios if _rol_de(u) in ("admin", "superuser")
+        ),
+        "filtros": {
+            "usuario": filtro_usuario,
+            "correo": filtro_correo,
+            "nombre": filtro_nombre,
+            "roles": roles,
+        },
+        "qs_filtros": qs_filtros,
+    }
+    if extra:
+        contexto.update(extra)
+    return contexto
+
+
+@admin_credenciales_required
 @rate_limit("page")
 def credenciales(request):
-    """Listado + alta de usuarios. El acceso YA exige staff (decorador); el
-    rol 'Administrador' del formulario solo decide si la NUEVA cuenta podrá
-    entrar al panel o únicamente al chat."""
-    usuarios = _usuarios_del_cluster()
+    """Listado (filtros + orden + paginación de 30) + alta de usuarios. Solo el
+    rol Administrador llega aquí (decorador); un checkbox no le da acceso al
+    otro: 'Acceso al panel' no ve esta tab, 'Administrador' sí."""
     return render(
         request,
         "metrics/credenciales.html",
-        {
-            "seccion": "credenciales",
-            "form": CredencialCreateForm(),
-            "usuarios": usuarios,
-            "total_usuarios": usuarios.count(),
-            "total_admins": usuarios.filter(is_staff=True).count(),
-        },
+        _contexto_credenciales(request, CredencialCreateForm()),
     )
 
 
-@panel_login_required
+@admin_credenciales_required
 @rate_limit("action")
 def credencial_crear(request):
     if request.method != "POST":
@@ -873,40 +987,10 @@ def credencial_crear(request):
 
     form = CredencialCreateForm(request.POST)
     if not form.is_valid():
-        usuarios = _usuarios_del_cluster()
         return render(
             request,
             "metrics/credenciales.html",
-            {
-                "seccion": "credenciales",
-                "form": form,
-                "usuarios": usuarios,
-                "total_usuarios": usuarios.count(),
-                "total_admins": usuarios.filter(is_staff=True).count(),
-            },
-            status=400,
-        )
-
-
-@panel_login_required
-@rate_limit("action")
-def credencial_crear(request):
-    if request.method != "POST":
-        return redirect("metrics:credenciales")
-
-    form = CredencialCreateForm(request.POST)
-    if not form.is_valid():
-        usuarios = _usuarios_del_cluster()
-        return render(
-            request,
-            "metrics/credenciales.html",
-            {
-                "seccion": "credenciales",
-                "form": form,
-                "usuarios": usuarios,
-                "total_usuarios": usuarios.count(),
-                "total_admins": usuarios.filter(is_staff=True).count(),
-            },
+            _contexto_credenciales(request, form),
             status=400,
         )
 
@@ -918,9 +1002,17 @@ def credencial_crear(request):
         first_name=datos["first_name"],
         last_name=datos["last_name"],
         is_staff=datos["is_staff"],
-        is_active=datos["is_active"],
+        # Toda cuenta nueva nace activa: el estado se gestiona después con
+        # Deshabilitar/Habilitar en la tabla.
+        is_active=True,
     )
-    alcance = "el panel y el chat" if usuario.is_staff else "el chat"
+    if datos["es_admin"]:
+        sincronizar_grupo_admin(usuario, True)
+    alcance = (
+        "el admin de Django, el panel y el chat"
+        if datos["es_admin"]
+        else ("el panel y el chat" if usuario.is_staff else "el chat")
+    )
     messages.success(
         request,
         f"Usuario '{usuario.username}' creado. Puede entrar a {alcance} con sus credenciales.",
@@ -928,9 +1020,15 @@ def credencial_crear(request):
     return redirect("metrics:credenciales")
 
 
-@panel_login_required
-@rate_limit("page")
+@admin_credenciales_required
+@rate_limit("action")
 def credencial_editar(request, user_id: int):
+    """Solo POST: el modal de la tabla lo abre el frontend con los datos de la
+    fila (GET no expone el formulario por URL). Protegido por el decorador de
+    rol —un usuario de panel no puede modificar cuentas ni por API."""
+    if request.method != "POST":
+        return redirect("metrics:credenciales")
+
     usuario = get_object_or_404(get_user_model(), pk=user_id)
     if usuario.is_superuser:
         messages.error(
@@ -940,60 +1038,72 @@ def credencial_editar(request, user_id: int):
         return redirect("metrics:credenciales")
 
     es_propia = request.user.pk == usuario.pk
-    if request.method == "POST":
-        form = CredencialEditForm(request.POST, usuario=usuario)
-        if form.is_valid():
-            if es_propia and (
-                not form.cleaned_data["is_active"] or not form.cleaned_data["is_staff"]
-            ):
-                messages.error(
-                    request,
-                    "No puedes quitarte a ti mismo el acceso al panel desde tu propia sesión.",
-                )
-            else:
-                form.guardar_en(usuario)
-                messages.success(request, f"Usuario '{usuario.username}' actualizado.")
-                return redirect("metrics:credenciales")
-    else:
-        form = CredencialEditForm(usuario=usuario)
-
+    form = CredencialEditForm(request.POST, usuario=usuario, auto_id="ed_%s")
     # Red de seguridad contra el autobloqueo: en la propia sesión, rol y estado
     # van disabled (Django usa el initial, ignora lo que llegue por POST) y el
-    # guard del POST de arriba cubre el caso forzado.
+    # guard de abajo cubre el caso forzado.
     if es_propia:
         form.fields["is_staff"].disabled = True
-        form.fields["is_active"].disabled = True
+        form.fields["es_admin"].disabled = True
 
+    if form.is_valid():
+        if es_propia and (
+            not form.cleaned_data["is_staff"] or not form.cleaned_data["es_admin"]
+        ):
+            messages.error(
+                request,
+                "No puedes quitarte a ti mismo el rol desde tu propia sesión.",
+            )
+        else:
+            form.guardar_en(usuario)
+            messages.success(request, f"Usuario '{usuario.username}' actualizado.")
+            return redirect(request.POST.get("next") or "metrics:credenciales")
+
+    # Errores: se re-muestra el listado con el modal abierto y los errores.
     return render(
         request,
-        "metrics/credencial_editar.html",
-        {
-            "seccion": "credenciales",
-            "form": form,
-            "usuario": usuario,
-            "es_propia": es_propia,
-        },
-        status=400 if request.method == "POST" and form.errors else 200,
+        "metrics/credenciales.html",
+        _contexto_credenciales(
+            request,
+            CredencialCreateForm(),
+            extra={
+                "form_edicion": form,
+                "editar_usuario": usuario,
+                "es_propia": es_propia,
+                "editar_abierto": True,
+            },
+        ),
+        status=400,
     )
 
 
-@panel_login_required
+@admin_credenciales_required
 @rate_limit("action")
 @require_POST
-def credencial_eliminar(request, user_id: int):
+def credencial_estado(request, user_id: int):
+    """Deshabilitar / habilitar una cuenta (no hay borrado). Ambas acciones
+    requieren el rol Administrador (decorador) y quedan bloqueadas para el
+    propio admin y para superusers."""
     usuario = get_object_or_404(get_user_model(), pk=user_id)
+    accion = request.POST.get("accion")
     if usuario.pk == request.user.pk:
-        messages.error(request, "No puedes eliminar tu propia cuenta desde aquí.")
+        messages.error(request, "No puedes deshabilitar tu propia cuenta desde aquí.")
     elif usuario.is_superuser:
         messages.error(
             request,
             "Las cuentas técnicas (superuser) se gestionan vía Django admin, no desde el panel.",
         )
-    else:
-        nombre = usuario.username
-        usuario.delete()
+    elif accion == "deshabilitar":
+        usuario.is_active = False
+        usuario.save(update_fields=["is_active"])
         messages.success(
             request,
-            f"Usuario '{nombre}' eliminado. Su acceso al chat y al panel queda revocado.",
+            f"Usuario '{usuario.username}' deshabilitado. Pierde el acceso al chat y al panel.",
         )
-    return redirect("metrics:credenciales")
+    elif accion == "habilitar":
+        usuario.is_active = True
+        usuario.save(update_fields=["is_active"])
+        messages.success(request, f"Usuario '{usuario.username}' habilitado de nuevo.")
+    else:
+        messages.error(request, "Acción desconocida sobre la cuenta.")
+    return redirect(request.POST.get("next") or "metrics:credenciales")
