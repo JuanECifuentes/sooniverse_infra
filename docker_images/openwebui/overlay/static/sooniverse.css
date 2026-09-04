@@ -70,7 +70,7 @@
   flex: none;
   width: 34px;
   height: 34px;
-  border: 1px solid var(--sv-accent);
+  border: none;
   border-radius: var(--sv-radius-md);
   background-color: var(--sv-accent-soft);
   color: var(--sv-accent);
@@ -78,7 +78,6 @@
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
   transition:
     background-color 160ms ease,
-    border-color 160ms ease,
     color 160ms ease,
     box-shadow 160ms ease;
   padding: 0;
@@ -86,14 +85,12 @@
 }
 .sv-iconbtn:hover,
 .sv-navbtn:hover {
-  border-color: var(--sv-accent-hover);
   background-color: var(--sv-accent-hover);
   color: var(--sv-surface-0);
   box-shadow: var(--sv-shadow-1);
 }
 .sv-iconbtn:active,
 .sv-navbtn:active {
-  border-color: var(--sv-accent-pressed);
   background-color: var(--sv-accent-pressed);
   color: var(--sv-surface-0);
 }
@@ -112,21 +109,18 @@
 /* Variante ghost (logout): sobria de base, affordance de peligro en hover */
 .sv-iconbtn--ghost,
 .sv-navbtn--ghost {
-  border-color: var(--sv-border-subtle);
   background-color: transparent;
   color: var(--sv-text-secondary);
   box-shadow: none;
 }
 .sv-iconbtn--ghost:hover,
 .sv-navbtn--ghost:hover {
-  border-color: var(--sv-negative);
   background-color: var(--sv-negative-soft);
   color: var(--sv-negative);
   box-shadow: none;
 }
 .sv-iconbtn--ghost:active,
 .sv-navbtn--ghost:active {
-  border-color: var(--sv-negative);
   background-color: transparent;
   color: var(--sv-negative);
 }

@@ -682,6 +682,14 @@ services:
       # Región AWS del despliegue -la usan las acciones de worker (apagar/
       # arrancar la instancia EC2 desde la card Pool vLLM, metrics/workers.py).
       AWS_REGION: {aws_region}
+      # Credenciales del usuario IAM DEDICADO a apagar/arrancar workers
+      # (scripts/aws_iam_worker_control.py, aprovisionado en la fase 'network'
+      # si el despliegue tuvo permiso IAM para crearlo) -NUNCA las del
+      # despliegue automático. Vacías -> metrics/workers.py::ec2_disponible()
+      # falla en fail-closed y el panel oculta "Apagar"/"Arrancar" en vez de
+      # fallar al pulsarlos.
+      AWS_ACCESS_KEY_ID: ${{AWS_ACCESS_KEY_ID:-}}
+      AWS_SECRET_ACCESS_KEY: ${{AWS_SECRET_ACCESS_KEY:-}}
       # TIENE que ser la misma zona con la que scripts/db_setup.py corta los
       # buckets (sooniverse.app_setting.reporting_timezone). Si el panel
       # renderiza en una zona y la agregación se hizo en otra, los días salen

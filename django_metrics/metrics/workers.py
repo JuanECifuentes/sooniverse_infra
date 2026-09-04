@@ -17,7 +17,13 @@ al pulsarlo:
   una instancia dedicada que no corre nada más, así que es equivalente a
   reiniciar vLLM sin tener que conocer el nombre exacto del servicio/directorio.
 - Apagar / Arrancar: boto3 sobre la instancia EC2 (stop/start-instances). Es
-  lo único que de verdad deja de cobrar cómputo.
+  lo único que de verdad deja de cobrar cómputo. Usa credenciales AWS
+  DEDICADAS (usuario IAM separado del despliegue, ver
+  scripts/aws_iam_worker_control.py) con permiso ÚNICAMENTE de start/stop/
+  describe sobre los workers de este cliente/entorno -`ec2_disponible()`
+  verifica ese permiso con un DryRun real antes de mostrar el botón, y
+  `_require_ec2_permiso()` lo vuelve a comprobar en el servidor antes de
+  ejecutar la acción, por si alguien la dispara sin pasar por la plantilla.
 """
 
 from __future__ import annotations
@@ -58,12 +64,44 @@ def restart_disponible() -> bool:
     return _ssh_key_path() is not None
 
 
-def ec2_disponible() -> bool:
+def ec2_disponible(instance_id: Optional[str] = None, region: Optional[str] = None) -> bool:
+    """Comprueba con un DryRun real -no solo "boto3 está instalado"- si las
+    credenciales AWS configuradas EN ESTE GATEWAY (`AWS_ACCESS_KEY_ID`/
+    `AWS_SECRET_ACCESS_KEY` del usuario IAM dedicado que crea
+    `scripts/aws_iam_worker_control.py`, NUNCA las del despliegue automático)
+    pueden apagar/arrancar instancias EC2.
+
+    Con `instance_id`, `DryRun=True` contra ESE recurso le devuelve a AWS la
+    respuesta definitiva a esta pregunta exacta, sin ejecutar la acción:
+    'DryRunOperation' -> autorizado (la llamada real habría funcionado);
+    'UnauthorizedOperation' -> las credenciales existen pero no tienen el
+    permiso. Cualquier otro resultado (sin credenciales, credenciales
+    inválidas, instancia inexistente, sin red...) se trata como NO disponible
+    -fail-closed, igual que el resto de `*_disponible()`: antes de esto,
+    'ec2_disponible' era `True` con solo tener boto3 instalado, aunque
+    `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` estuvieran vacías o
+    pertenecieran a un usuario sin ningún permiso EC2 -el botón se mostraba
+    habilitado y fallaba recién al pulsarlo con un error de IAM críptico.
+
+    Sin `instance_id` (pool vacío, nada que probar de verdad) solo confirma
+    que hay credenciales cargadas."""
     try:
-        import boto3  # noqa: F401
+        import boto3
+        from botocore.exceptions import ClientError
     except ImportError:
         return False
-    return True
+
+    try:
+        ec2 = boto3.client("ec2", region_name=region)
+        if instance_id:
+            ec2.stop_instances(InstanceIds=[instance_id], DryRun=True)
+        else:
+            ec2.describe_instances(DryRun=True)
+        return False  # inalcanzable en la práctica: DryRun siempre lanza ClientError
+    except ClientError as exc:
+        return exc.response.get("Error", {}).get("Code") == "DryRunOperation"
+    except Exception:  # noqa: BLE001 - sin credenciales/red/etc. -> fail-closed
+        return False
 
 
 # -----------------------------------------------------------------------------
@@ -134,12 +172,27 @@ def _ec2_client(region: str):
     return boto3.client("ec2", region_name=region)
 
 
+def _require_ec2_permiso(worker: WorkerNode, region: str) -> None:
+    """Repite en el servidor la misma comprobación que oculta el botón en la
+    plantilla -nunca confiar solo en que el cliente no mande la petición: un
+    POST directo a `/workers/<id>/stop/` sin pasar por la UI se ejecutaría
+    igual si esta función no existiera."""
+    if not ec2_disponible(instance_id=worker.instance_id, region=region):
+        raise WorkerActionError(
+            "Las credenciales AWS de este despliegue no tienen permiso para apagar/arrancar "
+            "instancias EC2 (o no están configuradas). Revisa que exista el usuario IAM dedicado "
+            "a esta acción y que 'AWS_ACCESS_KEY_ID'/'AWS_SECRET_ACCESS_KEY' en el .env del "
+            "Gateway sean los suyos -nunca los del despliegue automático."
+        )
+
+
 def apagar_worker(worker: WorkerNode, region: str) -> str:
     if not worker.instance_id:
         raise WorkerActionError(
             "Este nodo no tiene 'instance_id' registrado (se puebla desde "
             "scripts/sync_endpoints.py); no se puede apagar desde el panel."
         )
+    _require_ec2_permiso(worker, region)
     try:
         ec2 = _ec2_client(region)
         ec2.stop_instances(InstanceIds=[worker.instance_id])
@@ -154,6 +207,7 @@ def arrancar_worker(worker: WorkerNode, region: str) -> str:
             "Este nodo no tiene 'instance_id' registrado (se puebla desde "
             "scripts/sync_endpoints.py); no se puede arrancar desde el panel."
         )
+    _require_ec2_permiso(worker, region)
     try:
         ec2 = _ec2_client(region)
         ec2.start_instances(InstanceIds=[worker.instance_id])

@@ -263,6 +263,16 @@ class AwsNetworkManager:
 
         self._log_prefix = "[RED]"
 
+    @property
+    def session(self) -> "boto3.Session":
+        """Sesión boto3 de ESTE despliegue (perfil/rol BYOC ya resuelto) -para
+        reutilizar sus credenciales en tareas de aprovisionamiento que no son
+        estrictamente de red, p.ej. `aws_iam_worker_control.py` creando el
+        usuario IAM restringido de apagar/arrancar workers. Nunca al revés:
+        esas credenciales del despliegue no deben terminar en el `.env` del
+        Gateway -para eso existe ese módulo, con su propio usuario separado."""
+        return self._session
+
     # -------------------------------------------------------------------
     # Utilidades internas
     # -------------------------------------------------------------------

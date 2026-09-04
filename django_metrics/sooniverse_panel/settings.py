@@ -200,6 +200,16 @@ ENTORNO = _env("ENTORNO", "prod")
 # la instancia EC2 desde la card Pool vLLM, metrics/workers.py).
 AWS_REGION = _env("AWS_REGION", "us-east-1")
 
+# Cuánto tiempo (segundos) el panel sigue mostrando 'reiniciando' tras pulsar
+# el botón Reiniciar/Arrancar, antes de dejar que estado_pool() recalcule el
+# estado real desde is_healthy/last_seen_at -sin esto, recargar la página un
+# segundo después de pedir el reinicio mostraba 'sano' de inmediato (con
+# datos de ANTES del reinicio), aunque vLLM todavía estuviera recargando el
+# modelo. 120s cubre un reinicio típico de un modelo pequeño con margen; un
+# 'sync_endpoints.py' o un chequeo manual de salud posterior corrige el
+# estado antes si el worker ya respondió.
+WORKER_RESTART_GRACE_SECONDS = int(_env("WORKER_RESTART_GRACE_SECONDS", "120"))
+
 # -----------------------------------------------------------------------------
 # Analítica de ritmo de uso y capacidad
 # -----------------------------------------------------------------------------

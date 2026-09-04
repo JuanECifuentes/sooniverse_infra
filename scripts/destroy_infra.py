@@ -442,6 +442,22 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
     for action in report.manual_actions_required:
         print(f"  [MANUAL] {action}")
 
+    # Usuario IAM dedicado a apagar/arrancar workers (aws_iam_worker_control.py,
+    # ver generate_infra.py fase 'network'): best-effort, nunca bloquea el
+    # resto de la destrucción. Si nunca se creó (credenciales del despliegue
+    # sin permiso IAM), esto simplemente no encuentra nada que borrar.
+    try:
+        from aws_iam_worker_control import delete_worker_control_user
+
+        tags_ob = red.get("tags_obligatorios", {}) or {}
+        delete_worker_control_user(
+            mgr.session,
+            cliente_id=tags_ob.get("cliente_id", cliente["id"]),
+            entorno=tags_ob.get("entorno", cliente["entorno"]),
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        print(f"[WARNING] No se pudo limpiar el usuario IAM de control de workers: {exc}")
+
     return 0 if report.ok else 2
 
 

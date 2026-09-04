@@ -35,7 +35,7 @@ from . import analytics, capacidad as cap_mod, filtros as ft, services
 from .credenciales import es_admin_credenciales, sincronizar_grupo_admin
 from .forms import ApiKeyForm, CredencialCreateForm, CredencialEditForm, LoginForm
 from .litellm_client import LiteLLMError
-from .models import ApiKeyRegistry, TokenUsageRollup, WorkerNode
+from .models import ApiKeyRegistry, TokenUsageRollup, WorkerNode, friendly_key_alias
 from .ratelimit import rate_limit
 from .workers import WorkerActionError
 
@@ -102,7 +102,9 @@ def _peticiones_payload(resultado):
                 "output": e.completion_tokens,
                 "total": e.total_tokens,
                 "status": e.status,
-                "api_key": (e.api_key.key_alias if e.api_key_id and e.api_key else None)
+                "api_key": friendly_key_alias(
+                    e.api_key.key_alias if e.api_key_id and e.api_key else None
+                )
                 or "(sin registro)",
             }
             for e in resultado["items"]
@@ -350,7 +352,11 @@ def _metricas_payload(
             for m in metricas.por_modelo
         ],
         "por_api_key": [
-            {**k, "spend_usd": float(k.get("spend_usd") or 0)}
+            {
+                **k,
+                "spend_usd": float(k.get("spend_usd") or 0),
+                "api_key__key_alias": friendly_key_alias(k.get("api_key__key_alias")),
+            }
             for k in metricas.por_api_key
         ]
         if metricas.por_api_key
