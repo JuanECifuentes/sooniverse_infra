@@ -13,7 +13,7 @@
     {# Identidad de marca encapsulada: reemplazar SOLO este archivo para re-tematizar #}
     <link rel="stylesheet" href="{% static 'css/theme-sooniverse.css' %}">
 </head>
-<body>
+<body data-user-id="{{ user.id|default:'' }}">
     <div class="sv-noise" aria-hidden="true"></div>
 
     <div class="l-shell">
@@ -32,16 +32,39 @@
                        href="{% url 'metrics:capacidad' %}">Capacidad</a>
                     <a class="sv-nav__link {% if seccion == 'apikeys' %}sv-nav__link--active{% endif %}"
                        href="{% url 'metrics:api_keys' %}">API Keys</a>
-                    <a class="sv-nav__link" href="{% url 'admin:index' %}">Admin</a>
+                    {# Solo el rol Administrador: crear/modificar usuarios #}
+                    {% if ES_ADMIN_CREDENCIALES %}
+                        <a class="sv-nav__link {% if seccion == 'credenciales' %}sv-nav__link--active{% endif %}"
+                           href="{% url 'metrics:credenciales' %}">Credenciales</a>
+                    {% endif %}
                 </nav>
 
                 <div class="l-header__meta">
-                    <span class="sv-badge sv-badge--info">{{ CLIENTE_ID }}</span>
-                    <span class="sv-badge {% if ENTORNO == 'prod' %}sv-badge--success{% else %}sv-badge--muted{% endif %}">{{ ENTORNO }}</span>
-                    <form method="post" action="{% url 'metrics:logout' %}" class="l-inline-form">
-                        {% csrf_token %}
-                        <button type="submit" class="sv-btn sv-btn--ghost sv-btn--sm">Salir</button>
-                    </form>
+                    
+                    <!-- <span class="sv-badge sv-badge--info">{{ CLIENTE_ID }}</span>
+                    <span class="sv-badge {% if ENTORNO == 'prod' %}sv-badge--success{% else %}sv-badge--muted{% endif %}">{{ ENTORNO }}</span> -->
+                    <span class="sv-tooltip sv-tooltip--bottom-end sv-tooltip--nav"> 
+                        <a class="sv-iconbtn" href="{{ CHAT_URL }}" aria-label="Ir al chat">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+                                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                                 stroke-linejoin="round" aria-hidden="true">
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                            </svg>
+                        </a>
+                        <span class="sv-tooltip__bubble" role="tooltip">Ir al chat</span>
+                    </span>
+                    <span class="sv-tooltip sv-tooltip--bottom-end sv-tooltip--nav">
+                        <button type="button" class="sv-iconbtn sv-iconbtn--ghost" id="sv-logout-trigger" aria-label="Cerrar sesión">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+                                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                                 stroke-linejoin="round" aria-hidden="true">
+                                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                                <path d="m16 17 5-5-5-5"/>
+                                <path d="M21 12H9"/>
+                            </svg>
+                        </button>
+                        <span class="sv-tooltip__bubble" role="tooltip">Cerrar sesión</span>
+                    </span>
                 </div>
             </div>
         </header>
@@ -80,6 +103,21 @@
         </footer>
     </div>
 
+    <dialog id="sv-logout-dialog" class="sv-dialog sv-dialog--center">
+        <form method="post" action="{% url 'metrics:logout' %}">
+            {% csrf_token %}
+            <div class="l-stack l-stack--tight l-mb-md">
+                <span class="sv-eyebrow">Sesión</span>
+                <h3>Cerrar sesión</h3>
+                <p class="sv-body">¿Estás seguro de que deseas cerrar sesión?</p>
+            </div>
+            <div class="l-form-actions">
+                <button type="button" class="sv-btn sv-btn--ghost sv-btn--sm" id="sv-logout-cancel">Cancelar</button>
+                <button type="submit" class="sv-btn sv-btn--danger sv-btn--sm">Cerrar sesión</button>
+            </div>
+        </form>
+    </dialog>
+
     <script src="{% static 'js/multiselect.js' %}"></script>
     <script src="{% static 'js/spinner.js' %}"></script>
     <script src="{% static 'js/worker-actions.js' %}"></script>
@@ -90,15 +128,33 @@
         (function() {
             'use strict';
             const header = document.getElementById('main-header');
-            if (!header) return;
-            function updateHeader() {
-                const scrollY = window.scrollY || window.pageYOffset || document.documentElement.scrollTop || 0;
-                if (scrollY > 15) header.classList.add('scrolled');
-                else header.classList.remove('scrolled');
+            if (header) {
+                function updateHeader() {
+                    const scrollY = window.scrollY || window.pageYOffset || document.documentElement.scrollTop || 0;
+                    if (scrollY > 15) header.classList.add('scrolled');
+                    else header.classList.remove('scrolled');
+                }
+                window.addEventListener('scroll', updateHeader, { passive: true });
+                document.addEventListener('scroll', updateHeader, { passive: true });
+                updateHeader();
             }
-            window.addEventListener('scroll', updateHeader, { passive: true });
-            document.addEventListener('scroll', updateHeader, { passive: true });
-            updateHeader();
+
+            const logoutTrigger = document.getElementById('sv-logout-trigger');
+            const logoutDialog = document.getElementById('sv-logout-dialog');
+            const logoutCancel = document.getElementById('sv-logout-cancel');
+            if (logoutTrigger && logoutDialog) {
+                logoutTrigger.addEventListener('click', function() {
+                    logoutDialog.showModal();
+                });
+                if (logoutCancel) {
+                    logoutCancel.addEventListener('click', function() {
+                        logoutDialog.close();
+                    });
+                }
+                logoutDialog.addEventListener('click', function(e) {
+                    if (e.target === logoutDialog) logoutDialog.close();
+                });
+            }
         })();
     </script>
 </body>

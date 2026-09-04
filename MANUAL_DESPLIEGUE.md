@@ -465,7 +465,73 @@ El panel **Pool vLLM** muestra el estado de LiteLLM, cuántos nodos están sanos
 Desde `/metrics/api-keys/` pulsa el alias para ver serie propia, cuotas, las 50
 últimas peticiones (solo contadores) y la bitácora de auditoría.
 
-### 8.5 Frescura de los datos
+### 8.5 Credenciales (usuarios del clúster)
+
+El tab **Credenciales** (`/metrics/credenciales/`) crea y gestiona los usuarios
+del clúster. Django es la única fuente de identidad de la infraestructura: una
+cuenta creada ahí sirve inmediatamente para el **chat** (Open WebUI la
+auto-aprovisiona vía SSO por cabecera de confianza, ver
+`docker_images/openwebui/README.md`). Los roles son dos checkboxes separados:
+
+| Casilla | Campo | Da acceso a |
+|---|---|---|
+| **Acceso al panel de métricas** | `is_staff` | Panel (métricas + API Keys) |
+| **Administrador** | Group `Administrador` | Todo lo anterior + tab de credenciales + admin de Django (`/admin/`) |
+
+Un administrador exige acceso al panel (lo valida el formulario). Solo el rol
+Administrador ve la tab y alcanza sus endpoints; un usuario de panel que los
+llamara "por API" recibe redirect al dashboard. Reglas de la tabla: paginación
+de 30 en 30, filtros por usuario/correo/nombre y selector de rol, columnas
+ordenables clickeando el encabezado (reordenamiento 100% cliente con JS sobre
+las filas visibles —sin queryparams ni recargas—; el servidor aporta solo el
+orden base: activos, admins, alfabético). **No hay borrado de usuarios**: solo
+deshabilitar (con modal de confirmación) y habilitar de nuevo; las cuentas
+deshabilitadas se listan al final y conservan el botón Habilitar y Modificar.
+La edición va en un modal (usuario y estado no se cambian ahí). Guardrails:
+las cuentas superuser se gestionan solo vía Django admin y nadie puede
+deshabilitarse ni quitarse el rol desde su propia sesión. Validaciones de
+credencial: sin ñ en ningún campo y correo con estructura estricta
+(`nombre@dominio.tld`). El logout está en el header (botón de flecha, arriba a
+la derecha).
+
+### 8.6 Botón de navegación chat ⇆ panel
+
+Ambas interfaces llevan un botón de navegación cruzada (misma forma y
+ubicación, arriba a la derecha). Sus destinos se resuelven así:
+
+| Variable | Interfaz | Default (producción) | Escrita por |
+|---|---|---|---|
+| `CHAT_URL` | Panel → chat | `/` (nginx sirve el chat en la raíz) | GATEWAY_RUN_SCRIPT en cada `sky launch` |
+| `SOONIVERSE_PANEL_URL` | Chat → panel | `/panel/` (env del contenedor open-webui) | GATEWAY_RUN_SCRIPT en cada `sky launch` |
+
+`GATEWAY_RUN_SCRIPT` (`scripts/generate_infra.py`) recalcula ambas en cada
+despliegue a partir del host público vigente (`https://<dominio>` o
+`http://<IP efímera>`), igual que `PUBLIC_BASE_URL` — no hace falta editarlas
+a mano. En desarrollo local (puertos separados) sí se fijan absolutas, ver
+`.env.example`.
+
+### 8.7 Rate limiting
+
+Todas las vistas del panel exigen sesión activa (staff) y están detrás de un
+rate limit por IP (`metrics/ratelimit.py`, ventana fija sobre el cache de
+Django, sin dependencias externas). Límites por defecto —configurables con
+`RATELIMIT_LOGIN`, `RATELIMIT_PAGE`, `RATELIMIT_API`, `RATELIMIT_ACTION` y
+`RATELIMIT_REFRESH` (formato `<N>/<s|m|h>`):
+
+| Grupo | Límite | Aplica a |
+|---|---|---|
+| `login` | 10/min (solo POST) | intentos de login |
+| `page` | 120/min | páginas HTML del panel |
+| `api` | 120/min | JSON que alimenta gráficas |
+| `action` | 30/min | POSTs de mutación (keys, workers, credenciales) |
+| `refresh` | 6/min | ETL manual (caro por diseño) |
+
+`auth-check/` no se limita a propósito: lo consume nginx `auth_request` en cada
+petición del clúster desde una sola IP. Con el LocMemCache por defecto el
+contador es por proceso gunicorn (3 workers ≈ 3× el límite efectivo); si se
+quiere exacto entre procesos, apuntar `CACHES` a Redis.
+
+### 8.8 Frescura de los datos
 
 Las métricas provienen de agregaciones pre-calculadas, no de las tablas en vivo.
 Se refrescan:

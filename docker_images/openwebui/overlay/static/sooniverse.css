@@ -3,12 +3,11 @@
  * ==============================================================================
  * Tokens del Manual de imagen (ver .claude/skills/sooniverse-ui-identity).
  * Servido como estático en /sooniverse.css (SPAStaticFiles de Open WebUI sirve
- * cualquier archivo de FRONTEND_BUILD_DIR). AÚN NO enlazado desde index.html:
- * activarlo requiere un patch sobre el HTML servido, que es alcance de la
- * iteración de re-tematizado visual completo, no de esta (solo funcional).
+ * cualquier archivo de FRONTEND_BUILD_DIR) y enlazado desde index.html por el
+ * Dockerfile (mismo mecanismo sed que el splash SVG).
  *
- * Cuando se enlace: solo redefine custom properties y overrides puntuales con
- * estos tokens. Nunca edites el CSS de Tailwind generado por el build.
+ * Solo redefine custom properties y overrides puntuales con estos tokens.
+ * Nunca edites el CSS de Tailwind generado por el build.
  */
 
 :root {
@@ -27,10 +26,286 @@
   --sv-accent: #7c86ff;
   --sv-accent-hover: #919aff;
   --sv-accent-pressed: #615fff;
+  --sv-accent-soft: rgba(124, 134, 255, 0.14);
+  --sv-accent-border: rgba(124, 134, 255, 0.35);
 
   --sv-positive: #3fb968;
   --sv-warning: #d99a3d;
   --sv-negative: #e0616f;
+  --sv-negative-soft: rgba(224, 97, 111, 0.14);
+  --sv-negative-border: rgba(224, 97, 111, 0.35);
+
+  --sv-radius-sm: 6px;
+  --sv-radius-md: 10px;
+  --sv-text-xs: 11px;
+
+  --sv-shadow-1: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+/* ==============================================================================
+ * Navegación Sooniverse: Grupo de botones Métricas y Logout (overlay/static/sooniverse-nav.js)
+ * Misma geometría y estilo que en el panel de Django (base.html y theme-sooniverse.css).
+ * ============================================================================== */
+.sv-nav-actions {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.sv-nav-actions--float {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 40;
+}
+
+.sv-iconbtn,
+.sv-navbtn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--sv-accent);
+  border-radius: var(--sv-radius-md);
+  background-color: var(--sv-accent-soft);
+  color: var(--sv-accent);
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    box-shadow 160ms ease;
+  padding: 0;
+  text-decoration: none;
+}
+.sv-iconbtn:hover,
+.sv-navbtn:hover {
+  border-color: var(--sv-accent-hover);
+  background-color: var(--sv-accent-hover);
+  color: var(--sv-surface-0);
+  box-shadow: var(--sv-shadow-1);
+}
+.sv-iconbtn:active,
+.sv-navbtn:active {
+  border-color: var(--sv-accent-pressed);
+  background-color: var(--sv-accent-pressed);
+  color: var(--sv-surface-0);
+}
+.sv-iconbtn:focus-visible,
+.sv-navbtn:focus-visible {
+  outline: 2px solid var(--sv-accent-hover);
+  outline-offset: 2px;
+}
+.sv-iconbtn svg,
+.sv-navbtn svg {
+  width: 18px;
+  height: 18px;
+  stroke-width: 1.8;
+}
+
+/* Variante ghost (logout): sobria de base, affordance de peligro en hover */
+.sv-iconbtn--ghost,
+.sv-navbtn--ghost {
+  border-color: var(--sv-border-subtle);
+  background-color: transparent;
+  color: var(--sv-text-secondary);
+  box-shadow: none;
+}
+.sv-iconbtn--ghost:hover,
+.sv-navbtn--ghost:hover {
+  border-color: var(--sv-negative);
+  background-color: var(--sv-negative-soft);
+  color: var(--sv-negative);
+  box-shadow: none;
+}
+.sv-iconbtn--ghost:active,
+.sv-navbtn--ghost:active {
+  border-color: var(--sv-negative);
+  background-color: transparent;
+  color: var(--sv-negative);
+}
+
+/* Tooltip accesible idéntico al panel (.sv-tooltip del tema Sooniverse) */
+.sv-tooltip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.sv-tooltip--nav {
+  margin-left: 0;
+}
+.sv-tooltip__bubble {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  padding: 6px 10px;
+  background-color: var(--sv-surface-3);
+  border: 1px solid var(--sv-border-strong);
+  border-radius: var(--sv-radius-sm);
+  color: var(--sv-text-secondary);
+  font-size: var(--sv-text-xs);
+  line-height: 1.4;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+  transform: translateY(-4px);
+  z-index: 60;
+  box-shadow: var(--sv-shadow-1);
+}
+.sv-tooltip:hover .sv-tooltip__bubble,
+.sv-tooltip:focus-within .sv-tooltip__bubble {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Fallback flotante: tooltip hacia arriba */
+.sv-nav-actions--float .sv-tooltip__bubble {
+  top: auto;
+  bottom: calc(100% + 8px);
+  transform: translateY(4px);
+}
+.sv-nav-actions--float .sv-tooltip:hover .sv-tooltip__bubble,
+.sv-nav-actions--float .sv-tooltip:focus-within .sv-tooltip__bubble {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Diálogo modal de confirmación (logout) */
+.sv-dialog {
+  background-color: var(--sv-surface-3);
+  color: var(--sv-text-primary);
+  border: 1px solid var(--sv-border-strong);
+  border-radius: var(--sv-radius-md);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5);
+  padding: 24px;
+  max-width: 400px;
+  width: calc(100% - 32px);
+  font-family: inherit;
+  margin: auto;
+  text-align: center;
+}
+.sv-dialog::backdrop {
+  background-color: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+}
+.sv-dialog__content {
+  margin: 0;
+  padding: 0;
+  text-align: center;
+}
+.sv-dialog__stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 6px;
+  margin-bottom: 22px;
+}
+.sv-eyebrow {
+  font-size: var(--sv-text-xs);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--sv-accent);
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.sv-dialog__title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--sv-text-primary);
+  text-align: center;
+}
+.sv-dialog__body {
+  font-size: 13px;
+  color: var(--sv-text-secondary);
+  margin: 0;
+  line-height: 1.5;
+  text-align: center;
+}
+.sv-dialog__actions {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+}
+.sv-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 14px;
+  border-radius: var(--sv-radius-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease;
+}
+.sv-btn--sm {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+.sv-btn--ghost {
+  background-color: transparent;
+  border-color: var(--sv-border-subtle);
+  color: var(--sv-text-secondary);
+}
+.sv-btn--ghost:hover {
+  background-color: var(--sv-surface-2);
+  border-color: var(--sv-border-strong);
+  color: var(--sv-text-primary);
+}
+.sv-btn--danger {
+  background-color: var(--sv-negative);
+  color: #ffffff;
+  border-color: transparent;
+}
+.sv-btn--danger:hover {
+  background-color: #c84e5c;
+}
+.sv-btn--danger:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+/* Accesibilidad: movimiento reducido */
+@media (prefers-reduced-motion: reduce) {
+  .sv-iconbtn,
+  .sv-navbtn,
+  .sv-tooltip__bubble,
+  .sv-btn {
+    transition: none !important;
+  }
+}
+
+/* Modo claro del chat (el tema del usuario manda): equivalentes neutros de los
+   tokens que consume el botón. Solo redefinición de tokens, nunca colores sueltos. */
+html:not(.dark) {
+  --sv-surface-0: #ffffff;
+  --sv-border-subtle: rgba(0, 0, 0, 0.1);
+  --sv-border-strong: rgba(0, 0, 0, 0.2);
+  --sv-surface-2: rgba(0, 0, 0, 0.04);
+  --sv-surface-3: rgba(0, 0, 0, 0.08);
+  --sv-text-primary: #1f1f22;
+  --sv-text-secondary: #5c5c63;
+  --sv-accent: #5e69ee;
+  --sv-accent-hover: #4e58db;
+  --sv-accent-pressed: #404ac5;
+  --sv-accent-soft: rgba(94, 105, 238, 0.12);
+  --sv-accent-border: rgba(94, 105, 238, 0.35);
+  --sv-negative-soft: rgba(224, 97, 111, 0.12);
+  --sv-negative-border: rgba(224, 97, 111, 0.3);
 }
 
 /* Optimización para el Splash Screen con SVG Vectorial Animado */

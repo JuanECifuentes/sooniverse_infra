@@ -147,7 +147,8 @@ STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {
         "BACKEND": (
-            "django.contrib.staticfiles.storage.StaticFilesStorage" if DEBUG
+            "django.contrib.staticfiles.storage.StaticFilesStorage"
+            if DEBUG
             else "sooniverse_panel.storage.SooniverseStaticFilesStorage"
         )
     },
@@ -185,6 +186,13 @@ LITELLM_TIMEOUT = int(_env("LITELLM_TIMEOUT", "30"))
 # no dejar la UI con una URL vacía.
 PUBLIC_BASE_URL = (_env("PUBLIC_BASE_URL", "") or LITELLM_BASE_URL).rstrip("/")
 
+# Destino del botón de navegación panel -> chat (templates/metrics/base.html,
+# .sv-iconbtn del header). En producción nginx sirve el chat en la raíz del
+# MISMO origen que el panel ('/'), así que el default relativo basta; en
+# desarrollo local el chat corre en otro puerto (p. ej. http://localhost:8080),
+# ahí se fija CHAT_URL absoluto. Espejo de SOONIVERSE_PANEL_URL en Open WebUI.
+CHAT_URL = _env("CHAT_URL", "/")
+
 # Contexto de tenancy heredado del contrato de infraestructura
 CLIENTE_ID = _env("CLIENTE_ID", "default")
 ENTORNO = _env("ENTORNO", "prod")
@@ -216,6 +224,30 @@ X_FRAME_OPTIONS = "DENY"
 SESSION_COOKIE_HTTPONLY = True
 USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# -----------------------------------------------------------------------------
+# Rate limiting por IP (metrics/ratelimit.py, ventana fija sobre el cache de
+# Django). Blinda los endpoints que extraen información y el login contra
+# automatizaciones. Formato '<N>/<s|m|h>'; clave vacía o ausente = sin límite.
+# Con el LocMemCache por defecto el contador es por proceso gunicorn (3 workers
+# => ~3x el límite efectivo); los defaults ya asumen esa holgura. auth_check NO
+# se limita a propósito: lo consume nginx 'auth_request' en CADA petición del
+# clúster desde una sola IP (la del proxy) y un límite ahí sería un self-DoS.
+# -----------------------------------------------------------------------------
+RATELIMITS = {
+    "login": _env("RATELIMIT_LOGIN", "10/m"),  # intentos de login (POST)
+    "page": _env("RATELIMIT_PAGE", "120/m"),  # páginas HTML del panel
+    "api": _env("RATELIMIT_API", "120/m"),  # JSON que alimenta gráficas
+    "action": _env(
+        "RATELIMIT_ACTION", "30/m"
+    ),  # POSTs de mutación (keys, workers, credenciales)
+    "refresh": _env("RATELIMIT_REFRESH", "6/m"),  # ETL manual (caro por diseño)
+}
+
+# Nombre del Group que marca el rol 'Administrador' (tab de credenciales +
+# admin de Django, ver metrics/credenciales.py). 'Acceso al panel' es is_staff,
+# bandera aparte del propio User -dos checkboxes deliberadamente separados.
+GRUPO_ADMIN_CREDENCIALES = _env("GRUPO_ADMIN_CREDENCIALES", "Administrador")
 
 # Con dominio propio (HTTPS real, ver gateway.dominio en config_global.yaml) las
 # cookies deben marcarse Secure; en dev local (HTTP puro) NO, o el navegador

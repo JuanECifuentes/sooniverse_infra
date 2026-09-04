@@ -66,3 +66,17 @@ def unique_ci(valores):
             continue
         vistos.setdefault(limpio.lower(), limpio)
     return list(vistos.values())
+
+
+@register.filter
+def es_admin_cred(usuario) -> bool:
+    """True si la cuenta tiene el rol Administrador (tab de credenciales).
+    Lo consume credenciales.html para las badges de rol y el atributo
+    data-admin que lee el modal de modificación. Import diferido para no
+    crear dependencias al cargar templatetags."""
+    from ..credenciales import es_admin_credenciales
+
+    try:
+        return es_admin_credenciales(usuario)
+    except Exception:
+        return False
