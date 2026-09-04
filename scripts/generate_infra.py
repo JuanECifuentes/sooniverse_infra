@@ -34,9 +34,23 @@ import sys
 import time
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Con stdout/stderr redirigidos a un archivo (el patrón real de uso: 'nohup
+# ... --run > deploy.log 2>&1 &'), Python usa buffering POR BLOQUE en vez de
+# por línea -confirmado en un despliegue real: los `print()` de ESTE script
+# (p.ej. "[RED] VPC=...", el resumen de la fase 'network') podían quedarse
+# horas en el buffer sin escribirse, mientras que la salida de los
+# subprocesos ('sky launch', etc., que escriben directo al fd heredado, sin
+# pasar por el buffer de Python) sí aparecía de inmediato -dando la
+# impresión, leyendo el log en caliente o después, de que fases enteras se
+# habían saltado o de que el despliegue se había reiniciado solo. Forzar
+# line-buffering aquí hace que el log refleje el orden real en el que
+# ocurrieron las cosas.
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 CLIENT_ID_RE = re.compile(r"^[a-z0-9-]{1,20}$")
 
@@ -61,6 +75,22 @@ CAPACITY_CACHE = ".sooniverse_capacity.json"
 # con hf_cache ya poblado (ver README §9) suele resolverse en el primer intento.
 ENDPOINTS_HEALTH_TIMEOUT_SECONDS = 480
 ENDPOINTS_HEALTH_POLL_INTERVAL_SECONDS = 20
+# `sky launch --retry-until-up` (fase 'workers') no tiene límite propio: sin
+# esto, capacidad GPU que nunca aparece deja el despliegue colgado para
+# siempre. 25 min cubre instancia + descarga de pesos por NAT con margen; con
+# WORKER_LAUNCH_MAX_ATTEMPTS=2 el peor caso total queda acotado en ~50 min +
+# backoff antes de fallar con un error explícito.
+WORKER_LAUNCH_TIMEOUT_SECONDS = 1500
+WORKER_LAUNCH_MAX_ATTEMPTS = 2
+# Mismo problema que WORKER_LAUNCH_TIMEOUT_SECONDS pero en la fase 'gateway':
+# `GATEWAY_SETUP_SCRIPT` corre `apt-get update`/`apt-get install` e imágenes
+# Docker sin ningún timeout propio -confirmado en un despliegue real: un
+# `apt-get update` se quedó colgado indefinidamente esperando un mirror que
+# dejó de responder a medio handshake (ni error ni progreso, solo el proceso
+# vivo para siempre), y sin este límite el 'sky launch' del Gateway -y con él
+# el despliegue completo en modo oneshot- se hubiera quedado pegado para
+# siempre en esa fase.
+GATEWAY_LAUNCH_TIMEOUT_SECONDS = 900
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config_global.yaml"
 
 # Planificador de vLLM. El default histórico de docker_images/qwen3.5/entrypoint.sh
@@ -692,11 +722,47 @@ class ConfigValidator:
 # =============================================================================
 # SCRIPTS REMOTOS
 # =============================================================================
-GPU_SETUP_SCRIPT = """
+# El mirror regional de Ubuntu para instancias EC2 (*.ec2.ports.ubuntu.com /
+# *.ec2.archive.ubuntu.com) devuelve 503 en ráfagas -confirmado en despliegues
+# reales: la MISMA cola de paquetes (típicamente los últimos de una
+# transacción larga) falla con 503 en mirrors con IPs distintas, de forma
+# repetible entre instancias completamente nuevas. Sin retry AQUÍ, la única
+# recuperación era destruir y re-crear la instancia entera (varios minutos)
+# solo para repetir el mismo 'apt-get' -este helper reintenta la operación
+# apt en el sitio (segundos), acotado a APT_RETRY_MAX_ATTEMPTS.
+APT_RETRY_BASH_FN = """
+apt_retry() {{
+    local n=1
+    local max=5
+    until sudo apt-get "$@"; do
+        if [ "$n" -ge "$max" ]; then
+            echo "[ERROR] 'apt-get $*' falló tras $max intentos (mirror caído de forma persistente)." >&2
+            return 1
+        fi
+        echo "[WARNING] 'apt-get $*' falló (intento $n/$max); reintentando en 15s..."
+        sleep 15
+        n=$((n + 1))
+    done
+}}
+
+# El mirror regional EC2 de Ubuntu (el que la AMI trae por defecto para
+# jammy/jammy-updates/jammy-backports) devolvió 503 de forma sostenida
+# durante varios despliegues reales seguidos -tanto en Gateway (ARM,
+# 'us-east-1.ec2.ports.ubuntu.com') como en workers (x86_64,
+# 'us-east-1.ec2.archive.ubuntu.com')-. En la MISMA corrida, 'jammy-security'
+# (que la AMI ya apunta al mirror global correspondiente) sí respondía bien.
+# Repuntar TODO al mirror global elimina el punto de falla en vez de solo
+# reintentarlo. Los dos sed son inofensivos si su patrón no aparece (arch
+# equivocada para esa instancia).
+sudo sed -i 's|http://us-east-1\\.ec2\\.ports\\.ubuntu\\.com/ubuntu-ports/|http://ports.ubuntu.com/ubuntu-ports/|g' /etc/apt/sources.list
+sudo sed -i 's|http://us-east-1\\.ec2\\.archive\\.ubuntu\\.com/ubuntu/|http://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list
+"""
+
+GPU_SETUP_SCRIPT = APT_RETRY_BASH_FN + """
 set -euo pipefail
 
 # A. Dependencias esenciales, driver estable y utilidad modprobe
-sudo apt-get update && sudo apt-get install -y ubuntu-drivers-common build-essential \
+apt_retry update && apt_retry install -y ubuntu-drivers-common build-essential \
   nvidia-driver-550-server nvidia-utils-550-server nvidia-modprobe
 
 # B. Carga manual de módulos en caliente (evita reinicio de la instancia)
@@ -716,8 +782,7 @@ curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --yes 
 curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
   sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
   sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-sudo apt-get update
-sudo apt-get install -y nvidia-container-toolkit
+apt_retry update && apt_retry install -y nvidia-container-toolkit
 
 # E. Runtime NVIDIA por defecto en Docker
 sudo nvidia-ctk runtime configure --runtime=docker
@@ -763,12 +828,11 @@ fi
 echo "===> Worker listo en ${{SELF_IP}}:{puerto}"
 """
 
-GATEWAY_SETUP_SCRIPT = """
+GATEWAY_SETUP_SCRIPT = APT_RETRY_BASH_FN + """
 set -euo pipefail
 
 # A. Dependencias base (sin GPU: el Gateway es CPU-only)
-sudo apt-get update
-sudo apt-get install -y curl jq python3-pip postgresql-client
+apt_retry update && apt_retry install -y curl jq python3-pip postgresql-client
 
 # B. Docker Engine + Compose plugin
 if ! command -v docker &> /dev/null; then
@@ -1820,7 +1884,11 @@ def _sky_binary() -> Optional[str]:
     return shutil.which("sky")
 
 
-def _run_sky(args: List[str], env: Optional[Dict[str, str]] = None) -> None:
+def _run_sky(
+    args: List[str],
+    env: Optional[Dict[str, str]] = None,
+    timeout: Optional[int] = None,
+) -> None:
     sky = _sky_binary()
     if not sky:
         raise RuntimeError(
@@ -1829,7 +1897,7 @@ def _run_sky(args: List[str], env: Optional[Dict[str, str]] = None) -> None:
     cmd = [sky] + args
     print(f"[EXEC] {' '.join(cmd)}")
     merged_env = {**os.environ, **(env or {})}
-    subprocess.run(cmd, check=True, env=merged_env)
+    subprocess.run(cmd, check=True, env=merged_env, timeout=timeout)
 
 
 def _run_sky_with_retry(
@@ -1837,6 +1905,8 @@ def _run_sky_with_retry(
     env: Optional[Dict[str, str]] = None,
     max_attempts: int = 3,
     backoff_seconds: Sequence[int] = (30, 90),
+    timeout: Optional[int] = None,
+    before_attempt: Optional[Callable[[int], None]] = None,
 ) -> None:
     """Como `_run_sky()`, pero reintenta ante fallos TRANSITORIOS de
     'sky launch' -confirmado en un despliegue real: un 503 del mirror ARM de
@@ -1846,19 +1916,35 @@ def _run_sky_with_retry(
     idempotentes por diseño de SkyPilot. No distingue el tipo de fallo (no
     hay una señal fiable en el `returncode`/stderr de `sky launch` para
     separar "mirror caído" de "el contrato está mal"), así que el último
-    intento SÍ propaga la excepción para que el operador vea el error real."""
+    intento SÍ propaga la excepción para que el operador vea el error real.
+
+    `before_attempt(attempt)`, si se pasa, se invoca ANTES de cada intento
+    (incluido el primero) -confirmado en un despliegue real: un primer intento
+    que falla DESPUÉS de que el `run:` reescribiera `.env` como archivo real
+    (ver `_preclean_stale_file_mounts`) deja el 2º intento fallando con
+    'Failed mounting because path exists', un error de mount distinto del que
+    causó el primer fallo y que por sí solo no se resuelve reintentando -sin
+    este hook, los reintentos automáticos no podían recuperarse nunca de esa
+    situación."""
     last_exc: Optional[BaseException] = None
     for attempt in range(1, max_attempts + 1):
+        if before_attempt is not None:
+            before_attempt(attempt)
         try:
-            _run_sky(args, env=env)
+            _run_sky(args, env=env, timeout=timeout)
             return
-        except (subprocess.CalledProcessError, RuntimeError) as exc:
+        except (subprocess.CalledProcessError, RuntimeError, subprocess.TimeoutExpired) as exc:
             last_exc = exc
             if attempt == max_attempts:
                 break
             wait = backoff_seconds[min(attempt - 1, len(backoff_seconds) - 1)]
+            motivo = (
+                f"excedió el límite de {timeout}s"
+                if isinstance(exc, subprocess.TimeoutExpired)
+                else str(exc)
+            )
             print(
-                f"[WARNING] 'sky {' '.join(args)}' falló (intento {attempt}/{max_attempts}): {exc}"
+                f"[WARNING] 'sky {' '.join(args)}' falló (intento {attempt}/{max_attempts}): {motivo}"
             )
             print(
                 f"[REINTENTO] Esperando {wait}s (suele ser un mirror de paquetes caído o "
@@ -1868,6 +1954,35 @@ def _run_sky_with_retry(
     raise RuntimeError(
         f"'sky {' '.join(args)}' falló tras {max_attempts} intento(s): {last_exc}"
     ) from last_exc
+
+
+def _sky_down_bounded(
+    cluster: str, aws_profile: Optional[str] = None, timeout: int = 120
+) -> None:
+    """`sky down -y <cluster>`, best-effort y acotado. Se usa para recuperarse
+    de un intento anterior matado por `timeout=` en `_run_sky_with_retry()`
+    (p.ej. un `apt-get update` colgado en el `setup:` del Gateway): matar el
+    proceso local de `sky launch` deja la instancia remota viva con lo que
+    sea que tenía a medio terminar -incluido el lock de apt/dpkg que el
+    siguiente intento necesitaría-, así que antes de reintentar es más fiable
+    destruir la instancia y dejar que `sky launch` la recree desde cero que
+    confiar en que el setup a medio camino sea retomable. Nunca lanza: si el
+    clúster ya no existe o `sky down` en sí se cuelga, el llamador sigue con
+    `_preclean_stale_file_mounts()` + un `sky launch` normal, que crea el
+    clúster si hace falta."""
+    sky = _sky_binary()
+    if not sky:
+        return
+    try:
+        subprocess.run(
+            [sky, "down", "-y", cluster],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=_sky_env(aws_profile),
+        )
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        pass
 
 
 def _preclean_stale_file_mounts(
@@ -1983,6 +2098,25 @@ def _ensure_db_schema(config: Dict[str, Any], dry_run: bool = False) -> None:
             "esquema 'sooniverse'); corre 'python scripts/db_setup.py' a mano para ver el error completo."
         ) from exc
     print("[BD] Esquema 'sooniverse' listo.")
+
+
+def _upsert_local_env_vars(env_path: Path, values: Dict[str, str]) -> None:
+    """Reemplaza (o añade si no existía) cada `CLAVE=...` en el `.env` LOCAL
+    del operador -a diferencia del resto de mutaciones de `.env` en este
+    archivo (todas remotas, vía heredoc en el Gateway), esta corre en la
+    máquina que ejecuta `--run`, antes de que ese `.env` se sincronice al
+    Gateway por `file_mounts` en el próximo `sky launch`."""
+    if not env_path.exists():
+        env_path.write_text("", encoding="utf-8")
+    lineas = env_path.read_text(encoding="utf-8").splitlines()
+    pendientes = dict(values)
+    for i, linea in enumerate(lineas):
+        for clave in list(pendientes):
+            if linea.startswith(f"{clave}="):
+                lineas[i] = f"{clave}={pendientes.pop(clave)}"
+                break
+    lineas.extend(f"{clave}={valor}" for clave, valor in pendientes.items())
+    env_path.write_text("\n".join(lineas) + "\n", encoding="utf-8")
 
 
 def _sky_env(aws_profile: Optional[str] = None) -> Optional[Dict[str, str]]:
@@ -2186,8 +2320,29 @@ def _associate_gateway_eip(
         # con ClusterNotUpError (status: INIT) justo después de un 'sky start'
         # que había devuelto returncode 0. Unos pocos reintentos cortos
         # absorben esa ventana sin necesitar intervención manual.
+        #
+        # EIP_RECONCILE_MAX_ATTEMPTS a 10 (antes 3, luego 8): confirmado en
+        # despliegues reales repetidos que la ventana de reconciliación tras
+        # reasignar la EIP a una instancia recién creada puede superar
+        # incluso 120s (8×15s) -el propio Gateway ya respondía 200 en
+        # /healthz sobre la EIP nueva mientras SkyPilot seguía reportando
+        # 'status: INIT'. Cada 3 intentos se repite 'sky start -y' (lo único
+        # que el docstring de esta función confirma que SÍ fuerza a SkyPilot
+        # a adoptar la IP nueva; un 'sky exec' repetido solo,  sin re-lanzar
+        # 'sky start', no reintenta la reconciliación en sí).
+        EIP_RECONCILE_MAX_ATTEMPTS = 10
+        EIP_RECONCILE_POLL_SECONDS = 15
+        EIP_RESTART_EVERY = 3
         last_check: Optional[subprocess.CompletedProcess] = None
-        for attempt in range(1, 4):
+        for attempt in range(1, EIP_RECONCILE_MAX_ATTEMPTS + 1):
+            if attempt > 1 and (attempt - 1) % EIP_RESTART_EVERY == 0:
+                subprocess.run(
+                    [sky, "start", "-y", cluster],
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                    env=sky_env,
+                )
             last_check = subprocess.run(
                 [sky, "exec", cluster, "true"],
                 capture_output=True,
@@ -2197,12 +2352,23 @@ def _associate_gateway_eip(
             )
             if last_check.returncode == 0:
                 break
-            if attempt < 3:
-                time.sleep(15)
+            if attempt < EIP_RECONCILE_MAX_ATTEMPTS:
+                time.sleep(EIP_RECONCILE_POLL_SECONDS)
         if last_check is not None and last_check.returncode != 0:
-            raise GatewayEipAssociationError(
-                f"La Elastic IP se asoció ({new_ip}) pero 'sky exec {cluster} true' siguió fallando "
-                f"tras 3 intentos: {last_check.stderr.strip() or last_check.stdout.strip()}"
+            # Degradado a advertencia, no aborto: en TODOS los despliegues
+            # reales donde esto se disparó, el Gateway ya respondía 200 en
+            # /healthz sobre 'new_ip' -el problema es el caché de estado de
+            # SkyPilot, no la infraestructura real. Abortar aquí tiraba a la
+            # basura una VPC/NAT/Gateway ya funcionando por un chequeo que ni
+            # siquiera refleja el estado real. Las fases siguientes que
+            # dependen de 'sky exec' (endpoints/capabilities/capacidad/verify)
+            # ya son best-effort por su cuenta y seguirán reintentando con más
+            # tiempo transcurrido a favor de la reconciliación.
+            print(
+                f"[WARNING] La Elastic IP se asoció ({new_ip}) pero 'sky exec {cluster} true' "
+                f"siguió fallando tras {EIP_RECONCILE_MAX_ATTEMPTS} intento(s) (probable caché de "
+                f"estado de SkyPilot, no una falla real -el Gateway suele responder ya en /healthz). "
+                f"Continuando: {last_check.stderr.strip() or last_check.stdout.strip()}"
             )
 
     return new_ip
@@ -2582,6 +2748,41 @@ def deploy(
 
                 # El render de manifiestos depende de los IDs reales de red: regenerarlos ahora.
                 artefactos = generate_manifests(config, out_dir, builder=builder)
+
+                # Usuario IAM SEPARADO del despliegue, solo start/stop/describe
+                # sobre los workers de este cliente/entorno -ver el docstring
+                # de aws_iam_worker_control.py para el porqué. Best-effort:
+                # nunca aborta el despliegue si las credenciales de ESTE
+                # despliegue no tienen permiso IAM para crearlo.
+                try:
+                    from aws_iam_worker_control import ensure_worker_control_user
+
+                    env_path = REPO_ROOT / ".env"
+                    tags_ob = red.get("tags_obligatorios", {}) or {}
+                    existing_key_id = None
+                    if env_path.exists():
+                        for linea in env_path.read_text(encoding="utf-8").splitlines():
+                            if linea.startswith("AWS_ACCESS_KEY_ID="):
+                                existing_key_id = linea.split("=", 1)[1].strip() or None
+                    nuevas_credenciales = ensure_worker_control_user(
+                        mgr.session,
+                        red["region"],
+                        cliente_id=tags_ob.get("cliente_id", config["cliente"]["id"]),
+                        entorno=tags_ob.get("entorno", config["cliente"]["entorno"]),
+                        deployment_id=deployment_id,
+                        existing_access_key_id=existing_key_id,
+                    )
+                    if nuevas_credenciales:
+                        _upsert_local_env_vars(env_path, nuevas_credenciales)
+                        print(
+                            "[IAM] Credenciales del usuario de control de workers guardadas en .env "
+                            "(se sincronizan al Gateway en el próximo 'sky launch')."
+                        )
+                except Exception as exc:  # noqa: BLE001 - best-effort, igual que 'dominio'/'capacidad'
+                    print(
+                        f"[WARNING] No se pudo aprovisionar el usuario IAM de control de workers: {exc}. "
+                        "El botón 'Apagar'/'Arrancar' del panel quedará deshabilitado."
+                    )
         else:
             print(
                 "[SKIP] 'gestion_red: existente' -> se omite AwsNetworkManager (VPC/SGs manuales)."
@@ -2625,16 +2826,33 @@ def deploy(
             # aws_profile).
             gateway_env["AWS_PROFILE"] = red["aws_profile"]
 
-        # Best-effort: si el clúster ya corrió antes (retomar una '--run'
-        # completa, o repetir solo esta fase), deja sus file_mounts de un
-        # solo archivo listos para un símlink limpio -ver el docstring de la
-        # función para el bug real que evita.
-        _preclean_stale_file_mounts(builder.gateway_cluster, red.get("aws_profile"))
+        # Best-effort, ANTES DE CADA INTENTO (incluidos los reintentos
+        # automáticos): si el clúster ya corrió antes (retomar una '--run'
+        # completa, repetir solo esta fase, o un intento previo DENTRO de esta
+        # misma llamada que falló después de que 'run:' reescribiera '.env'
+        # como archivo real), deja sus file_mounts de un solo archivo listos
+        # para un símlink limpio -ver el docstring de la función para el bug
+        # real que evita, y el de `_run_sky_with_retry` para por qué un solo
+        # precleaning antes del primer intento no bastaba.
+        def _before_gateway_attempt(attempt: int) -> None:
+            if attempt > 1:
+                # Reintento tras un fallo (incluido un timeout que mató el
+                # 'sky launch' local con la instancia a medio 'setup:'):
+                # destruir y dejar que se recree evita heredar un lock de
+                # apt/dpkg u otro estado a medio camino de un intento previo.
+                print(
+                    f"[GATEWAY] Recreando '{builder.gateway_cluster}' antes del "
+                    f"intento {attempt} (evita heredar estado a medio camino)..."
+                )
+                _sky_down_bounded(builder.gateway_cluster, red.get("aws_profile"))
+            _preclean_stale_file_mounts(builder.gateway_cluster, red.get("aws_profile"))
 
         t0 = time.monotonic()
         _run_sky_with_retry(
             ["launch", "-y", "-c", builder.gateway_cluster, str(artefactos["gateway"])],
             env=gateway_env,
+            timeout=GATEWAY_LAUNCH_TIMEOUT_SECONDS,
+            before_attempt=_before_gateway_attempt,
         )
         if state and deployment_id:
             state.log_event(
@@ -2749,9 +2967,19 @@ def deploy(
             # solo existe en una, y SkyPilot está anclado a ella por
             # `use_internal_ips`. Si esto se vuelve crónico, la salida es subir
             # `red_y_aislamiento.azs`.
+            #
+            # `--retry-until-up` por sí solo NO tiene límite de tiempo: si la
+            # capacidad GPU nunca aparece, se queda reintentando para siempre y
+            # el despliegue completo ('--run' en un solo intento, oneshot)
+            # nunca termina. `timeout=` en `_run_sky_with_retry()` mata ese
+            # proceso a los WORKER_LAUNCH_TIMEOUT_SECONDS y lo cuenta como un
+            # intento fallido más (máximo WORKER_LAUNCH_MAX_ATTEMPTS en total),
+            # así que el peor caso queda acotado en vez de indefinido.
             _run_sky_with_retry(
                 ["launch", "-y", "--retry-until-up", "-c", cluster, str(manifest)],
                 env=worker_env,
+                max_attempts=WORKER_LAUNCH_MAX_ATTEMPTS,
+                timeout=WORKER_LAUNCH_TIMEOUT_SECONDS,
             )
             if state and deployment_id:
                 state.log_event(

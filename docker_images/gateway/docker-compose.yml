@@ -134,6 +134,10 @@ services:
       WEBUI_AUTH_TRUSTED_EMAIL_HEADER: X-Sooniverse-Email
       WEBUI_AUTH_TRUSTED_NAME_HEADER: X-Sooniverse-Name
       ENABLE_LOGIN_FORM: "False"
+      # Destino del botón de navegación chat -> panel (overlay sooniverse-nav.js;
+      # entrypoint.sh lo escribe en sooniverse-nav-config.js en cada arranque).
+      # Default: nginx sirve el panel bajo /panel/ en el mismo origen que el chat.
+      SOONIVERSE_PANEL_URL: ${SOONIVERSE_PANEL_URL:-/panel/}
       # Persistencia relacional en el MISMO esquema que LiteLLM y Django (ver
       # docs/03_ESTADO_Y_BD.md). 'webui_data' se mantiene: ficheros subidos y
       # el vector store local (Chroma) no son relacionales y siguen en disco.
@@ -243,12 +247,23 @@ services:
       # apuntar sus llamadas a la API (panel /apikeys/, cabecera del panel),
       # nunca para las llamadas internas de litellm_client.py.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      # Destino del botón de navegación panel -> chat (base.html .sv-iconbtn).
+      # Default: nginx sirve el chat en la raíz del mismo origen que el panel.
+      CHAT_URL: ${CHAT_URL:-/}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-sooniverse-master-change-me}
       CLIENTE_ID: ${CLIENTE_ID:-default}
       ENTORNO: ${ENTORNO:-prod}
       # Región AWS del despliegue -la usan las acciones de worker (apagar/
       # arrancar la instancia EC2 desde la card Pool vLLM, metrics/workers.py).
       AWS_REGION: us-east-1
+      # Credenciales del usuario IAM DEDICADO a apagar/arrancar workers
+      # (scripts/aws_iam_worker_control.py, aprovisionado en la fase 'network'
+      # si el despliegue tuvo permiso IAM para crearlo) -NUNCA las del
+      # despliegue automático. Vacías -> metrics/workers.py::ec2_disponible()
+      # falla en fail-closed y el panel oculta "Apagar"/"Arrancar" en vez de
+      # fallar al pulsarlos.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       # TIENE que ser la misma zona con la que scripts/db_setup.py corta los
       # buckets (sooniverse.app_setting.reporting_timezone). Si el panel
       # renderiza en una zona y la agregación se hizo en otra, los días salen
