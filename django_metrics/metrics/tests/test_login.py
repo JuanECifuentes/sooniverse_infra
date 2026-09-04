@@ -17,6 +17,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.db.models import Q
 from django.test import RequestFactory, SimpleTestCase, override_settings
+from django.urls import reverse
 
 from metrics import views
 from metrics.auth_backends import UsernameOrEmailBackend
@@ -174,21 +175,35 @@ class LoginViewTests(SimpleTestCase):
             resp = views.login_view(req)
         self.assertEqual(resp.url, "/panel/metrics/api-keys/")
 
+    def test_next_inseguro_redirige_al_dashboard(self):
+        user = _fake_user()
+        req = _request(
+            identificador="operador",
+            password="clave-correcta",
+            next="https://attacker.com/steal-session",
+        )
+        with (
+            patch("metrics.views.authenticate", return_value=user),
+            patch("metrics.views.auth_login"),
+        ):
+            resp = views.login_view(req)
+        self.assertEqual(resp.url, reverse("metrics:dashboard"))
+
 
 class LogoutViewTests(SimpleTestCase):
     def test_logout_cierra_sesion_y_redirige_al_login(self):
-        req = _request(user=_fake_user())
+        req = _request("post", path="/panel/metrics/logout/", user=_fake_user())
         with patch("metrics.views.auth_logout") as logout_fn:
             resp = views.logout_view(req)
         logout_fn.assert_called_once_with(req)
         self.assertEqual(resp.status_code, 302)
 
-    def test_logout_get_tambien_cierra_sesion_y_redirige(self):
-        req = _request("get", user=_fake_user())
+    def test_logout_get_es_rechazado_con_405(self):
+        req = _request("get", path="/panel/metrics/logout/", user=_fake_user())
         with patch("metrics.views.auth_logout") as logout_fn:
             resp = views.logout_view(req)
-        logout_fn.assert_called_once_with(req)
-        self.assertEqual(resp.status_code, 302)
+        logout_fn.assert_not_called()
+        self.assertEqual(resp.status_code, 405)
 
 
 class AuthCheckTests(SimpleTestCase):
