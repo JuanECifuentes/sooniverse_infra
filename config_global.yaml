@@ -8,7 +8,7 @@
 cliente:
   id: "acme"                  # Identificador único del cliente (ej. acme, globex)
   entorno: "prod"             # Propósito de la infraestructura: prod | dev
-  modo: "byoc"                # Modalidad de despliegue: byoc (Bring Your Own Cloud) | hosted
+  modo: "hosted"               # Modalidad de despliegue: byoc (Bring Your Own Cloud) | hosted
 
 # 2. Variables de Red y Aislamiento
 red_y_aislamiento:
@@ -50,7 +50,7 @@ red_y_aislamiento:
   security_group_gateway: null
   tags_obligatorios:
     cliente_id: "acme"
-    modo: "byoc"
+    modo: "hosted"
     entorno: "prod"
     gestionado_por: "sooniverse"
 

@@ -69,6 +69,15 @@ def unique_ci(valores):
 
 
 @register.filter
+def friendly_key_alias(alias):
+    """Ver `metrics.models.friendly_key_alias` (misma lógica, expuesta como
+    filtro para las plantillas)."""
+    from ..models import friendly_key_alias as _friendly_key_alias
+
+    return _friendly_key_alias(alias)
+
+
+@register.filter
 def es_admin_cred(usuario) -> bool:
     """True si la cuenta tiene el rol Administrador (tab de credenciales).
     Lo consume credenciales.html para las badges de rol y el atributo

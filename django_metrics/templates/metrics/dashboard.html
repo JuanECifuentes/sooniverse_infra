@@ -357,7 +357,7 @@
                 {% if not pool.restart_disponible or not pool.ec2_disponible %}
                     <p class="sv-help l-mb-md">
                         {% if not pool.restart_disponible %}"Reiniciar" no está disponible: falta la clave SSH del bastion en este despliegue.{% endif %}
-                        {% if not pool.ec2_disponible %}"Apagar"/"Arrancar" no están disponibles: falta boto3 en este despliegue.{% endif %}
+                        {% if not pool.ec2_disponible %}"Apagar"/"Arrancar" no están disponibles: las credenciales AWS de este despliegue no tienen permiso para apagar/arrancar instancias EC2 (o no están configuradas).{% endif %}
                     </p>
                 {% endif %}
 
@@ -399,24 +399,24 @@
                                     <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm"
                                             {% if not pool.restart_disponible %}disabled{% endif %}>Reiniciar</button>
                                 </form>
-                                {% if nodo.estado_operativo == 'apagado' %}
-                                    <form method="post" action="{% url 'metrics:worker_accion' nodo.id 'start' %}"
-                                          class="l-inline-form" data-spinner-submit>
-                                        {% csrf_token %}
-                                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
-                                        <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm"
-                                                data-loading-text="Arrancando…"
-                                                {% if not pool.ec2_disponible %}disabled{% endif %}>Arrancar</button>
-                                    </form>
-                                {% else %}
-                                    <form method="post" action="{% url 'metrics:worker_accion' nodo.id 'stop' %}"
-                                          class="l-inline-form"
-                                          data-worker-confirm="¿Apagar la instancia de {{ nodo.private_ip }}? Dejará de facturar cómputo hasta que la arranques de nuevo.">
-                                        {% csrf_token %}
-                                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
-                                        <button type="submit" class="sv-btn sv-btn--danger sv-btn--sm"
-                                                {% if not pool.ec2_disponible %}disabled{% endif %}>Apagar</button>
-                                    </form>
+                                {% if pool.ec2_disponible %}
+                                    {% if nodo.estado_operativo == 'apagado' %}
+                                        <form method="post" action="{% url 'metrics:worker_accion' nodo.id 'start' %}"
+                                              class="l-inline-form" data-spinner-submit>
+                                            {% csrf_token %}
+                                            <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                            <button type="submit" class="sv-btn sv-btn--secondary sv-btn--sm"
+                                                    data-loading-text="Arrancando…">Arrancar</button>
+                                        </form>
+                                    {% else %}
+                                        <form method="post" action="{% url 'metrics:worker_accion' nodo.id 'stop' %}"
+                                              class="l-inline-form"
+                                              data-worker-confirm="¿Apagar la instancia de {{ nodo.private_ip }}? Dejará de facturar cómputo hasta que la arranques de nuevo.">
+                                            {% csrf_token %}
+                                            <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                            <button type="submit" class="sv-btn sv-btn--danger sv-btn--sm">Apagar</button>
+                                        </form>
+                                    {% endif %}
                                 {% endif %}
                             </div>
                         </div>
@@ -513,7 +513,7 @@
                             {% for fila in metricas.por_api_key %}
                                 <tr>
                                     <td>
-                                        <span class="sv-strong">{{ fila.api_key__key_alias|default:"(sin registro)" }}</span>
+                                        <span class="sv-strong">{{ fila.api_key__key_alias|friendly_key_alias|default:"(sin registro)" }}</span>
                                         {% if fila.api_key__is_active is False %}
                                             <span class="sv-badge sv-badge--muted">inactiva</span>
                                         {% endif %}
@@ -568,7 +568,7 @@
                                     <td data-label="Entrada" class="sv-num">{{ p.prompt_tokens|human_tokens }}</td>
                                     <td data-label="Salida" class="sv-num">{{ p.completion_tokens|human_tokens }}</td>
                                     <td data-label="Api Key">
-                                        <span class="sv-mono">{{ p.api_key.key_alias|default:"(sin registro)" }}</span>
+                                        <span class="sv-mono">{{ p.api_key.key_alias|friendly_key_alias|default:"(sin registro)" }}</span>
                                         <button type="button" class="l-copy-btn" data-copy="{{ p.api_key.key_alias|default:'' }}" aria-label="Copiar API Key">⧉</button>
                                     </td>
                                 </tr>

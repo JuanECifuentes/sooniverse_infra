@@ -28,6 +28,11 @@ Para desplegar con un dominio propio y HTTPS (certbot/Let's Encrypt) en vez de
 la IP efímera por defecto, ver **[`Manual_Dominio_AWS.md`](Manual_Dominio_AWS.md)**
 — el único paso manual que exige es crear el registro DNS A antes de desplegar.
 
+Si el usuario con el que despliegas no tiene permisos IAM para que
+`--run` cree solo el usuario dedicado a Apagar/Arrancar workers desde el
+panel, ver **[`Manual_Usuario_IAM_Workers.md`](Manual_Usuario_IAM_Workers.md)**
+para crearlo a mano desde la consola AWS.
+
 ### 1.1 Topología de red
 
 ```

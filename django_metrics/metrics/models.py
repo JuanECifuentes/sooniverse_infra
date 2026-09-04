@@ -13,6 +13,20 @@ tokens, timestamps e identificadores de API Key.
 from django.contrib.postgres.fields import ArrayField
 from django.db import models
 
+# Alias que scripts/ensure_openwebui_key.py fija para la key virtual dedicada
+# de la interfaz de chat ('sooniverse-openwebui-<cliente>-<entorno>'). Un
+# usuario de negocio leyendo el panel no debe ver ese nombre técnico -ni,
+# peor, "(sin registro)" para tráfico que SÍ está identificado.
+OPENWEBUI_KEY_ALIAS_PREFIX = "sooniverse-openwebui-"
+
+
+def friendly_key_alias(alias):
+    """Traduce el alias técnico de la key de Open WebUI a una etiqueta legible.
+    Cualquier otro alias (o None/"") pasa sin cambios."""
+    if alias and alias.startswith(OPENWEBUI_KEY_ALIAS_PREFIX):
+        return "Interfaz Chat"
+    return alias
+
 
 class ApiKeyRegistry(models.Model):
     """Registro administrativo de API Keys (espejo de LiteLLM + metadatos de negocio)."""

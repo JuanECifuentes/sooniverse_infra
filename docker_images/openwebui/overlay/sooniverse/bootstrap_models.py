@@ -219,9 +219,18 @@ def ensure_bootstrap_is_admin() -> bool:
         print(f"[WARNING] No se pudo conectar a PostgreSQL para verificar el rol de la cuenta técnica: {exc}")
         return False
 
+    # Open WebUI vive en el esquema DATABASE_SCHEMA (ver docker-compose.yml:
+    # 'sooniverse', no 'public') -confirmado en un despliegue real: sin fijar
+    # el search_path aquí, esta conexión psycopg2 (sin el 'options=-csearch_path'
+    # que sí lleva el DATABASE_URL de Open WebUI) mira 'public.user', que no
+    # existe, y la promoción falla siempre con 'relation "user" does not
+    # exist' -dejando a la cuenta técnica sin admin para siempre si un humano
+    # ganó la carrera del primer login (ver docstring de la función).
+    schema = os.environ.get("DATABASE_SCHEMA", "public")
     try:
         with conn:
             with conn.cursor() as cur:
+                cur.execute(f'SET search_path TO "{schema}", public')
                 cur.execute(
                     'UPDATE "user" SET role = %s WHERE email = %s AND role <> %s',
                     ("admin", BOOTSTRAP_EMAIL, "admin"),
