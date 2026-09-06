@@ -1,0 +1,64 @@
+# Worker vLLM para cyankiwi/Qwen3.8-27B-AWQ-INT4 (arquitectura qwen3_5,
+# vision-language, cuantizado compressed-tensors W4A16).
+#
+# Mismo patron que docker_images/qwen3.5/docker-compose.yml. Puertos asignados:
+# qwen3.5 = 8007, nemotron = 8008, qwen3.8 = 8009 (solo red interna en AWS).
+#
+# Defaults calibrados para UNA L4 (24 GB) con este checkpoint:
+#  - Pesos: 27B a 4 bits ~15-16 GB (incluye torre de vision y embeddings en
+#    fp16: el cuantizado ignora visual/MTP/lm_head, ver quantization_config).
+#  - KV cache: la arquitectura es hibrida (solo 16 de 64 capas son
+#    full_attention, intervalo 4). Coste por token: 16 capas * 2 (K,V) *
+#    4 kv_heads * 256 head_dim * 2 B (fp16) = 64 KB/token => 1 GB por
+#    secuencia a 16k de contexto. 4 secuencias => 4 GB.
+#  - Presupuesto: 24 GB * 0.92 = 22.1 GB; 16 + 4 (KV) + ~1 (activaciones/MTP)
+#    = ~21 GB. Si config_global.yaml pide mas concurrencia, bajar
+#    MAX_MODEL_LEN o KV_CACHE_DTYPE=fp8 (L4: sin ganancia, evaluar).
+#
+# Cuantizacion auto-detectada por vLLM (compressed-tensors); no hace falta
+# QUANTIZATION=awq.
+services:
+  vllm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sooniverse/vllm-qwen3.8:v1.0.0
+    container_name: vllm-qwen3.8
+    runtime: nvidia
+    environment:
+      - MODEL_NAME=${MODEL_NAME:-cyankiwi/Qwen3.8-27B-AWQ-INT4}
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
+      - MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-8192}
+      - GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.92}
+      # Peticiones concurrentes por worker. Con 1 GB de KV por secuencia a
+      # 16k, 4 es lo que cabe en una L4 con margen (ver cabecera).
+      - MAX_NUM_SEQS=${MAX_NUM_SEQS:-4}
+      - ENFORCE_EAGER=${ENFORCE_EAGER:-1}
+      - DTYPE=${DTYPE:-half}
+      - KV_CACHE_DTYPE=${KV_CACHE_DTYPE:-auto}
+      - TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-1}
+      - QUANTIZATION=${QUANTIZATION:-}
+      - ENABLE_VISION=${ENABLE_VISION:-1}
+      - ENABLE_TOOL_CALLING=${ENABLE_TOOL_CALLING:-0}
+      - TOOL_CALL_PARSER=${TOOL_CALL_PARSER:-}
+      - CUDA_MODULE_LOADING=LAZY
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - VLLM_ATTENTION_BACKEND=FLASH_ATTN
+      - VLLM_USE_FLASHINFER_SAMPLER=0
+      - VLLM_MM_INPUT_CACHE_GIB=8
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - VLLM_IMAGE_FETCH_TIMEOUT=30
+      - PYTHONUNBUFFERED=1
+      - HF_HOME=/root/.cache/huggingface
+    ports:
+      - "8009:8009"
+    volumes:
+      - ./hf_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
