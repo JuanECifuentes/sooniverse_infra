@@ -1,0 +1,59 @@
+# Worker vLLM para NVIDIA-Nemotron-Nano-9B-v2 (arquitectura hibrida
+# Mamba2-Transformer, solo texto, 128K de contexto).
+#
+# Mismo patron que docker_images/qwen3.5/docker-compose.yml. Puertos asignados:
+# qwen3.5 = 8007, nemotron = 8008, qwen3.8 = 8009 (solo red interna en AWS).
+#
+# Default de modelo: checkpoint AWQ-4bit (~5.5 GB, cabe en GPUs de 12 GB).
+# Para produccion en L4 con el repo oficial BF16:
+#   MODEL_NAME=nvidia/NVIDIA-Nemotron-Nano-9B-v2 GPU_MEMORY_UTILIZATION=0.95 \
+#   MAX_NUM_SEQS=8 docker compose up -d
+# (el cache Mamba en float32 consume ~280 MB por secuencia; con BF16 el
+# presupuesto de la L4 no da para 16 secuencias).
+services:
+  vllm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sooniverse/vllm-nemotron-nano-9b:v1.0.0
+    container_name: vllm-nemotron
+    runtime: nvidia
+    environment:
+      - MODEL_NAME=${MODEL_NAME:-cyankiwi/NVIDIA-Nemotron-Nano-9B-v2-AWQ-4bit}
+      - PORT=${PORT:-8008}
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
+      # Vacio = el planificador V1 de vLLM 0.10.1 usa su default.
+      - MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-}
+      - GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.90}
+      - MAX_NUM_SEQS=${MAX_NUM_SEQS:-16}
+      - ENFORCE_EAGER=${ENFORCE_EAGER:-1}
+      - DTYPE=${DTYPE:-auto}
+      - KV_CACHE_DTYPE=${KV_CACHE_DTYPE:-auto}
+      - TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-1}
+      # Exigido por la tarjeta del modelo para no degradar calidad.
+      - MAMBA_SSM_CACHE_DTYPE=${MAMBA_SSM_CACHE_DTYPE:-float32}
+      - TRUST_REMOTE_CODE=${TRUST_REMOTE_CODE:-1}
+      # vLLM 0.10.1 no soporta prefix caching con hibridas Mamba.
+      - DISABLE_PREFIX_CACHING=${DISABLE_PREFIX_CACHING:-1}
+      - ENABLE_TOOL_CALLING=${ENABLE_TOOL_CALLING:-0}
+      - TOOL_CALL_PARSER=${TOOL_CALL_PARSER:-nemotron_json}
+      - TOOL_PARSER_PLUGIN=${TOOL_PARSER_PLUGIN:-/app/nemotron_toolcall_parser_no_streaming.py}
+      - VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - CUDA_MODULE_LOADING=LAZY
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - PYTHONUNBUFFERED=1
+      - HF_HOME=/root/.cache/huggingface
+    ports:
+      - "8008:8008"
+    volumes:
+      - ./hf_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
