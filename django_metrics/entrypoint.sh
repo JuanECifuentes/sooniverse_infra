@@ -23,8 +23,37 @@ done
 
 # Solo las tablas propias de Django (auth, sessions, admin). Las tablas de
 # métricas son `managed = False`: las crea database/init_schema.sql.
+#
+# CORREGIDO: esto era un '|| echo WARNING' silencioso de un solo intento. Si
+# el esquema 'sooniverse' todavía no existía cuando arrancó este contenedor
+# (p.ej. AUTO_INIT_DB=false, o la BD alcanzable desde el Gateway pero no
+# desde el operador en el momento de generate_infra.py::_ensure_db_schema),
+# 'migrate' fallaba con "no schema has been selected to create in"
+# (search_path=sooniverse sin fallback a public, ver sooniverse_panel/
+# settings.py), el error se tragaba, 'ensure_superuser' de abajo fallaba
+# DESPUÉS por la misma razón (también silenciado con '|| true'), y gunicorn
+# arrancaba igual -con CERO admin creado y CERO tablas de Django, así que
+# TODO login (panel y chat, que depende del mismo login vía auth_request)
+# devolvía 500 sin ninguna señal más allá de un WARNING genérico y engañoso
+# ("puede operar en modo lectura" -no puede operar en absoluto sin auth_user).
+# Ahora se reintenta unas pocas veces (el esquema puede estar terminando de
+# aplicarse en paralelo desde otro lado) y, si sigue fallando, el mensaje es
+# explícito sobre el impacto real.
 echo "[metrics] Aplicando migraciones internas de Django..."
-python manage.py migrate --noinput || echo "[metrics] WARNING: migrate falló; el panel puede operar en modo lectura."
+MIGRATE_OK=0
+for intento in 1 2 3; do
+    if python manage.py migrate --noinput; then
+        MIGRATE_OK=1
+        break
+    fi
+    echo "[metrics] migrate falló (intento ${intento}/3); reintentando en 5s..."
+    sleep 5
+done
+if [ "$MIGRATE_OK" -ne 1 ]; then
+    echo "[metrics] ERROR: migrate falló tras 3 intentos. El esquema 'sooniverse' probablemente"
+    echo "[metrics]        no existe todavía -ningún login (panel NI chat) va a funcionar hasta"
+    echo "[metrics]        que se aplique. Ejecuta manualmente: python scripts/db_setup.py"
+fi
 
 echo "[metrics] Recolectando estáticos..."
 # El '>/dev/null 2>&1 || true' anterior ocultó durante mucho tiempo un fallo
