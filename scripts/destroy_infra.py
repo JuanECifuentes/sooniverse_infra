@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -289,6 +290,48 @@ def print_orphans(orphans: List[Dict[str, Any]]) -> None:
         print(f"{o['type']:<20} {o['aws_id']:<24} {o['name']:<40} {o['deployment_status']}")
 
 
+def scan_orphans_azure(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Equivalente Azure de `scan_orphans()`. A diferencia de AWS (una cuenta/
+    región compartida entre todos los clientes, de ahí el escaneo por tag en
+    TODA la región), cada cliente Azure vive en su propio Resource Group
+    dedicado (ver azure_network.py) -así que alcanza con mirar DENTRO de ese
+    Resource Group, no hace falta escanear la suscripción entera."""
+    from azure_network import AzureNetworkManager
+    from infra_state import PostgresInfraStateStore
+
+    cliente = config["cliente"]
+    red = config["red_y_aislamiento"]
+    state = PostgresInfraStateStore()
+    state.ping()
+    existing = state.get_active_deployment(cliente["id"], cliente["entorno"], red["region"])
+    # Sin despliegue activo: se usa un deployment_id "de un solo uso", nunca
+    # persistido (no se llama a state.open_deployment), así que
+    # list_resources() para él siempre está vacío -y CUALQUIER recurso
+    # encontrado en el Resource Group aparece como huérfano, que es justo lo
+    # correcto cuando no hay un despliegue registrado dueño de ese RG.
+    deployment_id = existing["deployment_id"] if existing else str(uuid.uuid4())
+
+    spec = build_network_spec_from_config(config)
+    mgr = AzureNetworkManager(spec, state=state, deployment_id=deployment_id)
+    orphans = mgr.scan_orphans()
+    status = "activo" if existing else "sin-despliegue-registrado"
+    for o in orphans:
+        o["deployment_status"] = status
+        o["name"] = (o.get("azure_id") or "").rsplit("/", 1)[-1]
+    return orphans
+
+
+def print_orphans_azure(orphans: List[Dict[str, Any]]) -> None:
+    if not orphans:
+        print("[OK] No se encontraron recursos huérfanos en el Resource Group de este cliente.")
+        return
+    print(f"\n{'TIPO':<45} {'NOMBRE':<30} ESTADO DESPLIEGUE")
+    print("-" * 110)
+    for o in orphans:
+        print(f"{o['type']:<45} {o['name']:<30} {o['deployment_status']}")
+        print(f"    {o['azure_id']}")
+
+
 def purge_orphans(orphans: List[Dict[str, Any]], region: str, aws_profile: Optional[str] = None) -> None:
     import boto3
     from aws_network import DELETE_ORDER
@@ -402,8 +445,8 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
         print("\n[SKIP] 'gestion_red: existente' -> la VPC/SGs no los gestiona este sistema; nada que destruir.")
         return 0
 
-    print("\n--- [3/3] Capa de red AWS ---")
-    from aws_network import AwsNetworkManager
+    cloud = red.get("cloud", "aws")
+    print(f"\n--- [3/3] Capa de red {cloud.upper()} ---")
     from infra_state import PostgresInfraStateStore
 
     state = PostgresInfraStateStore()
@@ -416,29 +459,40 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
 
     deployment_id = existing["deployment_id"]
     spec = build_network_spec_from_config(config)
-    mgr = AwsNetworkManager(spec, state=state, deployment_id=deployment_id)
+    if cloud == "azure":
+        from azure_network import AzureNetworkManager
+
+        mgr = AzureNetworkManager(spec, state=state, deployment_id=deployment_id)
+    else:
+        from aws_network import AwsNetworkManager
+
+        mgr = AwsNetworkManager(spec, state=state, deployment_id=deployment_id)
 
     report = mgr.destroy(dry_run=args.dry_run, force=args.force)
+    # AzureNetworkManager.PlannedDeletion usa 'azure_id' en vez de 'aws_id'
+    # (mismo campo conceptual, nombre distinto -ver azure_network.py).
+    id_attr = "aws_id" if cloud == "aws" else "azure_id"
 
     if args.dry_run:
-        kept_ids = {item.aws_id for item in report.kept_persistent}
+        kept_ids = {getattr(item, id_attr) for item in getattr(report, "kept_persistent", [])}
         for item in mgr.plan_destroy():
-            if item.aws_id in kept_ids:
-                print(f"  [{item.delete_order:>3}] {item.component:<14} {item.aws_id or '(sin id)'} "
+            item_id = getattr(item, id_attr)
+            if item_id in kept_ids:
+                print(f"  [{item.delete_order:>3}] {item.component:<14} {item_id or '(sin id)'} "
                       f"[CONSERVADO] gateway.dominio.eip_persistente=true")
                 continue
-            print(f"  [{item.delete_order:>3}] {item.component:<14} {item.aws_id or '(sin id)'} "
+            print(f"  [{item.delete_order:>3}] {item.component:<14} {item_id or '(sin id)'} "
                   f"managed_by_us={item.managed_by_us}")
         return 0
 
     print(f"\n[REPORTE] Éxitos: {len(report.succeeded)} | Fallos: {len(report.failed)} | "
           f"Omitidos (no nuestros): {len(report.skipped_not_ours)} | "
-          f"Conservados (dominio.eip_persistente): {len(report.kept_persistent)}")
-    for item in report.kept_persistent:
-        print(f"  [CONSERVADO] {item.component} {item.aws_id} (gateway.dominio.eip_persistente=true)")
+          f"Conservados (dominio.eip_persistente): {len(getattr(report, 'kept_persistent', []))}")
+    for item in getattr(report, "kept_persistent", []):
+        print(f"  [CONSERVADO] {item.component} {getattr(item, id_attr)} (gateway.dominio.eip_persistente=true)")
     for failure in report.failed:
         item = failure["item"]
-        print(f"  [FALLO] {item.component} {item.aws_id}: {failure['error']}")
+        print(f"  [FALLO] {item.component} {getattr(item, id_attr)}: {failure['error']}")
     for action in report.manual_actions_required:
         print(f"  [MANUAL] {action}")
 
@@ -482,6 +536,21 @@ def main() -> int:
         return 1
 
     if args.scan_orphans:
+        cloud = config["red_y_aislamiento"].get("cloud", "aws")
+        if cloud == "azure":
+            # Solo lectura por ahora: purge automático de huérfanos Azure no
+            # implementado (ver azure_network.py::AzureNetworkManager.scan_orphans
+            # y el comentario en scan_orphans_azure() de este archivo).
+            orphans = scan_orphans_azure(config)
+            print_orphans_azure(orphans)
+            if args.purge_orphans:
+                print(
+                    "[ABORTADO] --purge-orphans todavía no está implementado para Azure. "
+                    "Borra manualmente con: az resource delete --ids <id> (ver la lista de arriba)."
+                )
+                return 1
+            return 0
+
         region = config["red_y_aislamiento"]["region"]
         aws_profile = config["red_y_aislamiento"].get("aws_profile")
         orphans = scan_orphans(region, aws_profile=aws_profile)

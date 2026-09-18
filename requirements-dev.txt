@@ -6,3 +6,9 @@
 # ==============================================================================
 pytest>=9.0
 moto[ec2]>=5.2
+# No existe un equivalente a moto para Azure: tests/test_azure_network.py
+# mockea directamente resource_client/network_client, pero necesita poder
+# importar scripts/azure_network.py (que a su vez importa estos paquetes).
+azure-identity>=1.15
+azure-mgmt-network>=25.0
+azure-mgmt-resource>=23.0
