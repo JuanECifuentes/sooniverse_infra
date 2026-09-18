@@ -639,6 +639,13 @@ services:
       # docker_images/openwebui/README.md). Sin esta línea, el bootstrap de
       # cada despliegue con dominio/SSO fallaría con 400 en /signin.
       WEBUI_AUTH_TRUSTED_EMAIL_HEADER: X-Sooniverse-Email
+      # El admin humano del panel (Django) NO es automáticamente admin en el
+      # chat (Open WebUI): son dos tablas de usuarios independientes. Con
+      # esta variable, bootstrap_models.py también promueve a admin la fila
+      # 'user' de este email si ya existe (ver ensure_django_admin_is_owui_admin
+      # en ese script) -sin esto, el operador humano quedaba como 'user' normal
+      # en el chat aunque fuera superusuario del panel.
+      DJANGO_SUPERUSER_EMAIL: ${{DJANGO_SUPERUSER_EMAIL:-}}
     depends_on:
       open-webui:
         condition: service_healthy

@@ -1151,7 +1151,10 @@ sed -i '/^CLIENTE_ID=/d;/^ENTORNO=/d' .env
 #     defecto, ver .env.example). Mismo patrón sed+append que CLIENTE_ID/ENTORNO.
 # ---------------------------------------------------------------------------
 if [ "${{TLS_ENABLED}}" = "true" ] && [ -n "${{TLS_DOMAIN}}" ]; then
-    PUBLIC_IP_PRE="$(curl -s --max-time 5 ifconfig.me || true)"
+    # Preferir la IP RESERVADA (conocida de antemano, la misma a la que
+    # apunta/apuntará el DNS) sobre la efímera de 'ifconfig.me' -ver el
+    # comentario de GATEWAY_RESERVED_IP en TopologyBuilder.build_gateway().
+    PUBLIC_IP_PRE="${{GATEWAY_RESERVED_IP:-$(curl -s --max-time 5 ifconfig.me || true)}}"
     sed -i '/^ALLOWED_HOSTS=/d;/^CSRF_TRUSTED_ORIGINS=/d;/^HTTPS_ACTIVO=/d' .env
     {{
         echo "ALLOWED_HOSTS=${{TLS_DOMAIN}},${{PUBLIC_IP_PRE}},localhost"
@@ -1354,6 +1357,20 @@ class TopologyBuilder:
             # CSRF_TRUSTED_ORIGINS en .env antes de levantar el stack.
             "TLS_ENABLED": str(tls_enabled).lower(),
             "TLS_DOMAIN": tls_cfg.get("dominio") or "",
+            # IP pública RESERVADA en la fase 'network' (Elastic IP/Public IP
+            # dedicada), conocida ANTES de 'sky launch' -a diferencia de la IP
+            # efímera de la instancia, que SÍ cambia cuando
+            # _associate_gateway_eip() la reemplaza justo DESPUÉS de este
+            # script. CORREGIDO: antes GATEWAY_RUN_SCRIPT descubría su propia
+            # IP con 'curl ifconfig.me' para calcular ALLOWED_HOSTS/
+            # CSRF_TRUSTED_ORIGINS -capturando la IP efímera VIEJA, que el
+            # registro DNS A nunca apunta. En el primer OneShot contra una BD
+            # vacía, el admin solo podía llegar por la IP reservada (el DNS
+            # apenas se está creando), que no estaba en ninguna de las dos
+            # listas: ni el panel ni el chat (detrás del mismo login) dejaban
+            # entrar a nadie. Vacío si 'gateway.dominio.habilitado: false'
+            # (sin IP reservada que preferir; el script cae a ifconfig.me).
+            "GATEWAY_RESERVED_IP": getattr(self._network_outputs, "gateway_eip_public_ip", None) or "",
         }
 
         file_mounts = {
@@ -2726,14 +2743,28 @@ def _associate_gateway_eip(
             # PERO: GATEWAY_RUN_SCRIPT y ensure_openwebui_key.py (ambos ya
             # corrieron, EN ESTA MISMA fase, justo antes) le añadieron a ESE
             # .env remoto valores que solo existen ahí -PUBLIC_BASE_URL
-            # (calculado en caliente con la IP/dominio real) y
-            # OPENWEBUI_LITELLM_API_KEY (generado una vez, nunca en el .env
-            # local)-. Sobrescribir con el .env local a secas los borraría de
-            # inmediato -confirmado en un despliegue real: ambas variables
+            # (calculado en caliente con la IP/dominio real), OPENWEBUI_LITELLM_API_KEY
+            # (generado una vez, nunca en el .env local), y con dominio propio
+            # también ALLOWED_HOSTS/CSRF_TRUSTED_ORIGINS/HTTPS_ACTIVO/CHAT_URL/
+            # SOONIVERSE_PANEL_URL (calculados con la IP/dominio real, ver la
+            # sección 0.5 y 3 de GATEWAY_RUN_SCRIPT)-. Sobrescribir con el .env
+            # local a secas los borraría de inmediato -confirmado en un
+            # despliegue real: PUBLIC_BASE_URL/OPENWEBUI_LITELLM_API_KEY
             # desaparecían del .env remoto justo después de asociarse la
-            # Elastic IP-. Se preservan fusionándolos en el payload que se
-            # va a escribir.
-            preserve_keys = ("PUBLIC_BASE_URL", "OPENWEBUI_LITELLM_API_KEY")
+            # Elastic IP. Sin ALLOWED_HOSTS/CSRF_TRUSTED_ORIGINS en esta lista,
+            # el bug es más sutil pero igual de real: los contenedores YA
+            # arrancados sobreviven (ya leyeron el .env bueno al iniciar), pero
+            # cualquier cosa que los RECREE después -sync_openwebui_models.py,
+            # un reinicio de la VM, un '--only gateway' posterior- los relee del
+            # .env recién vaciado y cae a los defaults de render_gateway_stack.py
+            # ('ALLOWED_HOSTS=*', 'CSRF_TRUSTED_ORIGINS' vacío), que con HTTPS
+            # real rompe todo POST del panel -incluido el login. Se preservan
+            # fusionándolos en el payload que se va a escribir.
+            preserve_keys = (
+                "PUBLIC_BASE_URL", "OPENWEBUI_LITELLM_API_KEY",
+                "ALLOWED_HOSTS", "CSRF_TRUSTED_ORIGINS", "HTTPS_ACTIVO",
+                "CHAT_URL", "SOONIVERSE_PANEL_URL",
+            )
             remote_current = subprocess.run(
                 [sky, "exec", cluster, f"cat {remote_env} 2>/dev/null || true"],
                 capture_output=True,
@@ -3382,6 +3413,38 @@ def deploy(
             builder.gateway_cluster, aws_profile=red.get("aws_profile")
         )
         print(f"[INFO] IP pública del Gateway: {gateway_ip or 'no disponible'}")
+
+    # --- Bootstrap TEMPRANO de Open WebUI (best-effort, nunca aborta) ----------
+    # CORREGIDO: el bootstrap de la cuenta técnica (bootstrap_models.py, vía
+    # sync_openwebui_models.py) solo corría al FINAL de la fase 'capabilities'
+    # -muchos minutos después de que el chat/panel ya fueran alcanzables desde
+    # la fase 'gateway' (docker compose up -d corre aquí mismo). Open WebUI
+    # asciende automáticamente al PRIMER usuario que se autentica a admin: si
+    # un humano abría el chat/panel antes de que el bootstrap corriera, se
+    # quedaba con ese ascenso y la cuenta técnica recibía 401 en cualquier
+    # llamada de administración para siempre (mitigado parcialmente por
+    # ensure_bootstrap_is_admin(), pero solo cuando el bootstrap SÍ llega a
+    # correr). Correrlo aquí -apenas el stack está arriba, sin esperar a que
+    # workers/endpoints/capabilities terminen- cierra esa ventana de minutos a
+    # segundos. Es idempotente y best-effort (igual que su invocación tardía
+    # en 'capabilities', que sigue ahí para sincronizar los modelos reales una
+    # vez los workers existen): sin workers todavía, esta corrida temprana no
+    # tiene modelos que sincronizar, pero SÍ reclama el primer-usuario y
+    # corrige el rol de la cuenta técnica antes de que nadie más pueda llegar.
+    if "gateway" in phases and artefactos.get("gateway") and not dry_run:
+        sync_owui_script = REPO_ROOT / "scripts" / "sync_openwebui_models.py"
+        if sync_owui_script.exists():
+            print("\n--- [GATEWAY] Bootstrap temprano de Open WebUI (cierra la carrera del primer usuario) ---")
+            early_cmd = [
+                sys.executable, str(sync_owui_script), "--config", str(config_path), "--apply",
+            ]
+            print(f"[EXEC] {' '.join(early_cmd)}")
+            early_result = subprocess.run(early_cmd)
+            if early_result.returncode != 0:
+                print(
+                    f"[WARNING] Bootstrap temprano de Open WebUI falló (código {early_result.returncode}); "
+                    "se reintentará al final de la fase 'capabilities'."
+                )
 
     # --- FASE: dominio (DNS + certbot; best-effort, nunca aborta) ---------------
     dominio_cfg_top = config.get("gateway", {}).get("dominio") or {}

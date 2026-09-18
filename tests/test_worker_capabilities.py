@@ -214,3 +214,52 @@ def test_build_gateway_usa_azureuser_en_azure():
     gateway = TopologyBuilder(cfg).build_gateway()
     assert any("/home/azureuser/sooniverse_infra" in dest for dest in gateway["file_mounts"])
     assert "sudo usermod -aG docker azureuser" in gateway["setup"]
+
+
+# -- fix del bug de login del admin en el primer OneShot ---------------------
+# (ALLOWED_HOSTS/CSRF_TRUSTED_ORIGINS calculados con la IP efimera vieja en
+# vez de la IP reservada -ver GATEWAY_RESERVED_IP en generate_infra.py).
+def test_build_gateway_expone_gateway_reserved_ip_cuando_hay_dominio():
+    class FakeNetworkOutputs:
+        gateway_eip_public_ip = "203.0.113.10"
+
+    cfg = clone(load_base_config())
+    assert cfg["gateway"]["dominio"]["habilitado"] is True
+    builder = TopologyBuilder(cfg)
+    builder.apply_network_outputs(FakeNetworkOutputs())
+    envs = builder.build_gateway()["envs"]
+    assert envs["GATEWAY_RESERVED_IP"] == "203.0.113.10"
+
+
+def test_build_gateway_reserved_ip_vacia_sin_network_outputs():
+    """'gestion_red: existente' (o cualquier corrida sin AwsNetworkManager/
+    AzureNetworkManager) nunca puebla _network_outputs -no debe reventar,
+    solo caer al valor vacío (el script usa ifconfig.me de respaldo)."""
+    cfg = clone(load_base_config())
+    builder = TopologyBuilder(cfg)  # sin apply_network_outputs()
+    envs = builder.build_gateway()["envs"]
+    assert envs["GATEWAY_RESERVED_IP"] == ""
+
+
+def test_gateway_run_script_prefiere_la_ip_reservada_sobre_ifconfig_me():
+    cfg = clone(load_base_config())
+    builder = TopologyBuilder(cfg)
+    run_script = builder.build_gateway()["run"]
+    assert 'PUBLIC_IP_PRE="${GATEWAY_RESERVED_IP:-$(curl -s --max-time 5 ifconfig.me || true)}"' in run_script
+
+
+def test_preserve_keys_incluye_allowed_hosts_y_csrf():
+    """Sin esto, cualquier cosa que recree los contenedores del Gateway
+    despues de asociar la IP (sync_openwebui_models.py, un reinicio, un
+    '--only gateway' posterior) borraba ALLOWED_HOSTS/CSRF_TRUSTED_ORIGINS
+    del .env remoto y rompia todo POST del panel con HTTPS real."""
+    import inspect
+
+    import generate_infra
+
+    fuente = inspect.getsource(generate_infra._associate_gateway_eip)
+    assert '"ALLOWED_HOSTS"' in fuente
+    assert '"CSRF_TRUSTED_ORIGINS"' in fuente
+    assert '"HTTPS_ACTIVO"' in fuente
+    assert '"CHAT_URL"' in fuente
+    assert '"SOONIVERSE_PANEL_URL"' in fuente
