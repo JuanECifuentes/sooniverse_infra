@@ -388,6 +388,80 @@ def _component_of(orphan: Dict[str, Any]) -> str:
     }.get(orphan["type"], "")
 
 
+# Orden de borrado para purge_orphans_azure(), por TIPO ARM (minúsculas, ver
+# _azure_delete_order). Mismo criterio que aws_network.DELETE_ORDER: los
+# recursos "hoja" primero (NAT/Public IP/NSG), la VNet al final -a diferencia
+# de AWS, aquí no hace falta desasociar nada antes: Azure rechaza con un error
+# claro (no una excepción de purga silenciosa) si un recurso todavía tiene
+# dependientes, así que el peor caso es un [ERROR] legible, no una purga a
+# medias no detectada.
+_AZURE_ORPHAN_DELETE_ORDER = {
+    "microsoft.network/virtualnetworks/subnets": 10,
+    "microsoft.network/natgateways": 20,
+    "microsoft.network/publicipaddresses": 21,
+    "microsoft.network/networksecuritygroups": 30,
+    "microsoft.network/virtualnetworks": 40,
+}
+
+
+def _azure_delete_order(orphan: Dict[str, Any]) -> int:
+    return _AZURE_ORPHAN_DELETE_ORDER.get((orphan.get("type") or "").lower(), 999)
+
+
+def purge_orphans_azure(orphans: List[Dict[str, Any]]) -> None:
+    """Borra los recursos huérfanos reportados por scan_orphans_azure(), por
+    su resourceId completo. A diferencia de AWS (una llamada boto3 tipada por
+    cada tipo de recurso, ver purge_orphans()), Azure ofrece un único método
+    genérico -resources.begin_delete_by_id()- que funciona para CUALQUIER
+    tipo de recurso sin necesitar un cliente tipado por servicio (network,
+    compute, ...). Solo hace falta el 'api_version' correcto para cada tipo,
+    que se resuelve EN VIVO contra el Resource Provider (resources.providers)
+    en vez de hardcodearlo -así no queda desactualizado si Azure publica una
+    versión nueva del API."""
+    from azure_network import _default_credential
+    from azure.mgmt.resource.resources import ResourceManagementClient
+
+    credential, sub_id = _default_credential()
+    resource_client = ResourceManagementClient(credential, sub_id)
+
+    api_version_cache: Dict[str, Optional[str]] = {}
+
+    def _api_version_for(resource_type: str) -> Optional[str]:
+        if resource_type in api_version_cache:
+            return api_version_cache[resource_type]
+        version = None
+        try:
+            namespace, tipo = resource_type.split("/", 1)
+            provider = resource_client.providers.get(namespace)
+            for rt in provider.resource_types or []:
+                if rt.resource_type.lower() == tipo.lower():
+                    versiones = rt.api_versions or []
+                    # Prioriza versiones estables (sin 'preview') sobre las de
+                    # vista previa; ambas listas vienen ordenadas más reciente
+                    # primero.
+                    estables = [v for v in versiones if "preview" not in v.lower()]
+                    version = (estables or versiones or [None])[0]
+                    break
+        except Exception as exc:  # noqa: BLE001 - se reporta por recurso, no debe abortar el resto
+            print(f"[WARNING] No se pudo resolver el api_version de '{resource_type}': {exc}")
+        api_version_cache[resource_type] = version
+        return version
+
+    ordered = sorted(orphans, key=_azure_delete_order)
+    for o in ordered:
+        resource_id = o["azure_id"]
+        resource_type = o["type"]
+        api_version = _api_version_for(resource_type)
+        if not api_version:
+            print(f"[ERROR] No se pudo borrar {resource_id}: sin api_version resuelto para '{resource_type}'.")
+            continue
+        try:
+            resource_client.resources.begin_delete_by_id(resource_id, api_version).result()
+            print(f"[OK] Purgado: {resource_type} {resource_id}")
+        except Exception as exc:  # noqa: BLE001 - reporte por recurso, no debe abortar el resto
+            print(f"[ERROR] No se pudo purgar {resource_type} {resource_id}: {exc}")
+
+
 # =============================================================================
 # Destrucción normal (sky down workers -> sky down gateway -> red)
 # =============================================================================
@@ -538,17 +612,13 @@ def main() -> int:
     if args.scan_orphans:
         cloud = config["red_y_aislamiento"].get("cloud", "aws")
         if cloud == "azure":
-            # Solo lectura por ahora: purge automático de huérfanos Azure no
-            # implementado (ver azure_network.py::AzureNetworkManager.scan_orphans
-            # y el comentario en scan_orphans_azure() de este archivo).
             orphans = scan_orphans_azure(config)
             print_orphans_azure(orphans)
             if args.purge_orphans:
-                print(
-                    "[ABORTADO] --purge-orphans todavía no está implementado para Azure. "
-                    "Borra manualmente con: az resource delete --ids <id> (ver la lista de arriba)."
-                )
-                return 1
+                if not args.yes:
+                    print("[ABORTADO] --purge-orphans requiere --yes.")
+                    return 1
+                purge_orphans_azure(orphans)
             return 0
 
         region = config["red_y_aislamiento"]["region"]
