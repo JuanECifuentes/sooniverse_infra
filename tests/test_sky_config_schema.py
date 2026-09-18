@@ -123,3 +123,51 @@ def test_build_sky_gateway_config_aws_sigue_validando_contra_el_esquema_real():
     generated = builder.build_sky_gateway_config()
     if generated:
         _validate_provider_block("aws", generated.get("aws", {}))
+
+
+# -- GCP (Fase 7, implementación teórica -ver scripts/gcp_network.py) -------
+class _FakeGcpOutputs:
+    """Stand-in mínimo de gcp_network.GcpNetworkOutputs -solo los campos que
+    build_sky_gateway_config()/build_sky_workers_config() leen."""
+
+    vpc_name = "sooniverse-mi-cliente-gcp-dev-vpc"
+
+
+def _load_gcp_config():
+    with (REPO_ROOT / "clients" / "_ejemplo_gcp" / "config_global.yaml").open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def test_build_sky_gateway_config_gcp_valida_contra_el_esquema_real():
+    cfg = _load_gcp_config()
+    builder = TopologyBuilder(cfg)
+    builder.apply_network_outputs(_FakeGcpOutputs())
+
+    generated = builder.build_sky_gateway_config()
+    assert "gcp" in generated
+    _validate_provider_block("gcp", generated["gcp"])
+
+
+def test_build_sky_workers_config_gcp_valida_contra_el_esquema_real():
+    cfg = _load_gcp_config()
+    builder = TopologyBuilder(cfg)
+    builder.apply_network_outputs(_FakeGcpOutputs())
+
+    generated = builder.build_sky_workers_config(gateway_ip="34.1.2.3")
+    assert "gcp" in generated
+    _validate_provider_block("gcp", generated["gcp"])
+
+
+def test_build_sky_gateway_config_gcp_no_usa_security_group_name():
+    """El esquema 'gcp' de SkyPilot no tiene ningún equivalente a
+    'security_group_name' -ver el docstring de scripts/gcp_network.py sobre
+    por qué las reglas de firewall se acotan por sourceRanges en vez de por
+    grupo/tag."""
+    cfg = _load_gcp_config()
+    builder = TopologyBuilder(cfg)
+    builder.apply_network_outputs(_FakeGcpOutputs())
+
+    generated = builder.build_sky_gateway_config()["gcp"]
+    assert "security_group_name" not in generated
+    assert "resource_group_vm" not in generated  # concepto de Azure, no de GCP
+    assert generated["vpc_name"] == "sooniverse-mi-cliente-gcp-dev-vpc"

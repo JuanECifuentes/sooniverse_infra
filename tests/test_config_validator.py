@@ -594,6 +594,61 @@ def test_dominio_habilitado_sigue_siendo_valido_en_aws():
     ConfigValidator.validate(cfg)
 
 
+# -- cloud: gcp (Fase 7, implementación teórica -ver scripts/gcp_network.py) -
+def _make_gcp_config():
+    with (REPO_ROOT / "clients" / "_ejemplo_gcp" / "config_global.yaml").open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def test_ejemplo_gcp_config_es_valido():
+    ConfigValidator.validate(_make_gcp_config())
+
+
+def test_dominio_habilitado_sigue_rechazado_en_gcp():
+    """A diferencia de Azure (Fase 2.2), GCP NO tiene IP externa persistente
+    ni reasignación de IP al Gateway implementada en esta versión -ver el
+    docstring de scripts/gcp_network.py. 'gateway.dominio.habilitado: true'
+    debe seguir rechazándose para 'cloud: gcp'."""
+    cfg = clone(_make_gcp_config())
+    cfg["gateway"]["dominio"]["habilitado"] = True
+    cfg["gateway"]["dominio"]["seleccionado"] = "ia.ejemplo.com"
+    cfg["gateway"]["dominio"]["disponibles"] = [
+        {"nombre": "ia.ejemplo.com", "email_acme": "contacto@ejemplo.com"}
+    ]
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_gcp_azs_distinto_de_uno_rechazado():
+    """Las subredes de GCP son REGIONALES, no zonales -a diferencia de AWS,
+    donde 'azs' > 1 es el caso normal."""
+    cfg = clone(_make_gcp_config())
+    cfg["red_y_aislamiento"]["azs"] = 2
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_gcp_nat_modo_per_az_rechazado():
+    cfg = clone(_make_gcp_config())
+    cfg["red_y_aislamiento"]["nat_gateway"]["modo"] = "per-az"
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_gcp_requiere_gcp_project():
+    cfg = clone(_make_gcp_config())
+    del cfg["red_y_aislamiento"]["gcp_project"]
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_gcp_workers_privados_sin_nat_rechazado():
+    cfg = clone(_make_gcp_config())
+    cfg["red_y_aislamiento"]["nat_gateway"]["modo"] = "none"
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
 # -- colisiones entre workloads (balanceador multi-modelo) ------------------
 def test_worker_cluster_normalizado_colisiona_es_rechazado():
     """'qwen3.5-llm' y 'qwen3-5-llm' son 'id' distintos, pero
