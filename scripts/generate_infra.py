@@ -1481,16 +1481,28 @@ class TopologyBuilder:
         net = self._network_outputs
 
         if self.red.get("cloud", "aws") == "azure":
-            # NOTA DE IMPLEMENTACIÓN: estas claves (resource_group/vnet/nsg) son
-            # las que SkyPilot documenta para pinear red en Azure, pero este
-            # repo no tenía precedente Azure -verificar contra
-            # `sky check azure -v` / el código instalado de SkyPilot
-            # (sky/clouds/azure.py) antes de confiar en esto en producción real.
+            # CORREGIDO: el esquema `azure` de SkyPilot (sky/utils/schemas.py,
+            # additionalProperties=False) NO acepta 'resource_group' ni
+            # 'security_group_name' -son 'resource_group_vm' y no existe
+            # ninguna clave para pinear NSG. Verificado contra el código
+            # instalado de SkyPilot 0.13.0 (antes esto llevaba una nota
+            # admitiendo que nunca se había confirmado contra una versión
+            # real). Con las claves viejas, CUALQUIER 'sky launch' en Azure
+            # fallaría de inmediato al validar este YAML.
+            #   - 'resource_group_vm': si no se fija, SkyPilot crea la VM en
+            #     SU PROPIO resource group por clúster (uno por Gateway, uno
+            #     por cada workload) -lo fijamos al nuestro para que todo
+            #     viva junto, igual que 'vpc_name' abajo.
+            #   - 'vpc_name' (no 'vnet_name'): el nombre de la VNet.
+            #   - Sin 'security_group_name': no hace falta -a diferencia de
+            #     AWS, nuestros NSG se asocian a nivel de SUBRED en
+            #     AzureNetworkManager._ensure_one_subnet() (Azure evalúa las
+            #     reglas del NSG de subred para CUALQUIER NIC que viva ahí,
+            #     sin necesidad de pinear un NSG por VM).
             azure_cfg: Dict[str, Any] = {}
             if net:
-                azure_cfg["resource_group"] = net.resource_group_name
-                azure_cfg["vnet_name"] = net.vnet_name
-                azure_cfg["security_group_name"] = net.nsg_gateway_name
+                azure_cfg["resource_group_vm"] = net.resource_group_name
+                azure_cfg["vpc_name"] = net.vnet_name
             return {"azure": azure_cfg} if azure_cfg else {}
 
         aws_cfg: Dict[str, Any] = {}
@@ -1517,13 +1529,11 @@ class TopologyBuilder:
         net = self._network_outputs
 
         if self.red.get("cloud", "aws") == "azure":
-            # Mismas notas que build_sky_gateway_config() sobre verificar estas
-            # claves contra la versión instalada de SkyPilot.
+            # Mismas claves verificadas que build_sky_gateway_config().
             azure_cfg: Dict[str, Any] = {}
             if net:
-                azure_cfg["resource_group"] = net.resource_group_name
-                azure_cfg["vnet_name"] = net.vnet_name
-                azure_cfg["security_group_name"] = net.nsg_workers_name
+                azure_cfg["resource_group_vm"] = net.resource_group_name
+                azure_cfg["vpc_name"] = net.vnet_name
             if self.red.get("workers_en_subred_privada", True):
                 azure_cfg["use_internal_ips"] = True
                 if gateway_ip:
