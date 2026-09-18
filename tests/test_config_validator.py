@@ -525,3 +525,51 @@ def test_capacidad_deshabilitada_es_valida():
     cfg = clone(load_base_config())
     cfg["capacidad"]["habilitado"] = False
     ConfigValidator.validate(cfg)
+
+
+# -- runtime_vllm (overrides de bajo nivel para GPUs Turing/T4) --------------
+def test_runtime_vllm_ausente_es_valida():
+    cfg = clone(load_base_config())
+    assert "runtime_vllm" not in cfg["workloads"][0]
+    ConfigValidator.validate(cfg)
+
+
+def test_runtime_vllm_valida_con_todos_los_campos():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["runtime_vllm"] = {
+        "dtype": "half",
+        "kv_cache_dtype": "auto",
+        "enforce_eager": True,
+        "mamba_ssm_cache_dtype": "float32",
+        "attention_backend": "FLASHINFER",
+    }
+    ConfigValidator.validate(cfg)
+
+
+def test_runtime_vllm_no_objeto_rechazado():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["runtime_vllm"] = "half"
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_runtime_vllm_campo_desconocido_rechazado():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["runtime_vllm"] = {"quantization": "awq"}
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_runtime_vllm_enforce_eager_no_booleano_rechazado():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["runtime_vllm"] = {"enforce_eager": "true"}
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+@pytest.mark.parametrize("campo", ["dtype", "kv_cache_dtype", "mamba_ssm_cache_dtype", "attention_backend"])
+def test_runtime_vllm_campo_texto_no_string_rechazado(campo):
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["runtime_vllm"] = {campo: 123}
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
