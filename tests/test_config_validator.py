@@ -592,3 +592,94 @@ def test_dominio_habilitado_sigue_siendo_valido_en_aws():
     assert cfg["red_y_aislamiento"].get("cloud", "aws") == "aws"
     assert cfg["gateway"]["dominio"]["habilitado"] is True
     ConfigValidator.validate(cfg)
+
+
+# -- colisiones entre workloads (balanceador multi-modelo) ------------------
+def test_worker_cluster_normalizado_colisiona_es_rechazado():
+    """'qwen3.5-llm' y 'qwen3-5-llm' son 'id' distintos, pero
+    TopologyBuilder.worker_cluster() los normaliza (minúsculas, '.'/'_' ->
+    '-') al MISMO nombre de clúster SkyPilot -el segundo 'sky launch'
+    pisaría al primero en silencio."""
+    cfg = clone(load_base_config())
+    segundo = clone(cfg["workloads"][0])
+    segundo["id"] = "qwen3.5-llm"  # normaliza igual que "qwen3-5-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = "sooniverse-otro-modelo"
+    cfg["workloads"].append(segundo)
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_worker_cluster_no_colisiona_con_ids_distintos():
+    cfg = clone(load_base_config())
+    segundo = clone(cfg["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = "sooniverse-nemotron"
+    cfg["workloads"].append(segundo)
+    ConfigValidator.validate(cfg)
+
+
+def test_nombre_publico_duplicado_es_rechazado():
+    """Dos workloads con el mismo 'nombre_publico' se fusionan en un único
+    modelo de LiteLLM -el router los trataría como intercambiables."""
+    cfg = clone(load_base_config())
+    segundo = clone(cfg["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    # 'nombre_publico' deliberadamente IGUAL al del primer workload.
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg | {"workloads": cfg["workloads"] + [segundo]})
+
+
+def test_nombre_publico_duplicado_implicito_por_id_es_rechazado():
+    """Sin 'nombre_publico' explícito, build_worker() usa el 'id' como
+    fallback -dos workloads con el mismo 'id' YA se rechazan por 'vistos',
+    pero un 'nombre_publico' explícito que coincide con el 'id' fallback de
+    OTRO workload también debe detectarse."""
+    cfg = clone(load_base_config())
+    segundo = clone(cfg["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = cfg["workloads"][0]["nombre_publico"]
+    cfg["workloads"].append(segundo)
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_dos_workloads_con_nombres_distintos_es_valido():
+    cfg = clone(load_base_config())
+    segundo = clone(cfg["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = "sooniverse-nemotron"
+    cfg["workloads"].append(segundo)
+    ConfigValidator.validate(cfg)
+
+
+# -- peso_balanceo ignorado en silencio con la estrategia por defecto -------
+def test_peso_balanceo_distinto_de_uno_avisa_con_estrategia_que_lo_ignora(capsys):
+    """LiteLLM solo honra 'weight' con routing_strategy: simple-shuffle -con
+    cualquier otra estrategia (incluida la default) era un no-op silencioso."""
+    cfg = clone(load_base_config())
+    assert cfg["gateway"]["load_balancing_strategy"] == "latency-based-routing"
+    cfg["workloads"][0]["peso_balanceo"] = 3
+    ConfigValidator.validate(cfg)  # no debe lanzar -es un aviso, no un error
+    salida = capsys.readouterr().out
+    assert "peso_balanceo" in salida
+    assert "WARNING" in salida
+
+
+def test_peso_balanceo_distinto_de_uno_no_avisa_con_simple_shuffle(capsys):
+    cfg = clone(load_base_config())
+    cfg["gateway"]["load_balancing_strategy"] = "simple-shuffle"
+    cfg["workloads"][0]["peso_balanceo"] = 3
+    ConfigValidator.validate(cfg)
+    salida = capsys.readouterr().out
+    assert "peso_balanceo" not in salida
+
+
+def test_peso_balanceo_uno_no_avisa_nunca():
+    cfg = load_base_config()
+    assert cfg["workloads"][0].get("peso_balanceo", 1) == 1
+    ConfigValidator.validate(cfg)

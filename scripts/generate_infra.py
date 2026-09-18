@@ -607,6 +607,20 @@ class ConfigValidator:
             )
 
         vistos = set()
+        # Colisión de nombre de clúster SkyPilot: TopologyBuilder.worker_cluster()
+        # normaliza el 'id' (minúsculas, '.'/'_' -> '-'), así que dos 'id'
+        # LITERALMENTE distintos (ej. "qwen3.5-llm" y "qwen3-5-llm") pueden
+        # producir el MISMO nombre de clúster -el segundo 'sky launch' pisaría
+        # al primero en silencio. La comprobación de 'wl_id in vistos' de
+        # arriba no lo detecta porque compara el 'id' crudo, no el normalizado.
+        clusters_vistos: Dict[str, str] = {}
+        # Colisión de 'nombre_publico': dos workloads (mismo modelo o no)
+        # publicando el mismo nombre se fusionan en un único model_name de
+        # LiteLLM -el router los trataría como intercambiables (ver
+        # render_litellm_config.py::build_model_list). No hay caso de uso
+        # legítimo para esto: si es el mismo modelo, la forma correcta de
+        # sumar capacidad es 'replicas', no un segundo workload.
+        nombres_publicos_vistos: Dict[str, str] = {}
         for idx, wl in enumerate(workloads):
             if not isinstance(wl, dict):
                 raise ConfigValidationError(
@@ -619,6 +633,44 @@ class ConfigValidator:
             if wl_id in vistos:
                 raise ConfigValidationError(f"'workloads[].id' duplicado: '{wl_id}'.")
             vistos.add(wl_id)
+
+            cluster_normalizado = str(wl_id).lower().replace("_", "-").replace(".", "-")
+            if cluster_normalizado in clusters_vistos:
+                raise ConfigValidationError(
+                    f"'workloads[].id' de '{wl_id}' y '{clusters_vistos[cluster_normalizado]}' "
+                    f"producen el MISMO nombre de clúster SkyPilot ('...-{cluster_normalizado}') "
+                    "una vez normalizados (minúsculas, '.'/'_' -> '-'). Usa IDs que no colisionen "
+                    "tras esa normalización."
+                )
+            clusters_vistos[cluster_normalizado] = wl_id
+
+            nombre_publico = wl.get("nombre_publico") or wl_id
+            if nombre_publico in nombres_publicos_vistos:
+                raise ConfigValidationError(
+                    f"'workloads[].nombre_publico' duplicado: '{nombre_publico}' (workloads "
+                    f"'{nombres_publicos_vistos[nombre_publico]}' y '{wl_id}'). Dos workloads con el "
+                    "mismo nombre público se fusionan en un único modelo de LiteLLM -si es el mismo "
+                    "modelo, usa 'replicas' en un solo workload en vez de duplicar la entrada."
+                )
+            nombres_publicos_vistos[nombre_publico] = wl_id
+
+            # 'peso_balanceo' solo lo honra LiteLLM con routing_strategy:
+            # simple-shuffle (round-robin ponderado); con cualquier otra
+            # estrategia (incluida la default, latency-based-routing) el
+            # valor se lee pero NUNCA se usa -antes esto era un no-op
+            # silencioso: un operador podía fijar peso_balanceo: 3 esperando
+            # un reparto 3:1 y no pasaba nada. Avisar, no bloquear: no es un
+            # config inválido, solo ineficaz con la estrategia elegida.
+            strategy = (config.get("gateway") or {}).get(
+                "load_balancing_strategy", "latency-based-routing"
+            )
+            if wl.get("peso_balanceo", 1) != 1 and strategy != "simple-shuffle":
+                print(
+                    f"[WARNING] Workload '{wl_id}': 'peso_balanceo' != 1 pero "
+                    f"'gateway.load_balancing_strategy' es '{strategy}', que lo ignora "
+                    "-LiteLLM solo honra 'weight' con 'simple-shuffle'. El valor no tendrá "
+                    "ningún efecto sobre el reparto de carga."
+                )
 
             if wl.get("tipo_tarea") not in cls.ALLOWED_TAREAS:
                 raise ConfigValidationError(

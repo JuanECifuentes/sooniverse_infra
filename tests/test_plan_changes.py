@@ -212,3 +212,54 @@ def test_seccion_capacidad_no_afecta_al_plan_de_infraestructura():
     nuevo = clone(base)
     nuevo["capacidad"]["segundos_por_nivel"] = 5
     assert plan_changes(base, nuevo).is_no_op
+
+
+# -- multi-workload: plan_changes() ya es dict-based (sin [0] hardcodeado) --
+# Test de cobertura, no de fix: la lógica ya generaliza a N workloads.
+def test_agregar_un_segundo_workload_es_recreate_cluster_solo_para_el_nuevo():
+    base = load_base_config()
+    nuevo = clone(base)
+    segundo = clone(nuevo["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = "sooniverse-nemotron"
+    nuevo["workloads"].append(segundo)
+
+    plan = plan_changes(base, nuevo)
+
+    assert plan.requires_destroy is False
+    assert plan.clusters_to_recreate == ["nemotron-llm"]
+    assert not any(c.workload_id == base["workloads"][0]["id"] for c in plan.changes)
+
+
+def test_cambiar_uno_de_dos_workloads_no_toca_el_otro():
+    base = load_base_config()
+    segundo = clone(base["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = "sooniverse-nemotron"
+    base["workloads"].append(segundo)
+
+    nuevo = clone(base)
+    nuevo["workloads"][1]["concurrencia"]["max_num_seqs"] = 4  # solo el segundo
+
+    plan = plan_changes(base, nuevo)
+
+    assert plan.clusters_to_recreate == ["nemotron-llm"]
+    assert not any(c.workload_id == "qwen3-5-llm" for c in plan.changes)
+
+
+def test_quitar_uno_de_dos_workloads_solo_marca_el_quitado():
+    base = load_base_config()
+    segundo = clone(base["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = "sooniverse-nemotron"
+    base["workloads"].append(segundo)
+
+    nuevo = clone(base)
+    nuevo["workloads"] = [nuevo["workloads"][0]]  # se queda solo qwen3.5
+
+    plan = plan_changes(base, nuevo)
+
+    assert plan.clusters_to_recreate == ["nemotron-llm"]

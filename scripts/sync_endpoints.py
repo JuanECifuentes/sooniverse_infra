@@ -651,7 +651,16 @@ def register_in_db(endpoints: List[Dict[str, Any]], cluster_of: Dict[str, str], 
                     (expected_clusters,),
                 )
 
-            for rank, ep in enumerate(endpoints):
+            # CORREGIDO: 'rank' era un índice GLOBAL sobre la lista completa
+            # de endpoints (concatenación de TODOS los workloads), no el
+            # rango del nodo DENTRO de su propio clúster -con 2 workloads de
+            # 2 réplicas cada uno, los node_rank salían 0,1,2,3 en vez de
+            # 0,1 / 0,1. Se cuenta por separado dentro de cada 'cluster'.
+            rank_by_cluster: Dict[str, int] = {}
+            for ep in endpoints:
+                cluster = ep["cluster"]
+                rank = rank_by_cluster.get(cluster, 0)
+                rank_by_cluster[cluster] = rank + 1
                 healthy = ep.get("healthy", True)
                 cur.execute(
                     """

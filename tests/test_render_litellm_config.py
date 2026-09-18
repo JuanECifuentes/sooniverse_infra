@@ -69,3 +69,80 @@ def test_endpoint_without_max_model_len_omits_context_fields():
 def test_endpoint_without_ip_is_skipped():
     model_list = build_model_list([_endpoint(ip=None)])
     assert model_list == []
+
+
+# -- multi-nodo / multi-workload (balanceador, nunca antes probado con N>1) -
+def test_dos_endpoints_del_mismo_modelo_generan_dos_deployments():
+    """El caso central del balanceador: 2 réplicas del mismo workload deben
+    aparecer como 2 entradas de model_list con el MISMO model_name -LiteLLM
+    hace round-robin/latency-based entre las que comparten nombre."""
+    model_list = build_model_list([
+        _endpoint(ip="10.0.1.5"),
+        _endpoint(ip="10.0.1.6"),
+    ])
+    assert len(model_list) == 2
+    assert {m["model_name"] for m in model_list} == {"sooniverse-qwen3.5"}
+
+
+def test_dos_endpoints_del_mismo_modelo_tienen_model_info_id_unico():
+    """model_info.id debe ser único por nodo -si colisionara, LiteLLM
+    trataría dos réplicas distintas como el mismo deployment."""
+    model_list = build_model_list([
+        _endpoint(ip="10.0.1.5", port=8007),
+        _endpoint(ip="10.0.1.6", port=8007),
+    ])
+    ids = [m["model_info"]["id"] for m in model_list]
+    assert len(ids) == len(set(ids)), f"model_info.id duplicado: {ids}"
+
+
+def test_dos_endpoints_apuntan_a_api_base_distintos():
+    model_list = build_model_list([
+        _endpoint(ip="10.0.1.5"),
+        _endpoint(ip="10.0.1.6"),
+    ])
+    api_bases = {m["litellm_params"]["api_base"] for m in model_list}
+    assert api_bases == {"http://10.0.1.5:8007/v1", "http://10.0.1.6:8007/v1"}
+
+
+def test_dos_workloads_distintos_generan_model_names_separados():
+    """Multi-modelo: qwen3.5 y nemotron en workloads separados no deben
+    fusionarse ni pisarse -cada uno mantiene su propio model_name."""
+    model_list = build_model_list([
+        _endpoint(workload_id="qwen3-5-llm", model_public_name="sooniverse-qwen3.5", ip="10.0.1.5"),
+        _endpoint(workload_id="nemotron-llm", model_public_name="sooniverse-nemotron",
+                   ip="10.0.1.7", port=8008, hf_repo="cyankiwi/NVIDIA-Nemotron-Nano-9B-v2-AWQ-4bit"),
+    ])
+    nombres = {m["model_name"] for m in model_list}
+    assert nombres == {"sooniverse-qwen3.5", "sooniverse-nemotron"}
+
+
+def test_dos_workloads_con_replicas_cada_uno_no_mezclan_deployments():
+    """Escenario completo: 2 réplicas de qwen3.5 + 1 de nemotron -4 endpoints
+    totales, agrupados en exactamente 2 model_name distintos."""
+    endpoints = [
+        _endpoint(workload_id="qwen3-5-llm", model_public_name="sooniverse-qwen3.5", ip="10.0.1.5"),
+        _endpoint(workload_id="qwen3-5-llm", model_public_name="sooniverse-qwen3.5", ip="10.0.1.6"),
+        _endpoint(workload_id="nemotron-llm", model_public_name="sooniverse-nemotron",
+                   ip="10.0.1.7", port=8008),
+    ]
+    model_list = build_model_list(endpoints)
+
+    assert len(model_list) == 3
+    por_modelo: dict = {}
+    for m in model_list:
+        por_modelo.setdefault(m["model_name"], []).append(m)
+    assert len(por_modelo["sooniverse-qwen3.5"]) == 2
+    assert len(por_modelo["sooniverse-nemotron"]) == 1
+
+    ids = [m["model_info"]["id"] for m in model_list]
+    assert len(ids) == len(set(ids))
+
+
+def test_peso_balanceo_distinto_se_propaga_como_weight_por_endpoint():
+    model_list = build_model_list([
+        _endpoint(ip="10.0.1.5", weight=3),
+        _endpoint(ip="10.0.1.6", weight=1),
+    ])
+    pesos = {m["litellm_params"]["api_base"]: m["litellm_params"]["weight"] for m in model_list}
+    assert pesos["http://10.0.1.5:8007/v1"] == 3
+    assert pesos["http://10.0.1.6:8007/v1"] == 1
