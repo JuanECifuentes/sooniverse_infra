@@ -513,11 +513,16 @@ class ConfigValidator:
         if not dominio_cfg.get("habilitado", False):
             return
 
+        # Soportado en AWS y Azure (Public IP/Elastic IP dedicada y persistente
+        # + certbot/Let's Encrypt, ver azure_network.py::ensure_gateway_public_ip
+        # y aws_network.py::ensure_gateway_eip). GCP queda pendiente: sin una
+        # dirección externa estática ni el baile de reasignación de IP
+        # implementados todavía en gcp_network.py (Fase 7 del plan).
         cloud = (config.get("red_y_aislamiento") or {}).get("cloud", "aws")
-        if cloud != "aws":
+        if cloud not in ("aws", "azure"):
             raise ConfigValidationError(
                 f"'gateway.dominio.habilitado: true' no está implementado todavía para 'cloud: {cloud}' "
-                "(dominio propio + TLS real sigue siendo solo AWS por ahora). Usa 'tls.modo: self-signed' "
+                "(dominio propio + TLS real: AWS y Azure sí, GCP todavía no). Usa 'tls.modo: self-signed' "
                 "o deja 'gateway.dominio.habilitado: false'."
             )
 
@@ -1673,6 +1678,7 @@ def build_network_spec_from_config(config: Dict[str, Any]) -> "Any":
     if red.get("cloud", "aws") == "azure":
         from azure_network import AzureNetworkSpec  # import perezoso: SDK de Azure solo hace falta aquí
 
+        dominio_azure = gw.get("dominio") or {}
         return AzureNetworkSpec(
             client_id=cliente["id"],
             environment=cliente["entorno"],
@@ -1689,6 +1695,16 @@ def build_network_spec_from_config(config: Dict[str, Any]) -> "Any":
             expose_direct_ports=bool(gw.get("exponer_puertos_directos", False)),
             tls_enabled=bool(tls.get("habilitado", False)),
             extra_tags=red.get("tags_obligatorios") or {},
+            # Dominio propio: reserva una Public IP dedicada y persistente
+            # (ver azure_network.py::ensure_gateway_public_ip). Antes esta
+            # rama no tenía forma de sobrevivir un destroy+redeploy con la
+            # misma IP, así que gateway.dominio.habilitado estaba prohibido
+            # para Azure -ver ConfigValidator._validate_dominio.
+            gateway_eip=bool(dominio_azure.get("habilitado", False)),
+            gateway_eip_persistent=bool(dominio_azure.get("eip_persistente", True)),
+            gateway_domain=dominio_azure.get("seleccionado")
+            if dominio_azure.get("habilitado")
+            else None,
         )
 
     from aws_network import NetworkSpec  # import perezoso: boto3 solo hace falta aquí
@@ -1781,6 +1797,8 @@ def load_network_outputs_from_state(
             nsg_workers_id=nsg_wk_row["aws_id"],
             nsg_workers_name=resolved_name_azure(nsg_wk_row, "workers"),
             managed_by_us=True,
+            gateway_eip_allocation_id=(first("pip-gateway") or {}).get("aws_id"),
+            gateway_eip_public_ip=((first("pip-gateway") or {}).get("attributes") or {}).get("public_ip"),
         )
 
     from aws_network import NetworkOutputs
@@ -2441,20 +2459,12 @@ class GatewayEipAssociationError(RuntimeError):
     """Fallo asociando la Elastic IP del Gateway a la instancia recién lanzada."""
 
 
-def _associate_gateway_eip(
+def _find_and_associate_aws_eip(
     cluster: str, allocation_id: str, region: str, aws_profile: Optional[str] = None
-) -> str:
-    """Asocia la Elastic IP reservada en la fase 'network' (gateway.dominio.
-    habilitado: true) a la instancia EC2 del Gateway recién lanzada, y reconcilia
-    el estado local de SkyPilot -asociar una EIP le cambia la IP pública de la
-    instancia, y SkyPilot sigue intentando conectarse por SSH con la IP vieja
-    hasta que se reconcilia, lo que 'sky status --refresh' NO logra por sí solo
-    (falla el chequeo de salud contra la IP vieja y deja el clúster en estado
-    'INIT' en vez de detectar la nueva IP -comprobado empíricamente). 'sky start'
-    sí reconoce y adopta la IP nueva del proveedor. Verifica con 'sky exec <gw>
-    true' antes de devolver, porque TODAS las fases siguientes (endpoints,
-    capabilities, capacidad, verify) dependen de 'sky exec' contra este mismo
-    Gateway."""
+) -> None:
+    """Encuentra la instancia EC2 del Gateway y le asocia la Elastic IP reservada
+    en la fase 'network'. Ver docstring de `_associate_gateway_eip` para el
+    porqué (reconciliación con SkyPilot) -esto solo hace el paso AWS-specific."""
     import boto3
 
     session = (
@@ -2492,6 +2502,118 @@ def _associate_gateway_eip(
         AllocationId=allocation_id, InstanceId=instance_id, AllowReassociation=True
     )
 
+
+def _find_and_associate_azure_public_ip(
+    cluster: str,
+    pip_id: str,
+    resource_group: Optional[str],
+    subscription_id: Optional[str] = None,
+) -> None:
+    """Equivalente Azure de `_find_and_associate_aws_eip`: encuentra la VM que
+    SkyPilot lanzó para `cluster` (filtrando por el mismo tag 'ray-cluster-name'
+    que usa el backend Azure de SkyPilot, sky/provision/azure/instance.py) y
+    reasigna la Public IP de su NIC a la reservada en la fase 'network'.
+
+    A diferencia de AWS (`ec2.associate_address`, un solo PUT atómico) o de
+    GCP (que exige un baile deleteAccessConfig/addAccessConfig en dos pasos),
+    Azure permite repuntar la Public IP de una NIC existente con un solo PUT
+    sobre su `ip_configuration` -no hace falta desasociar primero.
+
+    NOTA: la lógica está validada contra la documentación de
+    azure-mgmt-compute/azure-mgmt-network y contra el nombre de tag real que
+    usa SkyPilot (TAG_RAY_CLUSTER_NAME='ray-cluster-name',
+    sky/provision/constants.py), pero -igual que el resto de esta
+    implementación Azure- no se ha ejercitado todavía contra una suscripción
+    real (ver Fase 2 del plan). Primer punto a verificar en el primer
+    'sky launch' real."""
+    if not resource_group:
+        raise GatewayEipAssociationError(
+            "No se pudo determinar el Resource Group de Azure para asociar la Public IP "
+            f"del Gateway ({pip_id}): 'resource_group_name' no vino en NetworkOutputs."
+        )
+
+    from azure.mgmt.compute import ComputeManagementClient
+    from azure.mgmt.network import NetworkManagementClient
+
+    from azure_network import _default_credential  # noqa: PLC0415 - import perezoso
+
+    credential, sub_id = _default_credential(subscription_id)
+    compute_client = ComputeManagementClient(credential, sub_id)
+    network_client = NetworkManagementClient(credential, sub_id)
+
+    vm = None
+    for candidate in compute_client.virtual_machines.list(resource_group):
+        tags = candidate.tags or {}
+        for tag_key in ("ray-cluster-name", "skypilot-cluster-name"):
+            valor = tags.get(tag_key, "")
+            if valor == cluster or valor.startswith(f"{cluster}-"):
+                vm = candidate
+                break
+        if vm:
+            break
+
+    if vm is None:
+        raise GatewayEipAssociationError(
+            f"No se encontró la VM de Azure del clúster '{cluster}' en el Resource Group "
+            f"'{resource_group}' para asociar la Public IP del Gateway ({pip_id}). "
+            "El despliegue continuaría con una IP efímera."
+        )
+
+    nics = vm.network_profile.network_interfaces if vm.network_profile else []
+    if not nics:
+        raise GatewayEipAssociationError(
+            f"La VM '{vm.name}' del clúster '{cluster}' no tiene ninguna interfaz de red."
+        )
+    nic_id = nics[0].id
+    match = re.search(
+        r"/resourceGroups/([^/]+)/providers/Microsoft\.Network/networkInterfaces/([^/]+)",
+        nic_id,
+        re.IGNORECASE,
+    )
+    if not match:
+        raise GatewayEipAssociationError(f"No se pudo interpretar el ID de la NIC: {nic_id}")
+    nic_rg, nic_name = match.group(1), match.group(2)
+
+    nic = network_client.network_interfaces.get(nic_rg, nic_name)
+    if not nic.ip_configurations:
+        raise GatewayEipAssociationError(
+            f"La NIC '{nic_name}' de la VM '{vm.name}' no tiene ninguna ip_configuration."
+        )
+    nic.ip_configurations[0].public_ip_address = {"id": pip_id}
+    network_client.network_interfaces.begin_create_or_update(nic_rg, nic_name, nic).result()
+
+
+def _associate_gateway_eip(
+    cluster: str,
+    allocation_id: str,
+    region: str,
+    aws_profile: Optional[str] = None,
+    cloud: str = "aws",
+    resource_group: Optional[str] = None,
+    subscription_id: Optional[str] = None,
+) -> str:
+    """Asocia la Elastic IP/Public IP reservada en la fase 'network' (gateway.
+    dominio.habilitado: true) a la instancia del Gateway recién lanzada, y
+    reconcilia el estado local de SkyPilot -asociar una IP le cambia la IP
+    pública de la instancia, y SkyPilot sigue intentando conectarse por SSH
+    con la IP vieja hasta que se reconcilia, lo que 'sky status --refresh' NO
+    logra por sí solo (falla el chequeo de salud contra la IP vieja y deja el
+    clúster en estado 'INIT' en vez de detectar la nueva IP -comprobado
+    empíricamente en AWS). 'sky start' sí reconoce y adopta la IP nueva del
+    proveedor. Verifica con 'sky exec <gw> true' antes de devolver, porque
+    TODAS las fases siguientes (endpoints, capabilities, capacidad, verify)
+    dependen de 'sky exec' contra este mismo Gateway.
+
+    Solo las ~30 líneas de "encontrar la instancia/VM y repuntar la IP" son
+    específicas de cada nube (`_find_and_associate_aws_eip`/
+    `_find_and_associate_azure_public_ip`); el resto -reconciliación con
+    SkyPilot, limpieza de file_mounts, preservación de .env remoto- es
+    compartido y NO se duplica."""
+    if cloud == "azure":
+        _find_and_associate_azure_public_ip(cluster, allocation_id, resource_group, subscription_id)
+    else:
+        _find_and_associate_aws_eip(cluster, allocation_id, region, aws_profile)
+
     sky_env = _sky_env(aws_profile)
     sky = _sky_binary()
     if sky:
@@ -2504,15 +2626,16 @@ def _associate_gateway_eip(
         )
         if restart.returncode != 0:
             raise GatewayEipAssociationError(
-                f"La Elastic IP se asoció a {instance_id}, pero 'sky start {cluster}' (para que "
-                f"SkyPilot reconozca la IP nueva) falló: {restart.stderr.strip() or restart.stdout.strip()}"
+                f"La IP se asoció al Gateway del clúster '{cluster}', pero 'sky start {cluster}' "
+                f"(para que SkyPilot reconozca la IP nueva) falló: "
+                f"{restart.stderr.strip() or restart.stdout.strip()}"
             )
 
     new_ip = _gateway_public_ip(cluster, aws_profile=aws_profile)
     if not new_ip:
         raise GatewayEipAssociationError(
-            f"La Elastic IP se asoció a {instance_id}, pero 'sky status --ip {cluster}' no devolvió "
-            "ninguna IP tras reconciliar con 'sky start'."
+            f"La IP se asoció al Gateway del clúster '{cluster}', pero 'sky status --ip {cluster}' "
+            "no devolvió ninguna IP tras reconciliar con 'sky start'."
         )
 
     if sky:
@@ -2529,7 +2652,7 @@ def _associate_gateway_eip(
                 "exec",
                 cluster,
                 "for f in config_global.yaml .ssh_bastion_key; do "
-                f"p={remote_root_for('aws')}/$f; "  # función AWS-only (boto3 ec2.associate_address)
+                f"p={remote_root_for(cloud)}/$f; "
                 '[ -f "$p" ] && [ ! -L "$p" ] && rm -f "$p"; '
                 "done; true",
             ],
@@ -2546,7 +2669,7 @@ def _associate_gateway_eip(
         env_path = REPO_ROOT / ".env"
         if env_path.exists():
             payload = env_path.read_text(encoding="utf-8")
-            remote_env = f"{remote_root_for('aws')}/.env"  # función AWS-only
+            remote_env = f"{remote_root_for(cloud)}/.env"
 
             # PERO: GATEWAY_RUN_SCRIPT y ensure_openwebui_key.py (ambos ya
             # corrieron, EN ESTA MISMA fase, justo antes) le añadieron a ESE
@@ -3017,6 +3140,12 @@ def deploy(
                       f"VNet={network_outputs.vnet_id} ({network_outputs.vnet_name}) "
                       f"NSG-gateway={network_outputs.nsg_gateway_id} NSG-workers={network_outputs.nsg_workers_id} "
                       f"({time.monotonic() - t0:.1f}s)")
+                if network_outputs.gateway_eip_public_ip:
+                    print(
+                        f"[RED] Public IP del Gateway reservada: {network_outputs.gateway_eip_public_ip} "
+                        f"({network_outputs.gateway_eip_allocation_id}) -crea el registro DNS A con esta "
+                        "IP antes de continuar."
+                    )
                 builder.apply_network_outputs(network_outputs)
                 artefactos = generate_manifests(config, out_dir, builder=builder)
         elif red.get("gestion_red", "auto") == "auto":
@@ -3171,8 +3300,12 @@ def deploy(
                     eip_alloc_id,
                     red["region"],
                     red.get("aws_profile"),
+                    cloud=cloud,
+                    resource_group=getattr(net_outputs, "resource_group_name", None),
+                    subscription_id=os.environ.get("AZURE_SUBSCRIPTION_ID"),
                 )
-                print(f"[GATEWAY] Elastic IP asociada: {associated_ip}")
+                ip_label = "Elastic IP" if cloud == "aws" else "Public IP"
+                print(f"[GATEWAY] {ip_label} asociada: {associated_ip}")
                 if state and deployment_id:
                     state.log_event(
                         deployment_id,
