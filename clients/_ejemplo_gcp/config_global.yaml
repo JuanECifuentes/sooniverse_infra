@@ -1,0 +1,157 @@
+# ==============================================================================
+# PLANTILLA DE CLIENTE -- GOOGLE CLOUD, modo "hosted" (cuenta propia)
+# ==============================================================================
+# ⚠️ IMPLEMENTACIÓN TEÓRICA -- NO PROBADA EN EJECUCIÓN. ⚠️
+# Este soporte se escribió sin acceso a un proyecto GCP real (sin cuota de GPU
+# aprobada al momento de escribirlo). El código (scripts/gcp_network.py) está
+# validado contra el esquema real de la API de Compute Engine v1 y contra el
+# código fuente instalado de SkyPilot 0.13.0, pero JAMÁS se ejecutó contra un
+# proyecto GCP real. Antes de un despliegue real:
+#   1. `sky check gcp -v` debe salir 'enabled'.
+#   2. Ejercitar cada fase con `--dry-run` primero.
+#   3. Revisar el docstring de scripts/gcp_network.py (mapeo de recursos,
+#      mecanismo de propiedad vía 'description', limitaciones conocidas).
+#
+# Antes de usar esta plantilla:
+#   1. cp -r clients/_ejemplo_gcp clients/<id-del-cliente>
+#   2. Crea una Service Account con rol Compute Network Admin + Compute Instance
+#      Admin en el proyecto GCP, descarga su key JSON, y apunta
+#      GOOGLE_APPLICATION_CREDENTIALS a esa ruta en .env (o usa
+#      `gcloud auth application-default login` para ADC del operador).
+#   3. Ajusta cliente.id, red_y_aislamiento.region/gcp_project/vpc_cidr y workloads.
+#   4. Usa ese archivo con --config en todos los comandos, igual que con AWS/Azure:
+#        python scripts/generate_infra.py --config clients/<id>/config_global.yaml --run --dry-run
+#
+# Diferencias de vocabulario frente a un cliente AWS/Azure (rellenar con
+# valores reales de GCP, NO hay traducción automática):
+#   - red_y_aislamiento.region: slug de GCP (ej. "us-central1"), no "us-east-1"
+#     ni "eastus". GCP elige la ZONA dentro de esa región por su cuenta
+#     (SkyPilot hace failover entre zonas sin que este contrato lo sepa).
+#   - red_y_aislamiento.image_id: no aplica -SkyPilot usa su propia imagen base
+#     de GCP (Debian/Ubuntu con drivers NVIDIA); se ignora si se rellena.
+#   - gateway.tipo_instancia / workloads[].tipo_instancia: machine type de GCP
+#     (ej. "n2-standard-2", "n1-standard-4" para acompañar una T4 vía
+#     --accelerator, o "a2-highgpu-1g" para A100), no un SKU de Azure ni un
+#     tipo de instancia de AWS.
+#   - Antes de lanzar workers GPU: pide la cuota de GPU (NVIDIA_T4_GPUS o
+#     equivalente) en la región elegida desde el Portal de GCP (Cuotas de IAM).
+#
+# Fuera de alcance en esta versión (ver ConfigValidator/gcp_network.py):
+#   - red_y_aislamiento.gestion_red: "existente" (red pre-creada a mano).
+#   - red_y_aislamiento.nat_gateway.modo: "per-az" (no existe: las subredes de
+#     GCP son REGIONALES, no zonales) -solo "single" | "none".
+#   - red_y_aislamiento.azs: != 1 (mismo motivo: subredes regionales).
+#   - gateway.dominio.habilitado: true -- NO IMPLEMENTADO para GCP en esta
+#     versión (sin IP externa estática reservada ni reasignación de IP al
+#     Gateway tras 'sky launch'; ConfigValidator._validate_dominio lo rechaza
+#     explícitamente). Deja 'habilitado: false' (IP efímera + HTTP, o TLS
+#     self-signed) hasta que se implemente y verifique contra un proyecto real.
+# ==============================================================================
+
+# 1. Datos del Cliente y Entorno
+cliente:
+  id: "mi-cliente-gcp"          # ÚNICO por cliente: minúsculas, [a-z0-9-], máx 20 caracteres.
+  entorno: "dev"                 # prod | dev
+  modo: "hosted"                 # GCP BYOC no implementado -ver docs/05_MULTICLIENTE.md (AWS)
+
+# 2. Variables de Red y Aislamiento
+red_y_aislamiento:
+  cloud: "gcp"                    # NUEVO: aws (default) | azure | gcp
+  region: "us-central1"           # slug de GCP, no "us-east-1" ni "eastus"
+  gcp_project: "mi-proyecto-gcp"  # ID del proyecto GCP (obligatorio para cloud: gcp)
+  gcp_credentials_file: null      # ruta a la key JSON de la Service Account; null = ADC del entorno
+  aws_profile: null                # sin efecto con cloud: gcp
+  image_id: null                   # sin efecto -SkyPilot usa su propia imagen base de GCP
+  gestion_red: "auto"               # único modo soportado en GCP por ahora
+  vpc_name: null
+  vpc_id: null
+  subnet_id: null
+  vpc_cidr: "10.30.0.0/16"          # CIDR de la VPC -distinto al de otros clientes activos
+  azs: 1                             # OBLIGATORIO en GCP: subredes regionales, no zonales
+  subredes:
+    publicas: null
+    privadas: null
+  nat_gateway:
+    modo: "single"                  # single | none (GCP no tiene "per-az")
+    timeout_segundos: 300
+  vpc_endpoints:
+    s3: true                        # sin efecto directo -GCP usa 'privateIpGoogleAccess' en la subred privada (siempre activo)
+    ecr: false
+  workers_en_subred_privada: true
+  cidr_permitido_gateway: "0.0.0.0/0"
+  cidr_admin_ssh: "0.0.0.0/0"        # Restringe a la IP/VPN del operador en producción real.
+  security_group_workers: null
+  security_group_gateway: null
+  tags_obligatorios:
+    cliente_id: "mi-cliente-gcp"
+    modo: "hosted"
+    entorno: "dev"
+    gestionado_por: "sooniverse"
+
+# 3. Nodo Gateway
+gateway:
+  habilitado: true
+  tipo_instancia: "n2-standard-2"      # machine type de GCP (CPU-only), no un SKU de Azure
+  disk_size: 100
+  exponer_puertos_directos: false
+  puertos_publicos:
+    - 4000
+    - 8080
+    - 8000
+  load_balancing_strategy: "latency-based-routing"
+  # Dominio propio + TLS real: NO IMPLEMENTADO en GCP en esta versión -ver el
+  # encabezado de este archivo y scripts/gcp_network.py. Debe quedar en
+  # 'habilitado: false'; ConfigValidator lo rechaza si se activa.
+  dominio:
+    habilitado: false
+    seleccionado: null
+    disponibles: []
+    staging: false
+    redirigir_http: true
+    eip_persistente: true
+    esperar_dns_segundos: 300
+  tls:
+    habilitado: false                 # true + modo: self-signed sí funcionaría (certbot/openssl en la VM), sin dominio propio
+    modo: "self-signed"
+    dominio: null
+  litellm:
+    master_key_env: "LITELLM_MASTER_KEY"
+    num_retries: 2
+    request_timeout: 600
+    cooldown_time: 30
+    allowed_fails: 2
+  open_webui:
+    habilitado: true
+    signup_habilitado: false
+    tareas_automaticas: "segun_capacidades"
+    code_interpreter: "segun_capacidades"
+  django_metrics:
+    habilitado: true
+    puerto: 8000
+    metrics_refresh_interval: 300
+
+# 4. Automatización de Base de Datos
+base_de_datos:
+  AUTO_INIT_DB: true
+  auto_refresh_metrics: true
+  schema_dir: "database"
+
+# 5. Perfil de Cargas de Trabajo -- accelerator + machine type de GCP.
+#    Pide antes la cuota de GPU (ej. NVIDIA_T4_GPUS) en esta región desde el
+#    Portal de GCP (IAM y administración -> Cuotas).
+workloads:
+  - id: "qwen3-5-llm"
+    modelo: "qwen3.5"
+    hf_repo: "cyankiwi/Qwen3.5-2B-AWQ-4bit"
+    tipo_tarea: "llm-texto"
+    accelerator: "T4"                    # SkyPilot traduce esto a --accelerator T4:N sobre GCP
+    cantidad_gpus: 1
+    replicas: 1
+    tipo_instancia: "n1-standard-4"       # machine type de GCP que acompaña la T4, no un SKU de Azure
+    puerto: 8007
+    nombre_publico: "sooniverse-qwen3.5"
+    peso_balanceo: 1
+    asignacion_fraccional:
+      habilitado: true
+      gpu_memory_utilization: 0.95
+      max_model_len: 16384

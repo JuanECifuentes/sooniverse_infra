@@ -172,12 +172,15 @@ class ConfigValidator:
     # "aws" es el default histórico e implícito: ningún config_global.yaml
     # existente trae 'cloud', así que su ausencia debe seguir comportándose
     # exactamente igual que hoy (ver ConfigValidator._validate_red).
-    ALLOWED_CLOUDS = {"aws", "azure"}
+    ALLOWED_CLOUDS = {"aws", "azure", "gcp"}
     ALLOWED_GESTION_RED = {"auto", "existente"}
     ALLOWED_NAT_MODOS = {"single", "per-az", "none"}
     # Azure NAT Gateway se asocia a nivel de subred, sin el concepto "per-az" de
     # AWS (las subredes de Azure no son zonales) -ver scripts/azure_network.py.
     ALLOWED_NAT_MODOS_AZURE = {"single", "none"}
+    # GCP: mismo motivo que Azure (subredes REGIONALES, no zonales) -ver
+    # scripts/gcp_network.py. Implementación teórica, no probada en ejecución.
+    ALLOWED_NAT_MODOS_GCP = {"single", "none"}
     ALLOWED_TLS_MODOS = {"self-signed", "letsencrypt", "acm"}
     # 'segun_capacidades' (default): la verdad observada en sooniverse.model_capability
     # decide. 'activado'/'desactivado': escape manual del operador.
@@ -290,6 +293,8 @@ class ConfigValidator:
         # gestion_red == "auto": *NetworkManager crea la red; validar el resto del contrato.
         if cloud == "azure":
             cls._validate_red_azure(red)
+        elif cloud == "gcp":
+            cls._validate_red_gcp(red)
         else:
             cls._validate_red_auto(red)
 
@@ -402,6 +407,51 @@ class ConfigValidator:
                 "'workers_en_subred_privada: true' con 'nat_gateway.modo: none' en Azure deja a los "
                 "workers sin salida a internet para descargar el modelo (no hay equivalente a "
                 "'vpc_endpoints.s3' que lo compense en esta versión)."
+            )
+
+    @classmethod
+    def _validate_red_gcp(cls, red: Dict[str, Any]) -> None:
+        """Equivalente de `_validate_red_azure` para `cloud: gcp`
+        (scripts/gcp_network.py::GcpNetworkManager). ⚠️ Implementación
+        teórica, no probada contra un proyecto GCP real -ver el docstring de
+        gcp_network.py."""
+        vpc_cidr_raw = red.get("vpc_cidr")
+        if not vpc_cidr_raw:
+            raise ConfigValidationError("Falta 'red_y_aislamiento.vpc_cidr' (requerido en modo 'auto').")
+        try:
+            ipaddress.ip_network(vpc_cidr_raw, strict=True)
+        except ValueError as exc:
+            raise ConfigValidationError(f"'red_y_aislamiento.vpc_cidr' inválido: {exc}") from exc
+
+        azs = red.get("azs", 1)
+        if azs != 1:
+            raise ConfigValidationError(
+                f"'red_y_aislamiento.azs' = {azs} no soportado en GCP: las subredes son REGIONALES, "
+                "no zonales (SkyPilot elige la zona dentro de la región por su cuenta). Usa 'azs: 1'."
+            )
+
+        nat = red.get("nat_gateway") or {}
+        if not isinstance(nat, dict):
+            raise ConfigValidationError("'red_y_aislamiento.nat_gateway' debe ser un mapa.")
+        nat_modo = nat.get("modo", "single")
+        if nat_modo not in cls.ALLOWED_NAT_MODOS_GCP:
+            raise ConfigValidationError(
+                f"'red_y_aislamiento.nat_gateway.modo' inválido para GCP: '{nat_modo}'. "
+                f"Permitidos: {cls.ALLOWED_NAT_MODOS_GCP} ('per-az' no existe: Cloud NAT se asocia "
+                "a un Cloud Router regional, sin concepto de zona)."
+            )
+
+        privada = red.get("workers_en_subred_privada", True)
+        if privada and nat_modo == "none":
+            raise ConfigValidationError(
+                "'workers_en_subred_privada: true' con 'nat_gateway.modo: none' en GCP deja a los "
+                "workers sin salida a internet para descargar el modelo (Private Google Access solo "
+                "cubre las APIs de Google, no salida general a internet)."
+            )
+
+        if not red.get("gcp_project"):
+            raise ConfigValidationError(
+                "Falta 'red_y_aislamiento.gcp_project' (ID del proyecto GCP; requerido para 'cloud: gcp')."
             )
 
     @classmethod
@@ -1609,6 +1659,18 @@ class TopologyBuilder:
                 azure_cfg["vpc_name"] = net.vnet_name
             return {"azure": azure_cfg} if azure_cfg else {}
 
+        if self.red.get("cloud", "aws") == "gcp":
+            # ⚠️ Teórico, no probado en ejecución (ver scripts/gcp_network.py).
+            # El esquema `gcp` de SkyPilot (additionalProperties=False) no
+            # tiene ningún equivalente a 'security_group_name' ni forma de
+            # pinear network tags a la VM -ver el docstring de gcp_network.py
+            # sobre por qué las reglas de firewall se acotan por sourceRanges
+            # en vez de por grupo/tag.
+            gcp_cfg: Dict[str, Any] = {}
+            if net:
+                gcp_cfg["vpc_name"] = net.vpc_name
+            return {"gcp": gcp_cfg} if gcp_cfg else {}
+
         aws_cfg: Dict[str, Any] = {}
         vpc_name = net.vpc_name if net else self.red.get("vpc_name")
         sg_gateway = (
@@ -1655,6 +1717,27 @@ class TopologyBuilder:
                         f"-o ConnectTimeout=10 -i {gateway_ssh_key} {remote_user_for('azure')}@{gateway_ip}"
                     )
             return {"azure": azure_cfg} if azure_cfg else {}
+
+        if self.red.get("cloud", "aws") == "gcp":
+            # ⚠️ Teórico, no probado en ejecución. Mismas claves que
+            # build_sky_gateway_config(); sin 'security_group_name' (no existe
+            # en el esquema `gcp` de SkyPilot -ver gcp_network.py).
+            gcp_cfg: Dict[str, Any] = {}
+            if net:
+                gcp_cfg["vpc_name"] = net.vpc_name
+            if self.red.get("workers_en_subred_privada", True):
+                gcp_cfg["use_internal_ips"] = True
+                if gateway_ip:
+                    gateway_ssh_key = (
+                        Path.home() / ".sky" / "generated" / "ssh-keys" / f"{self.gateway_cluster}.key"
+                    )
+                    if gateway_ssh_key.exists():
+                        os.chmod(gateway_ssh_key, 0o600)
+                    gcp_cfg["ssh_proxy_command"] = (
+                        f"ssh -W %h:%p -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                        f"-o ConnectTimeout=10 -i {gateway_ssh_key} {remote_user_for('gcp')}@{gateway_ip}"
+                    )
+            return {"gcp": gcp_cfg} if gcp_cfg else {}
 
         aws_cfg: Dict[str, Any] = {}
         vpc_name = net.vpc_name if net else self.red.get("vpc_name")
@@ -1806,6 +1889,33 @@ def build_network_spec_from_config(config: Dict[str, Any]) -> "Any":
             else None,
         )
 
+    if red.get("cloud", "aws") == "gcp":
+        from gcp_network import GcpNetworkSpec  # import perezoso: SDK de GCP solo hace falta aquí
+
+        # ⚠️ Teórico, no probado en ejecución (ver scripts/gcp_network.py).
+        # Sin gateway_eip/gateway_domain: dominio propio NO implementado para
+        # GCP en esta versión -ver ConfigValidator._validate_dominio, que
+        # sigue rechazando 'cloud: gcp' con 'gateway.dominio.habilitado: true'.
+        return GcpNetworkSpec(
+            client_id=cliente["id"],
+            environment=cliente["entorno"],
+            region=red["region"],
+            project_id=red.get("gcp_project", ""),
+            vnet_cidr=red.get("vpc_cidr", "10.0.0.0/16"),
+            az_count=red.get("azs", 1),
+            public_subnet_cidrs=subredes.get("publicas"),
+            private_subnet_cidrs=subredes.get("privadas"),
+            nat_mode=nat.get("modo", "single"),
+            admin_cidrs=[red.get("cidr_admin_ssh", "0.0.0.0/0")],
+            public_cidrs=[red.get("cidr_permitido_gateway", "0.0.0.0/0")],
+            gateway_public_ports=gw.get("puertos_publicos", [80, 4000, 8000, 8080]),
+            worker_ports=worker_ports,
+            expose_direct_ports=bool(gw.get("exponer_puertos_directos", False)),
+            tls_enabled=bool(tls.get("habilitado", False)),
+            extra_tags=red.get("tags_obligatorios") or {},
+            credentials_file=red.get("gcp_credentials_file"),
+        )
+
     from aws_network import NetworkSpec  # import perezoso: boto3 solo hace falta aquí
 
     endpoints = red.get("vpc_endpoints") or {}
@@ -1898,6 +2008,46 @@ def load_network_outputs_from_state(
             managed_by_us=True,
             gateway_eip_allocation_id=(first("pip-gateway") or {}).get("aws_id"),
             gateway_eip_public_ip=((first("pip-gateway") or {}).get("attributes") or {}).get("public_ip"),
+        )
+
+    if red.get("cloud", "aws") == "gcp":
+        from gcp_network import GcpNetworkOutputs
+
+        # ⚠️ Teórico, no probado en ejecución (ver scripts/gcp_network.py).
+        vpc_row = first("vpc")
+        subnet_pub_row = first("subnet-public")
+        subnet_priv_row = first("subnet-private")
+        if not vpc_row or not subnet_pub_row or not subnet_priv_row:
+            return None
+
+        def resolved_name_gcp(row: Dict[str, Any], fallback_suffix: str) -> str:
+            attrs = row.get("attributes") or {}
+            return attrs.get("name") or f"sooniverse-{cliente['id']}-{cliente['entorno']}-{fallback_suffix}"
+
+        router_row = first("router")
+        nat_row = first("nat")
+        firewall_rows = [
+            res for comp, rows in by_component.items() if comp.startswith("fw-") for res in rows
+        ]
+
+        return GcpNetworkOutputs(
+            deployment_id=deployment_id,
+            project_id=red.get("gcp_project", ""),
+            region=red["region"],
+            vpc_id=vpc_row["aws_id"],
+            vpc_name=resolved_name_gcp(vpc_row, "vpc"),
+            public_subnet_id=subnet_pub_row["aws_id"],
+            public_subnet_name=resolved_name_gcp(subnet_pub_row, "subnet-public"),
+            public_subnet_cidr=(subnet_pub_row.get("attributes") or {}).get("cidr", ""),
+            private_subnet_id=subnet_priv_row["aws_id"],
+            private_subnet_name=resolved_name_gcp(subnet_priv_row, "subnet-private"),
+            private_subnet_cidr=(subnet_priv_row.get("attributes") or {}).get("cidr", ""),
+            router_id=(router_row or {}).get("aws_id"),
+            router_name=((router_row or {}).get("attributes") or {}).get("name"),
+            nat_name=((nat_row or {}).get("attributes") or {}).get("name"),
+            firewall_ids=[res["aws_id"] for res in firewall_rows],
+            firewall_names=[(res.get("attributes") or {}).get("name", "") for res in firewall_rows],
+            managed_by_us=True,
         )
 
     from aws_network import NetworkOutputs
@@ -3267,6 +3417,24 @@ def deploy(
                         f"({network_outputs.gateway_eip_allocation_id}) -crea el registro DNS A con esta "
                         "IP antes de continuar."
                     )
+                builder.apply_network_outputs(network_outputs)
+                artefactos = generate_manifests(config, out_dir, builder=builder)
+        elif red.get("gestion_red", "auto") == "auto" and cloud == "gcp":
+            # ⚠️ Teórico, no probado en ejecución (ver scripts/gcp_network.py).
+            from gcp_network import GcpNetworkManager
+
+            spec = build_network_spec_from_config(config)
+            mgr = GcpNetworkManager(spec, state=state, deployment_id=deployment_id)
+            if dry_run:
+                print("[RED] --dry-run: no se ejecuta ninguna llamada mutante a GCP.")
+                for item in mgr.plan_destroy():
+                    print(f"       (existente) {item.component} {item.gcp_id}")
+            else:
+                t0 = time.monotonic()
+                network_outputs = mgr.provision()
+                print(f"[RED] VPC={network_outputs.vpc_id} ({network_outputs.vpc_name}) "
+                      f"Router={network_outputs.router_name} NAT={network_outputs.nat_name} "
+                      f"({time.monotonic() - t0:.1f}s)")
                 builder.apply_network_outputs(network_outputs)
                 artefactos = generate_manifests(config, out_dir, builder=builder)
         elif red.get("gestion_red", "auto") == "auto":

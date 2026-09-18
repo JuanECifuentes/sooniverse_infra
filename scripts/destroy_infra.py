@@ -537,15 +537,21 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
         from azure_network import AzureNetworkManager
 
         mgr = AzureNetworkManager(spec, state=state, deployment_id=deployment_id)
+    elif cloud == "gcp":
+        # ⚠️ Teórico, no probado en ejecución (ver scripts/gcp_network.py).
+        from gcp_network import GcpNetworkManager
+
+        mgr = GcpNetworkManager(spec, state=state, deployment_id=deployment_id)
     else:
         from aws_network import AwsNetworkManager
 
         mgr = AwsNetworkManager(spec, state=state, deployment_id=deployment_id)
 
     report = mgr.destroy(dry_run=args.dry_run, force=args.force)
-    # AzureNetworkManager.PlannedDeletion usa 'azure_id' en vez de 'aws_id'
-    # (mismo campo conceptual, nombre distinto -ver azure_network.py).
-    id_attr = "aws_id" if cloud == "aws" else "azure_id"
+    # AzureNetworkManager.PlannedDeletion usa 'azure_id'; GcpNetworkManager
+    # usa 'gcp_id' (mismo campo conceptual, nombre distinto -ver los
+    # docstrings de azure_network.py/gcp_network.py).
+    id_attr = {"aws": "aws_id", "azure": "azure_id", "gcp": "gcp_id"}.get(cloud, "aws_id")
 
     if args.dry_run:
         kept_ids = {getattr(item, id_attr) for item in getattr(report, "kept_persistent", [])}
@@ -619,6 +625,30 @@ def main() -> int:
                     print("[ABORTADO] --purge-orphans requiere --yes.")
                     return 1
                 purge_orphans_azure(orphans)
+            return 0
+
+        if cloud == "gcp":
+            # ⚠️ Teórico, no probado en ejecución. GcpNetworkManager.scan_orphans()
+            # ya lista huérfanos reales (ver scripts/gcp_network.py), pero
+            # --purge-orphans NO está implementado todavía para GCP -bórralos a
+            # mano con 'gcloud compute <tipo> delete <nombre>' hasta que se
+            # implemente y verifique contra un proyecto real.
+            from gcp_network import GcpNetworkManager
+
+            spec = build_network_spec_from_config(config)
+            mgr = GcpNetworkManager(spec, deployment_id="scan-orphans-temporal")
+            orphans = mgr.scan_orphans()
+            if not orphans:
+                print("[OK] No se encontraron recursos huérfanos de sooniverse en el proyecto/región.")
+            else:
+                print(f"\n{'TIPO':<20} ID")
+                print("-" * 100)
+                for o in orphans:
+                    print(f"{o['type']:<20} {o['gcp_id']}")
+            if args.purge_orphans:
+                print("[ABORTADO] --purge-orphans no está implementado para GCP en esta versión "
+                      "(implementación teórica, no probada). Bórralos manualmente con 'gcloud'.")
+                return 1
             return 0
 
         region = config["red_y_aislamiento"]["region"]
