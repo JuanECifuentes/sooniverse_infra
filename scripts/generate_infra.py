@@ -38,6 +38,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from cloud_remote import remote_root_for, remote_user_for  # noqa: E402
+
 # Con stdout/stderr redirigidos a un archivo (el patrón real de uso: 'nohup
 # ... --run > deploy.log 2>&1 &'), Python usa buffering POR BLOQUE en vez de
 # por línea -confirmado en un despliegue real: los `print()` de ESTE script
@@ -101,6 +103,17 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "config_global.yaml"
 DEFAULT_MAX_NUM_SEQS = 16
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 
+# workloads[].runtime_vllm.<campo> -> nombre de la env var que WORKER_RUN_SCRIPT
+# exporta a 'docker compose' (ver TopologyBuilder.build_worker). Ausente/None =
+# no se exporta y el entrypoint/compose usa su propio default.
+RUNTIME_VLLM_ENV_MAP = {
+    "dtype": "DTYPE",
+    "kv_cache_dtype": "KV_CACHE_DTYPE",
+    "enforce_eager": "ENFORCE_EAGER",
+    "mamba_ssm_cache_dtype": "MAMBA_SSM_CACHE_DTYPE",
+    "attention_backend": "VLLM_ATTENTION_BACKEND",
+}
+
 # Rampa por defecto del benchmark de capacidad (sección 'capacidad').
 DEFAULT_NIVELES_CONCURRENCIA = [1, 2, 4, 8, 16]
 
@@ -131,7 +144,9 @@ def artifacts_dir_for(config_path: Path, config: Dict[str, Any]) -> Path:
     return per_client_dir
 
 
-REMOTE_ROOT = "/home/ubuntu/sooniverse_infra"
+# REMOTE_ROOT ya NO es una constante: varía por nube (usuario SSH que SkyPilot crea
+# en el Gateway/Workers -'ubuntu' en AWS, 'azureuser' en Azure, 'gcpuser' en GCP,
+# ver scripts/cloud_remote.py). Usa remote_root_for(cloud) / remote_user_for(cloud).
 
 
 class ConfigValidationError(Exception):
@@ -651,6 +666,41 @@ class ConfigValidator:
                     )
 
             cls._validate_concurrencia(wl_id, wl)
+            cls._validate_runtime_vllm(wl_id, wl)
+
+    @classmethod
+    def _validate_runtime_vllm(cls, wl_id: str, wl: Dict[str, Any]) -> None:
+        """'runtime_vllm' (opcional): overrides de bajo nivel del entrypoint vLLM
+        -DTYPE/KV_CACHE_DTYPE/ENFORCE_EAGER/MAMBA_SSM_CACHE_DTYPE/
+        VLLM_ATTENTION_BACKEND (ver RUNTIME_VLLM_ENV_MAP y build_worker()).
+        Necesario para GPUs Turing (T4): no soportan bfloat16
+        ('runtime_vllm.dtype: half') ni FlashAttention-2
+        ('runtime_vllm.attention_backend' distinto de FLASH_ATTN)."""
+        runtime_vllm = wl.get("runtime_vllm")
+        if runtime_vllm is None:
+            return
+        if not isinstance(runtime_vllm, dict):
+            raise ConfigValidationError(
+                f"Workload '{wl_id}': 'runtime_vllm' debe ser un objeto."
+            )
+        campos_desconocidos = set(runtime_vllm) - set(RUNTIME_VLLM_ENV_MAP)
+        if campos_desconocidos:
+            raise ConfigValidationError(
+                f"Workload '{wl_id}': 'runtime_vllm' tiene campo(s) desconocido(s) "
+                f"{sorted(campos_desconocidos)}. Permitidos: {sorted(RUNTIME_VLLM_ENV_MAP)}."
+            )
+        if "enforce_eager" in runtime_vllm and not isinstance(
+            runtime_vllm["enforce_eager"], bool
+        ):
+            raise ConfigValidationError(
+                f"Workload '{wl_id}': 'runtime_vllm.enforce_eager' debe ser booleano."
+            )
+        for campo in ("dtype", "kv_cache_dtype", "mamba_ssm_cache_dtype", "attention_backend"):
+            valor = runtime_vllm.get(campo)
+            if valor is not None and not isinstance(valor, str):
+                raise ConfigValidationError(
+                    f"Workload '{wl_id}': 'runtime_vllm.{campo}' debe ser texto."
+                )
 
     @classmethod
     def _validate_concurrencia(cls, wl_id: str, wl: Dict[str, Any]) -> None:
@@ -841,7 +891,9 @@ sudo nvidia-modprobe -u -c=0
 if ! command -v docker &> /dev/null; then
     curl -fsSL https://get.docker.com -o get-docker.sh
     sudo sh get-docker.sh
-    sudo usermod -aG docker ubuntu
+    # Usuario SSH remoto: varía por nube (ubuntu/azureuser/gcpuser), ver
+    # scripts/cloud_remote.py -antes hardcodeado a 'ubuntu', roto fuera de AWS.
+    sudo usermod -aG docker {remote_user}
 fi
 
 # D. NVIDIA Container Toolkit (expone la GPU a Docker)
@@ -869,6 +921,11 @@ echo "===> [WORKER rank ${{SKYPILOT_NODE_RANK:-0}}] Desplegando vLLM ({wl_id})"
 cd {remote_root}/docker_images/{modelo}
 
 export MODEL_NAME="${{MODEL_NAME}}"
+# Puerto del worker (workloads[].puerto en el contrato). ANTES este valor
+# viajaba en un 'VLLM_PORT' que ningún entrypoint.sh leía -los tres leen
+# 'PORT'- así que el puerto real quedaba acoplado al default hardcodeado de
+# cada imagen (8007/8008/8009) en vez de al contrato. Ahora sí llega.
+export PORT="${{PORT}}"
 export GPU_MEMORY_UTILIZATION="${{GPU_MEMORY_UTILIZATION}}"
 export MAX_MODEL_LEN="${{MAX_MODEL_LEN}}"
 export ENABLE_VISION="${{ENABLE_VISION}}"
@@ -879,10 +936,27 @@ export TOOL_CALL_PARSER="${{TOOL_CALL_PARSER}}"
 # max_num_seqs=2: dos peticiones concurrentes por worker).
 export MAX_NUM_SEQS="${{MAX_NUM_SEQS}}"
 export MAX_NUM_BATCHED_TOKENS="${{MAX_NUM_BATCHED_TOKENS}}"
+# GPUs por réplica (workloads[].cantidad_gpus). ANTES SkyPilot pedía la
+# instancia con N GPUs pero ningún compose exportaba TENSOR_PARALLEL_SIZE ni
+# reservaba más de 1 GPU -se pagaban N GPUs y vLLM usaba solo la primera.
+export TENSOR_PARALLEL_SIZE="${{TENSOR_PARALLEL_SIZE}}"
+# Overrides de bajo nivel de vLLM (workloads[].runtime_vllm en el contrato).
+# ANTES ninguno de estos llegaba al 'docker compose' pese a que los tres
+# composes ya los aceptan como ${{VAR:-default}} -sin esto no hay forma de
+# fijar DTYPE=half en una GPU Turing (T4), que no soporta bfloat16, ni de
+# apartarse de VLLM_ATTENTION_BACKEND=FLASH_ATTN (hardcodeado en dos de los
+# tres composes, y FlashAttention-2 exige SM80+). Vacío = el compose usa su
+# propio default; solo se exporta si SkyPilot lo inyectó (ver
+# TopologyBuilder.build_worker -no todos los workloads declaran runtime_vllm).
+export DTYPE="${{DTYPE:-}}"
+export KV_CACHE_DTYPE="${{KV_CACHE_DTYPE:-}}"
+export ENFORCE_EAGER="${{ENFORCE_EAGER:-}}"
+export MAMBA_SSM_CACHE_DTYPE="${{MAMBA_SSM_CACHE_DTYPE:-}}"
+export VLLM_ATTENTION_BACKEND="${{VLLM_ATTENTION_BACKEND:-}}"
 
 sudo docker compose up -d
 sudo docker compose ps
-echo "===> vLLM con max_num_seqs=${{MAX_NUM_SEQS}} max_num_batched_tokens=${{MAX_NUM_BATCHED_TOKENS}}"
+echo "===> vLLM con max_num_seqs=${{MAX_NUM_SEQS}} max_num_batched_tokens=${{MAX_NUM_BATCHED_TOKENS}} tensor_parallel_size=${{TENSOR_PARALLEL_SIZE}}"
 
 # El worker solo escucha en la red interna de la VPC; LiteLLM en el Gateway lo consume.
 SELF_IP=$(hostname -I | awk '{{print $1}}')
@@ -905,7 +979,9 @@ apt_retry update && apt_retry install -y curl jq python3-pip postgresql-client
 if ! command -v docker &> /dev/null; then
     curl -fsSL https://get.docker.com -o get-docker.sh
     sudo sh get-docker.sh
-    sudo usermod -aG docker ubuntu
+    # Usuario SSH remoto: varía por nube (ubuntu/azureuser/gcpuser), ver
+    # scripts/cloud_remote.py -antes hardcodeado a 'ubuntu', roto fuera de AWS.
+    sudo usermod -aG docker {remote_user}
 fi
 sudo systemctl enable --now docker
 sudo chmod 666 /var/run/docker.sock
@@ -1170,6 +1246,11 @@ class TopologyBuilder:
         self, worker_endpoints: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         gw = self.gateway
+        # Usuario y raíz remota que SkyPilot crea en el Gateway, según la
+        # nube -ver scripts/cloud_remote.py.
+        cloud = self.red.get("cloud")
+        remote_user = remote_user_for(cloud)
+        remote_root = remote_root_for(cloud)
         tls_cfg = gw.get("tls", {}) or {}
         tls_enabled = bool(tls_cfg.get("habilitado", False))
         expose_direct = bool(gw.get("exponer_puertos_directos", False))
@@ -1219,13 +1300,13 @@ class TopologyBuilder:
         }
 
         file_mounts = {
-            f"{REMOTE_ROOT}/docker_images/gateway": "./docker_images/gateway",
-            f"{REMOTE_ROOT}/docker_images/openwebui": "./docker_images/openwebui",
-            f"{REMOTE_ROOT}/database": "./database",
-            f"{REMOTE_ROOT}/scripts": "./scripts",
-            f"{REMOTE_ROOT}/django_metrics": "./django_metrics",
-            f"{REMOTE_ROOT}/config_global.yaml": "./config_global.yaml",
-            f"{REMOTE_ROOT}/.env": "./.env",
+            f"{remote_root}/docker_images/gateway": "./docker_images/gateway",
+            f"{remote_root}/docker_images/openwebui": "./docker_images/openwebui",
+            f"{remote_root}/database": "./database",
+            f"{remote_root}/scripts": "./scripts",
+            f"{remote_root}/django_metrics": "./django_metrics",
+            f"{remote_root}/config_global.yaml": "./config_global.yaml",
+            f"{remote_root}/.env": "./.env",
         }
 
         # Clave SSH que SkyPilot genera LOCALMENTE (máquina del operador/CI que
@@ -1244,7 +1325,7 @@ class TopologyBuilder:
             / f"{self.gateway_cluster}.key"
         )
         if gateway_ssh_key.exists():
-            file_mounts[f"{REMOTE_ROOT}/.ssh_bastion_key"] = str(gateway_ssh_key)
+            file_mounts[f"{remote_root}/.ssh_bastion_key"] = str(gateway_ssh_key)
 
         schema_dir = self.db.get("schema_dir", "database")
 
@@ -1252,13 +1333,13 @@ class TopologyBuilder:
         tls_modo = tls_cfg.get("modo", "self-signed")
         if tls_enabled and tls_modo == "self-signed":
             tls_setup = TLS_SELF_SIGNED_SETUP.format(
-                remote_root=REMOTE_ROOT,
+                remote_root=remote_root,
                 tls_domain=tls_cfg.get("dominio") or "sooniverse.local",
             )
         elif tls_enabled and tls_modo == "letsencrypt":
             dominio_cfg = self.gateway.get("dominio") or {}
             tls_setup = TLS_LETSENCRYPT_SETUP.format(
-                remote_root=REMOTE_ROOT,
+                remote_root=remote_root,
                 tls_domain=tls_cfg["dominio"],
                 email_acme=tls_cfg["email_acme"],
                 staging_flag="--staging" if dominio_cfg.get("staging", False) else "",
@@ -1276,10 +1357,10 @@ class TopologyBuilder:
             "file_mounts": file_mounts,
             "envs": envs,
             "setup": GATEWAY_SETUP_SCRIPT.format(
-                remote_root=REMOTE_ROOT, tls_setup=tls_setup
+                remote_root=remote_root, remote_user=remote_user, tls_setup=tls_setup
             ).strip(),
             "run": GATEWAY_RUN_SCRIPT.format(
-                remote_root=REMOTE_ROOT, schema_dir=schema_dir
+                remote_root=remote_root, schema_dir=schema_dir
             ).strip(),
         }
 
@@ -1287,6 +1368,12 @@ class TopologyBuilder:
     def build_worker(self, wl: Dict[str, Any]) -> Dict[str, Any]:
         modelo = wl.get("modelo", wl["id"])
         frac = wl.get("asignacion_fraccional", {})
+        # Usuario y raíz remota del worker, según la nube -ver
+        # scripts/cloud_remote.py (antes 'ubuntu'/'/home/ubuntu' hardcodeado,
+        # roto fuera de AWS).
+        cloud = self.red.get("cloud")
+        remote_user = remote_user_for(cloud)
+        remote_root = remote_root_for(cloud)
 
         resources: Dict[str, Any] = {
             "cloud": self.red.get("cloud", "aws"),
@@ -1314,6 +1401,11 @@ class TopologyBuilder:
 
         capacidades = wl.get("capacidades", {})
         conc = wl.get("concurrencia", {}) or {}
+        # Overrides de bajo nivel de vLLM, opcionales (ver config_global.yaml).
+        # Vacío/ausente = el entrypoint/compose usa su propio default; solo se
+        # exportan al environment de SkyPilot los que el workload declara
+        # explícitamente, para no pisar el default de la imagen con "".
+        runtime_vllm = wl.get("runtime_vllm") or {}
         envs = {
             **self._base_envs(),
             "ROL_NODO": "worker",
@@ -1322,7 +1414,15 @@ class TopologyBuilder:
             "MODEL_PUBLIC_NAME": wl.get("nombre_publico", wl["id"]),
             "GPU_MEMORY_UTILIZATION": str(frac.get("gpu_memory_utilization", 0.95)),
             "MAX_MODEL_LEN": str(frac.get("max_model_len", 16384)),
-            "VLLM_PORT": str(wl["puerto"]),
+            # Puerto de la API del worker. ANTES viajaba como 'VLLM_PORT', que
+            # ningún entrypoint.sh leía (los tres leen 'PORT') -el puerto real
+            # quedaba acoplado al default hardcodeado de cada imagen en vez de
+            # a este campo del contrato.
+            "PORT": str(wl["puerto"]),
+            # GPUs por réplica -ANTES nunca llegaba a vLLM (ver
+            # WORKER_RUN_SCRIPT): se pedía la instancia con N GPUs pero vLLM
+            # arrancaba siempre con tensor-parallel-size=1.
+            "TENSOR_PARALLEL_SIZE": str(wl.get("cantidad_gpus", 1)),
             # Planificador de vLLM (ver 'concurrencia' en config_global.yaml).
             # Determina cuántas peticiones atiende el worker A LA VEZ; es el
             # parámetro que fija el techo de capacidad real de la infraestructura.
@@ -1340,20 +1440,25 @@ class TopologyBuilder:
             else "0",
             "TOOL_CALL_PARSER": capacidades.get("tool_call_parser") or "",
         }
+        # 'runtime_vllm.*' -> env var solo si el workload la declara (ver arriba).
+        for campo, env_var in RUNTIME_VLLM_ENV_MAP.items():
+            valor = runtime_vllm.get(campo)
+            if valor is not None and valor != "":
+                envs[env_var] = "1" if valor is True else ("0" if valor is False else str(valor))
 
         return {
             "name": self.worker_cluster(wl["id"]),
             "resources": resources,
             "num_nodes": wl.get("replicas", 1),
             "file_mounts": {
-                f"{REMOTE_ROOT}/docker_images/{modelo}": f"./docker_images/{modelo}",
+                f"{remote_root}/docker_images/{modelo}": f"./docker_images/{modelo}",
             },
             "envs": envs,
             "setup": GPU_SETUP_SCRIPT.format(
-                remote_root=REMOTE_ROOT, modelo=modelo
+                remote_root=remote_root, remote_user=remote_user, modelo=modelo
             ).strip(),
             "run": WORKER_RUN_SCRIPT.format(
-                remote_root=REMOTE_ROOT,
+                remote_root=remote_root,
                 modelo=modelo,
                 wl_id=wl["id"],
                 puerto=wl["puerto"],
@@ -1429,10 +1534,11 @@ class TopologyBuilder:
                         os.chmod(gateway_ssh_key, 0o600)
                     azure_cfg["ssh_proxy_command"] = (
                         f"ssh -W %h:%p -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-                        # 'ubuntu', no 'azureuser': SkyPilot normaliza el usuario remoto a
-                        # 'ubuntu' en sus VMs sin importar la nube (ver REMOTE_ROOT =
-                        # "/home/ubuntu/..." arriba, ya asumido para AWS Y Azure).
-                        f"-o ConnectTimeout=10 -i {gateway_ssh_key} ubuntu@{gateway_ip}"
+                        # CORREGIDO: el comentario original afirmaba que SkyPilot usa
+                        # 'ubuntu' "sin importar la nube" -verificado como FALSO contra
+                        # sky/templates/azure-ray.yml.j2:58 (ssh_user: azureuser). Ver
+                        # scripts/cloud_remote.py.
+                        f"-o ConnectTimeout=10 -i {gateway_ssh_key} {remote_user_for('azure')}@{gateway_ip}"
                     )
             return {"azure": azure_cfg} if azure_cfg else {}
 
@@ -1463,7 +1569,7 @@ class TopologyBuilder:
                     os.chmod(gateway_ssh_key, 0o600)
                 aws_cfg["ssh_proxy_command"] = (
                     f"ssh -W %h:%p -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-                    f"-o ConnectTimeout=10 -i {gateway_ssh_key} ubuntu@{gateway_ip}"
+                    f"-o ConnectTimeout=10 -i {gateway_ssh_key} {remote_user_for('aws')}@{gateway_ip}"
                 )
 
         return {"aws": aws_cfg} if aws_cfg else {}
@@ -2146,7 +2252,7 @@ def _sky_down_bounded(
 
 
 def _preclean_stale_file_mounts(
-    cluster: str, aws_profile: Optional[str] = None
+    cluster: str, aws_profile: Optional[str] = None, cloud: Optional[str] = None
 ) -> None:
     """Antes de relanzar 'sky launch' sobre un clúster que pudo haber corrido
     antes (una '--run' completa repetida, o retomar tras un fallo a mitad de
@@ -2169,7 +2275,7 @@ def _preclean_stale_file_mounts(
             "exec",
             cluster,
             "for f in .env config_global.yaml .ssh_bastion_key; do "
-            f"p={REMOTE_ROOT}/$f; "
+            f"p={remote_root_for(cloud)}/$f; "
             '[ -f "$p" ] && [ ! -L "$p" ] && rm -f "$p"; '
             "done; true",
         ],
@@ -2413,7 +2519,7 @@ def _associate_gateway_eip(
                 "exec",
                 cluster,
                 "for f in config_global.yaml .ssh_bastion_key; do "
-                "p=/home/ubuntu/sooniverse_infra/$f; "
+                f"p={remote_root_for('aws')}/$f; "  # función AWS-only (boto3 ec2.associate_address)
                 '[ -f "$p" ] && [ ! -L "$p" ] && rm -f "$p"; '
                 "done; true",
             ],
@@ -2430,7 +2536,7 @@ def _associate_gateway_eip(
         env_path = REPO_ROOT / ".env"
         if env_path.exists():
             payload = env_path.read_text(encoding="utf-8")
-            remote_env = "/home/ubuntu/sooniverse_infra/.env"
+            remote_env = f"{remote_root_for('aws')}/.env"  # función AWS-only
 
             # PERO: GATEWAY_RUN_SCRIPT y ensure_openwebui_key.py (ambos ya
             # corrieron, EN ESTA MISMA fase, justo antes) le añadieron a ESE
@@ -2630,7 +2736,7 @@ def run_dominio_phase(
         "-v /opt/sooniverse/certbot-www:/var/www/certbot "
         "certbot/certbot certonly --webroot -w /var/www/certbot --non-interactive --agree-tos "
         f"--cert-name {dominio} -m {email} -d {dominio} --keep-until-expiring {staging_flag} "
-        f"&& cd {REMOTE_ROOT}/docker_images/gateway "
+        f"&& cd {remote_root_for(config['red_y_aislamiento'].get('cloud'))}/docker_images/gateway "
         "&& sudo docker compose exec -T proxy nginx -s reload"
     )
 
@@ -3025,7 +3131,9 @@ def deploy(
                     f"intento {attempt} (evita heredar estado a medio camino)..."
                 )
                 _sky_down_bounded(builder.gateway_cluster, red.get("aws_profile"))
-            _preclean_stale_file_mounts(builder.gateway_cluster, red.get("aws_profile"))
+            _preclean_stale_file_mounts(
+                builder.gateway_cluster, red.get("aws_profile"), red.get("cloud")
+            )
 
         t0 = time.monotonic()
         _run_sky_with_retry(

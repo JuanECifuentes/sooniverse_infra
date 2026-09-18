@@ -98,3 +98,119 @@ def test_run_script_exporta_la_concurrencia():
     run = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["run"]
     assert 'export MAX_NUM_SEQS="${MAX_NUM_SEQS}"' in run
     assert 'export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS}"' in run
+
+
+# -- puerto, TENSOR_PARALLEL_SIZE y overrides de bajo nivel de vLLM ----------
+# (Fase 1/5 del plan Azure-T4: multi-GPU roto y puerto acoplado a la imagen
+# en vez de al contrato -ver docstrings en generate_infra.py::build_worker).
+def test_puerto_del_contrato_llega_como_env_port():
+    """ANTES viajaba como 'VLLM_PORT', que ningún entrypoint.sh leía; los tres
+    leen 'PORT' -el puerto real quedaba acoplado al default de la imagen."""
+    cfg = load_base_config()
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    assert envs["PORT"] == str(cfg["workloads"][0]["puerto"])
+    assert "VLLM_PORT" not in envs
+
+
+def test_cantidad_gpus_llega_como_tensor_parallel_size():
+    """ANTES SkyPilot pedía la instancia con N GPUs pero WORKER_RUN_SCRIPT
+    nunca exportaba TENSOR_PARALLEL_SIZE: se pagaban N GPUs y vLLM usaba 1."""
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["cantidad_gpus"] = 2
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    assert envs["TENSOR_PARALLEL_SIZE"] == "2"
+
+
+def test_cantidad_gpus_default_es_uno():
+    cfg = load_base_config()
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    assert envs["TENSOR_PARALLEL_SIZE"] == "1"
+
+
+def test_port_y_tensor_parallel_size_se_exportan_en_worker_run_script():
+    cfg = load_base_config()
+    run = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["run"]
+    assert 'export PORT="${PORT}"' in run
+    assert 'export TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE}"' in run
+
+
+def test_runtime_vllm_ausente_no_agrega_envs():
+    """Sin 'runtime_vllm' en el workload (contrato actual), no debe aparecer
+    ninguna de sus env vars -el compose usa su propio default."""
+    cfg = load_base_config()
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    for var in ("DTYPE", "KV_CACHE_DTYPE", "ENFORCE_EAGER", "MAMBA_SSM_CACHE_DTYPE",
+                "VLLM_ATTENTION_BACKEND"):
+        assert var not in envs
+
+
+def test_runtime_vllm_dtype_se_propaga():
+    """Caso real: forzar DTYPE=half en una GPU Turing (T4), que no soporta
+    bfloat16 -ver el veredicto de compatibilidad T4 en el plan."""
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["runtime_vllm"] = {"dtype": "half"}
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    assert envs["DTYPE"] == "half"
+    assert "KV_CACHE_DTYPE" not in envs
+
+
+def test_runtime_vllm_todos_los_campos_se_propagan():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["runtime_vllm"] = {
+        "dtype": "half",
+        "kv_cache_dtype": "auto",
+        "enforce_eager": True,
+        "mamba_ssm_cache_dtype": "float32",
+        "attention_backend": "FLASHINFER",
+    }
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    assert envs["DTYPE"] == "half"
+    assert envs["KV_CACHE_DTYPE"] == "auto"
+    assert envs["ENFORCE_EAGER"] == "1"
+    assert envs["MAMBA_SSM_CACHE_DTYPE"] == "float32"
+    assert envs["VLLM_ATTENTION_BACKEND"] == "FLASHINFER"
+
+
+def test_runtime_vllm_enforce_eager_false_se_propaga_como_cero():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["runtime_vllm"] = {"enforce_eager": False}
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    assert envs["ENFORCE_EAGER"] == "0"
+
+
+def test_runtime_vllm_valores_se_exportan_en_worker_run_script():
+    cfg = load_base_config()
+    run = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["run"]
+    for var in ("DTYPE", "KV_CACHE_DTYPE", "ENFORCE_EAGER", "MAMBA_SSM_CACHE_DTYPE",
+                "VLLM_ATTENTION_BACKEND"):
+        assert f'export {var}="${{{var}:-}}"' in run
+
+
+# -- usuario/raíz remota según la nube (scripts/cloud_remote.py) -------------
+def test_build_worker_usa_ubuntu_por_defecto_aws():
+    cfg = load_base_config()
+    assert cfg["red_y_aislamiento"].get("cloud") in (None, "aws")
+    worker = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])
+    assert any("/home/ubuntu/sooniverse_infra" in dest for dest in worker["file_mounts"])
+    assert "sudo usermod -aG docker ubuntu" in worker["setup"]
+
+
+def test_build_worker_usa_azureuser_en_azure():
+    """ANTES el repo asumía 'ubuntu' sin importar la nube (comentario falso en
+    generate_infra.py, heredado de la rama Azure) -verificado como incorrecto
+    contra sky/templates/azure-ray.yml.j2."""
+    cfg = clone(load_base_config())
+    cfg["red_y_aislamiento"]["cloud"] = "azure"
+    worker = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])
+    assert any("/home/azureuser/sooniverse_infra" in dest for dest in worker["file_mounts"])
+    assert "/home/ubuntu/" not in str(worker["file_mounts"])
+    assert "sudo usermod -aG docker azureuser" in worker["setup"]
+    assert "sudo usermod -aG docker ubuntu" not in worker["setup"]
+
+
+def test_build_gateway_usa_azureuser_en_azure():
+    cfg = clone(load_base_config())
+    cfg["red_y_aislamiento"]["cloud"] = "azure"
+    gateway = TopologyBuilder(cfg).build_gateway()
+    assert any("/home/azureuser/sooniverse_infra" in dest for dest in gateway["file_mounts"])
+    assert "sudo usermod -aG docker azureuser" in gateway["setup"]
