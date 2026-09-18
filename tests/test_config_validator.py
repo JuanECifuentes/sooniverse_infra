@@ -573,3 +573,22 @@ def test_runtime_vllm_campo_texto_no_string_rechazado(campo):
     cfg["workloads"][0]["runtime_vllm"] = {campo: 123}
     with pytest.raises(ConfigValidationError):
         ConfigValidator.validate(cfg)
+
+
+# -- gateway.dominio en Azure (Fase 2.2: Public IP persistente implementada) -
+def test_dominio_habilitado_es_valido_en_azure():
+    """ANTES 'gateway.dominio.habilitado: true' se rechazaba para cualquier
+    cloud != aws -ahora que azure_network.py tiene una Public IP dedicada y
+    persistente (ensure_gateway_public_ip), Azure también es válido."""
+    cfg = clone(load_base_config())
+    cfg["red_y_aislamiento"]["cloud"] = "azure"
+    assert cfg["gateway"]["dominio"]["habilitado"] is True
+    ConfigValidator.validate(cfg)
+
+
+def test_dominio_habilitado_sigue_siendo_valido_en_aws():
+    """No-regresión: el config base (AWS + dominio) sigue validando."""
+    cfg = load_base_config()
+    assert cfg["red_y_aislamiento"].get("cloud", "aws") == "aws"
+    assert cfg["gateway"]["dominio"]["habilitado"] is True
+    ConfigValidator.validate(cfg)

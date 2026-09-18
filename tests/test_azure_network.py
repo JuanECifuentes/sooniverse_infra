@@ -348,3 +348,121 @@ def test_ensure_security_groups_y_ensure_subnets_usan_el_mismo_cidr(manager):
     """Ambos métodos deben coincidir SIEMPRE -antes podían divergir porque
     cada uno calculaba el CIDR por su cuenta."""
     assert manager._resolve_subnet_cidrs() == compute_subnet_cidrs(manager.spec.vnet_cidr)
+
+
+# -- Public IP persistente del Gateway (dominio propio) ----------------------
+# Fase 2.2 del plan: A2 -esta rama no tenía forma de sobrevivir un
+# destroy+redeploy con la misma IP, así que gateway.dominio.habilitado: true
+# estaba prohibido para Azure. Ver AzureNetworkSpec.gateway_eip /
+# AzureNetworkManager.ensure_gateway_public_ip() / destroy().
+def _mock_public_ip(mgr, ip_id="pip-gw-real-id", address="20.1.2.3"):
+    result = MagicMock(id=ip_id, ip_address=address)
+    mgr.network_client.public_ip_addresses.begin_create_or_update.return_value.result.return_value = result
+    return result
+
+
+def test_ensure_gateway_public_ip_reserva_y_registra(manager):
+    _mock_public_ip(manager)
+
+    azure_id, address = manager.ensure_gateway_public_ip("rg-x")
+
+    assert azure_id == "pip-gw-real-id"
+    assert address == "20.1.2.3"
+    registrados = manager.state.list_resources(manager.deployment_id)
+    fila = next(r for r in registrados if r["component"] == "pip-gateway")
+    assert fila["aws_id"] == "pip-gw-real-id"
+    assert fila["attributes"]["public_ip"] == "20.1.2.3"
+    assert fila["attributes"]["persistente"] is True  # default de AzureNetworkSpec.gateway_eip_persistent
+
+
+def test_provision_reserva_ip_del_gateway_cuando_spec_lo_pide(manager):
+    manager.spec = AzureNetworkSpec(
+        client_id=manager.spec.client_id, environment=manager.spec.environment,
+        region=manager.spec.region, vnet_cidr=manager.spec.vnet_cidr,
+        nat_mode="none", worker_ports=[8007],
+        gateway_eip=True, gateway_eip_persistent=True,
+    )
+    manager.resource_client.resource_groups.create_or_update.return_value = None
+    manager.network_client.virtual_networks.begin_create_or_update.return_value.result.return_value = MagicMock(id="vnet-id")
+    manager.network_client.network_security_groups.begin_create_or_update.return_value.result.return_value = MagicMock(id="nsg-id")
+    manager.network_client.security_rules.list.return_value = []
+    manager.network_client.subnets.begin_create_or_update.return_value.result.return_value = MagicMock(id="subnet-id")
+    _mock_public_ip(manager)
+
+    outputs = manager.provision()
+
+    assert outputs.gateway_eip_public_ip == "20.1.2.3"
+    assert outputs.gateway_eip_allocation_id == "pip-gw-real-id"
+
+
+def test_provision_no_reserva_ip_del_gateway_por_defecto(manager):
+    """gateway_eip=False (default de AzureNetworkSpec): no debe crearse
+    ninguna Public IP dedicada del Gateway."""
+    manager.resource_client.resource_groups.create_or_update.return_value = None
+    manager.network_client.virtual_networks.begin_create_or_update.return_value.result.return_value = MagicMock(id="vnet-id")
+    manager.network_client.network_security_groups.begin_create_or_update.return_value.result.return_value = MagicMock(id="nsg-id")
+    manager.network_client.security_rules.list.return_value = []
+    manager.network_client.subnets.begin_create_or_update.return_value.result.return_value = MagicMock(id="subnet-id")
+
+    outputs = manager.provision()
+
+    assert outputs.gateway_eip_public_ip is None
+    assert outputs.gateway_eip_allocation_id is None
+    registrados = manager.state.list_resources(manager.deployment_id)
+    assert not any(r["component"] == "pip-gateway" for r in registrados)
+
+
+def test_destroy_conserva_pip_gateway_persistente_y_no_borra_el_resource_group(manager):
+    manager.state.record_resource(
+        manager.deployment_id, resource_type="pip-gateway", component="pip-gateway", aws_id="pip-gw-1",
+        delete_order=45, managed_by_us=True, state="active",
+        attributes={"name": "sooniverse-acme-prod-pip-gateway", "persistente": True},
+    )
+    manager.state.record_resource(
+        manager.deployment_id, resource_type="resource-group", component="resource-group", aws_id="rg-1",
+        delete_order=90, managed_by_us=True, state="active",
+    )
+
+    report = manager.destroy()
+
+    assert len(report.kept_persistent) == 1
+    assert report.kept_persistent[0].component == "pip-gateway"
+    assert len(report.manual_actions_required) == 1
+    assert "rg-1" in report.manual_actions_required[0] or "Resource Group" in report.manual_actions_required[0]
+    manager.network_client.public_ip_addresses.begin_delete.assert_not_called()
+    manager.resource_client.resource_groups.begin_delete.assert_not_called()
+    assert not report.failed
+
+
+def test_destroy_borra_pip_gateway_si_no_es_persistente(manager):
+    manager.state.record_resource(
+        manager.deployment_id, resource_type="pip-gateway", component="pip-gateway", aws_id="pip-gw-1",
+        delete_order=45, managed_by_us=True, state="active",
+        attributes={"name": "sooniverse-acme-prod-pip-gateway", "persistente": False},
+    )
+    manager.network_client.public_ip_addresses.get.side_effect = None
+    manager.network_client.public_ip_addresses.get.return_value = MagicMock(
+        tags={TAG_MANAGED: "true", TAG_DEPLOYMENT: manager.deployment_id}
+    )
+
+    report = manager.destroy()
+
+    assert not report.kept_persistent
+    manager.network_client.public_ip_addresses.begin_delete.assert_called_once()
+
+
+def test_destroy_force_borra_pip_gateway_aunque_sea_persistente(manager):
+    manager.state.record_resource(
+        manager.deployment_id, resource_type="pip-gateway", component="pip-gateway", aws_id="pip-gw-1",
+        delete_order=45, managed_by_us=True, state="active",
+        attributes={"name": "sooniverse-acme-prod-pip-gateway", "persistente": True},
+    )
+    manager.network_client.public_ip_addresses.get.side_effect = None
+    manager.network_client.public_ip_addresses.get.return_value = MagicMock(
+        tags={TAG_MANAGED: "true", TAG_DEPLOYMENT: manager.deployment_id}
+    )
+
+    report = manager.destroy(force=True)
+
+    assert not report.kept_persistent
+    manager.network_client.public_ip_addresses.begin_delete.assert_called_once()

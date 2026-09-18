@@ -106,6 +106,12 @@ DELETE_ORDER = {
     "nsg-workers": 30,
     "nsg-gateway": 31,
     "vnet": 40,
+    # pip-gateway (dominio propio, ver AzureNetworkSpec.gateway_eip) se
+    # intenta destruir aquí en el orden normal SI 'persistente' es false o
+    # force=True; con el default (persistente), destroy() la conserva y de
+    # paso NO ejecuta el borrado de "resource-group" para no arrastrarla en
+    # la cascada del Resource Group completo (ver destroy()).
+    "pip-gateway": 45,
     "resource-group": 90,
 }
 
@@ -146,6 +152,17 @@ class AzureNetworkSpec:
     tls_enabled: bool = False
     extra_tags: Optional[Dict[str, str]] = None
     subscription_id: Optional[str] = None  # None => AZURE_SUBSCRIPTION_ID del entorno
+    # Dominio propio (gateway.dominio.*): reserva una Public IP Standard/Static
+    # DEDICADA para el Gateway -mismos nombres de campo que aws_network.NetworkSpec
+    # a propósito (ver AzureNetworkOutputs). A diferencia de la VPC/EIP de AWS
+    # (que SÍ necesita buscarse por tag porque create_vpc()/allocate_address()
+    # no son idempotentes por nombre), esta Public IP usa el mismo nombre
+    # determinista '<cliente>-<entorno>-pip-gateway' que el resto de este
+    # módulo -sobrevive a un destroy porque el Resource Group que la contiene
+    # tampoco se borra mientras haya algo persistente dentro (ver destroy()).
+    gateway_eip: bool = False
+    gateway_eip_persistent: bool = True
+    gateway_domain: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.nat_mode not in ("single", "none"):
@@ -178,6 +195,13 @@ class AzureNetworkOutputs:
     nsg_workers_id: str
     nsg_workers_name: str
     managed_by_us: bool = True
+    # Public IP DEDICADA y persistente del Gateway (gateway.dominio.*).
+    # Nombrados igual que sus equivalentes en aws_network.NetworkOutputs
+    # ('eip', no 'pip') a propósito: generate_infra.py los lee con
+    # getattr(net_outputs, "gateway_eip_allocation_id", None) sin bifurcar
+    # por nube -mismo patrón que el campo 'aws_id' genérico de InfraStateStore.
+    gateway_eip_allocation_id: Optional[str] = None
+    gateway_eip_public_ip: Optional[str] = None
 
 
 @dataclass
@@ -198,6 +222,12 @@ class DestroyReport:
     failed: List[Dict[str, Any]] = field(default_factory=list)
     skipped_not_ours: List[PlannedDeletion] = field(default_factory=list)
     manual_actions_required: List[str] = field(default_factory=list)
+    # Public IP del Gateway conservada a propósito
+    # (gateway.dominio.eip_persistente=true) -no es un fallo ni un "no es
+    # nuestro", igual que aws_network.DestroyReport.kept_persistent. Antes
+    # este campo no existía y destroy_infra.py lo leía con
+    # getattr(report, "kept_persistent", []) porque nunca se implementó.
+    kept_persistent: List[PlannedDeletion] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -593,6 +623,46 @@ class AzureNetworkManager:
         logger.info("[RED-AZURE] NAT Gateway disponible: %s (%.1fs)", nat.id, time.monotonic() - t0)
         return nat.id
 
+    def ensure_gateway_public_ip(self, rg_name: str) -> Tuple[str, str]:
+        """Reserva (o reutiliza) una Public IP Standard/Static DEDICADA al
+        Gateway (equivalente de `aws_network.ensure_gateway_eip()`), para que
+        un registro DNS A no se rompa entre 'sky launch's (SkyPilot asigna una
+        IP efímera por defecto) ni entre un destroy_infra.py y el siguiente
+        despliegue.
+
+        A diferencia de AWS -donde `allocate_address()` no es idempotente por
+        nombre y hace falta buscar por tag (client_id, environment)-, esta
+        Public IP usa el mismo nombre determinista que el resto de este
+        módulo: un PUT repetido a '<cliente>-<entorno>-pip-gateway' reutiliza
+        la MISMA dirección IP ya asignada (no cambia en un re-PUT) y de paso
+        re-etiqueta el recurso al deployment_id ACTUAL -necesario porque
+        sobrevive a un destroy con un deployment_id nuevo en el siguiente
+        despliegue (ver destroy(), que preserva el Resource Group completo
+        mientras esta IP siga viva dentro)."""
+        name = self._name("pip-gateway")
+        poller = self.network_client.public_ip_addresses.begin_create_or_update(
+            rg_name,
+            name,
+            {
+                "location": self.spec.region,
+                "sku": {"name": "Standard"},
+                "public_ip_allocation_method": "Static",
+                "tags": self._tags("pip-gateway"),
+            },
+        )
+        pip = poller.result()
+        self._record(
+            "pip-gateway", "pip-gateway", pip.id,
+            parent_aws_id=rg_name,
+            attributes={
+                "name": name,
+                "public_ip": pip.ip_address,
+                "persistente": self.spec.gateway_eip_persistent,
+            },
+        )
+        logger.info("[RED-AZURE] Public IP del Gateway lista: %s (%s)", pip.ip_address, pip.id)
+        return pip.id, pip.ip_address
+
     def ensure_subnets(
         self, rg_name: str, vnet_name: str, nsg_gateway_id: str, nsg_workers_id: str, nat_gateway_id: Optional[str]
     ) -> Tuple[str, str]:
@@ -666,6 +736,10 @@ class AzureNetworkManager:
             public_subnet_id, private_subnet_id = self.ensure_subnets(
                 rg_name, vnet_name, nsg_gateway_id, nsg_workers_id, nat_gateway_id
             )
+            gateway_eip_alloc_id: Optional[str] = None
+            gateway_eip_public_ip: Optional[str] = None
+            if self.spec.gateway_eip:
+                gateway_eip_alloc_id, gateway_eip_public_ip = self.ensure_gateway_public_ip(rg_name)
         except Exception as exc:
             self.state.set_deployment_status(self.deployment_id, "error", error=str(exc))
             self.state.log_event(self.deployment_id, "network", "provision", "error", message=str(exc))
@@ -687,6 +761,8 @@ class AzureNetworkManager:
             nsg_workers_id=nsg_workers_id,
             nsg_workers_name=self._name("workers"),
             managed_by_us=True,
+            gateway_eip_allocation_id=gateway_eip_alloc_id,
+            gateway_eip_public_ip=gateway_eip_public_ip,
         )
 
     def status(self) -> Dict[str, Any]:
@@ -737,6 +813,8 @@ class AzureNetworkManager:
                 obj = self.network_client.nat_gateways.get(rg_name, self._name("natgw"))
             elif component == "pip-nat":
                 obj = self.network_client.public_ip_addresses.get(rg_name, self._name("pip-nat"))
+            elif component == "pip-gateway":
+                obj = self.network_client.public_ip_addresses.get(rg_name, self._name("pip-gateway"))
             else:
                 return False
         except ResourceNotFoundError:
@@ -746,11 +824,43 @@ class AzureNetworkManager:
         return tags.get(TAG_DEPLOYMENT) == self.deployment_id and tags.get(TAG_MANAGED) == "true"
 
     def destroy(self, dry_run: bool = False, force: bool = False) -> DestroyReport:
+        """Nota sobre 'pip-gateway' (dominio propio, gateway.dominio.eip_persistente):
+        a diferencia de AWS -donde cada recurso se borra por su propio ID y
+        "conservar la EIP" es tan simple como saltarse ESE borrado-, en Azure
+        el ÚLTIMO paso del plan es siempre borrar el Resource Group COMPLETO
+        (component == "resource-group"), que arrastra en cascada CUALQUIER
+        cosa que quede dentro -incluida una Public IP que hasta ese punto se
+        había "conservado" individualmente. Por eso, cuando se conserva la
+        Public IP del Gateway, este método SALTA TAMBIÉN el borrado del
+        Resource Group (queda vivo, vacío salvo por esa IP) en vez de solo
+        omitir el ítem 'pip-gateway'."""
         plan = self.plan_destroy()
         report = DestroyReport(deployment_id=self.deployment_id)
 
+        def _es_pip_gateway_persistente(item: PlannedDeletion) -> bool:
+            return (
+                item.component == "pip-gateway"
+                and (item.attributes or {}).get("persistente", True)
+                and not force
+            )
+
+        conserva_pip_gateway = any(_es_pip_gateway_persistente(item) for item in plan)
+
         if dry_run:
             for item in plan:
+                if _es_pip_gateway_persistente(item):
+                    report.kept_persistent.append(item)
+                    logger.info(
+                        "[DESTROY-AZURE] (dry-run) Public IP del Gateway se conservaría "
+                        "(gateway.dominio.eip_persistente=true): %s", item.azure_id,
+                    )
+                    continue
+                if item.component == "resource-group" and conserva_pip_gateway:
+                    logger.info(
+                        "[DESTROY-AZURE] (dry-run) Resource Group NO se borraría "
+                        "(contiene la Public IP persistente del Gateway): %s", item.azure_id,
+                    )
+                    continue
                 logger.info(
                     "[DESTROY-AZURE] (dry-run) %s %s id=%s orden=%s managed_by_us=%s",
                     item.resource_type, item.component, item.azure_id, item.delete_order, item.managed_by_us,
@@ -763,6 +873,31 @@ class AzureNetworkManager:
         for item in plan:
             if not item.azure_id:
                 continue
+
+            if _es_pip_gateway_persistente(item):
+                report.kept_persistent.append(item)
+                # state='adopted' (no 'deleted'): sigue existiendo en Azure a
+                # propósito -mismo patrón que aws_network.py para 'eip-gateway'.
+                self.state.mark_resource_state(self.deployment_id, item.azure_id, "adopted")
+                logger.info(
+                    "[DESTROY-AZURE] Public IP del Gateway conservada "
+                    "(gateway.dominio.eip_persistente=true): %s", item.azure_id,
+                )
+                continue
+
+            if item.component == "resource-group" and conserva_pip_gateway:
+                report.manual_actions_required.append(
+                    f"Resource Group '{rg_name}' no se borró: contiene la Public IP "
+                    "persistente del Gateway (gateway.dominio.eip_persistente=true). "
+                    f"Bórralo a mano (az group delete --name {rg_name}) cuando el "
+                    "dominio ya no se vaya a reutilizar."
+                )
+                logger.info(
+                    "[DESTROY-AZURE] Resource Group NO se borra: contiene la Public IP "
+                    "persistente del Gateway: %s", rg_name,
+                )
+                continue
+
             if not item.managed_by_us and not force:
                 report.skipped_not_ours.append(item)
                 logger.warning("[DESTROY-AZURE] Omitido (managed_by_us=False): %s %s", item.component, item.azure_id)
@@ -815,6 +950,10 @@ class AzureNetworkManager:
             self.network_client.nat_gateways.begin_delete(rg_name, self._name("natgw")).result()
         elif component == "pip-nat":
             self.network_client.public_ip_addresses.begin_delete(rg_name, self._name("pip-nat")).result()
+        elif component == "pip-gateway":
+            # Solo se llega aquí con force=True o gateway_eip_persistent=false
+            # (el caso normal la conserva, ver destroy()).
+            self.network_client.public_ip_addresses.begin_delete(rg_name, self._name("pip-gateway")).result()
         elif component == "nsg-gateway":
             self.network_client.network_security_groups.begin_delete(rg_name, self._name("gateway")).result()
         elif component == "nsg-workers":
