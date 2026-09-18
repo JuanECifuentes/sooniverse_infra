@@ -26,11 +26,17 @@
 #     VM con GPU en el Portal de Azure (las suscripciones nuevas traen cuota 0).
 #
 # Fuera de alcance en esta versión (ver ConfigValidator/azure_network.py):
-#   - gateway.dominio.habilitado: true (dominio propio + TLS real) -solo AWS
-#     por ahora. Usa gateway.tls.modo: "self-signed" si necesitas HTTPS.
 #   - red_y_aislamiento.gestion_red: "existente" (red pre-creada a mano).
 #   - red_y_aislamiento.nat_gateway.modo: "per-az" (no existe en Azure NAT
 #     Gateway) -solo "single" | "none".
+#
+# gateway.dominio.habilitado: true SÍ está implementado en Azure: reserva una
+# Public IP Standard/Static dedicada y persistente
+# (azure_network.py::ensure_gateway_public_ip), la asocia a la VM del Gateway
+# tras el 'sky launch' (generate_infra.py::_find_and_associate_azure_public_ip)
+# y emite/renueva el certificado con Let's Encrypt igual que en AWS. Esa
+# Public IP -no la IP efímera que asigna SkyPilot por defecto- es la que hay
+# que apuntar en el registro DNS A; se imprime al terminar la fase 'network'.
 # ==============================================================================
 
 # 1. Datos del Cliente y Entorno
@@ -82,12 +88,20 @@ gateway:
     - 8080
     - 8000
   load_balancing_strategy: "latency-based-routing"
-  # Dominio propio + TLS real: NO implementado para Azure en esta versión
-  # (ver ConfigValidator._validate_dominio). Deja 'habilitado: false'.
+  # Dominio propio + TLS real: implementado en Azure (Public IP persistente +
+  # certbot/Let's Encrypt, ver azure_network.py::ensure_gateway_public_ip).
+  # Ejemplo con un dominio real habilitado -ajusta 'seleccionado'/'disponibles'
+  # al dominio de este cliente, o deja 'habilitado: false' para IP efímera + HTTP.
   dominio:
     habilitado: false
     seleccionado: null
     disponibles: []
+    # Ejemplo (descomentar y ajustar):
+    #   habilitado: true
+    #   seleccionado: "ia-cliente.ejemplo.com"
+    #   disponibles:
+    #     - nombre: "ia-cliente.ejemplo.com"
+    #       email_acme: "contacto@ejemplo.com"
     staging: false
     redirigir_http: true
     eip_persistente: true
