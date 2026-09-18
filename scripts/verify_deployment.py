@@ -483,20 +483,33 @@ def check_worker_has_internet_egress(ctx: VerificationContext) -> CheckResult:
     if not workloads:
         return CheckResult(name, "N/A", "No hay workloads en el contrato", critical=False)
 
+    # CORREGIDO: antes solo se comprobaba workloads[0] -con dos workloads en
+    # clústeres SkyPilot distintos, un segundo clúster sin ruta al NAT pasaba
+    # el check igual (el primero sí tenía salida). Se revisan TODOS los
+    # clústeres ya aprovisionados; los que no están arriba todavía se omiten
+    # (N/A por workload, no bloquean el resto).
     base = f"sooniverse-{ctx.config['cliente']['id']}-{ctx.config['cliente']['entorno']}"
-    cluster = f"{base}-{workloads[0]['id']}".lower().replace("_", "-").replace(".", "-")
-
-    if not _cluster_is_up(cluster):
-        return CheckResult(name, "N/A", f"Clúster '{cluster}' no aprovisionado todavía", critical=False)
-
     remote_cmd = (
         "curl -sfI --max-time 5 https://huggingface.co >/dev/null 2>&1 "
         "&& echo SOONIVERSE_CURL_OK || echo SOONIVERSE_CURL_FAIL"
     )
-    output = _sky_exec_remote_output(cluster, remote_cmd, timeout=30)
-    if "SOONIVERSE_CURL_OK" not in output:
-        return CheckResult(name, "FAIL", "El worker no alcanzó huggingface.co vía NAT")
-    return CheckResult(name, "OK", f"{cluster} tiene salida a Internet")
+
+    revisados: List[str] = []
+    sin_egress: List[str] = []
+    for wl in workloads:
+        cluster = f"{base}-{wl['id']}".lower().replace("_", "-").replace(".", "-")
+        if not _cluster_is_up(cluster):
+            continue
+        output = _sky_exec_remote_output(cluster, remote_cmd, timeout=30)
+        revisados.append(cluster)
+        if "SOONIVERSE_CURL_OK" not in output:
+            sin_egress.append(cluster)
+
+    if not revisados:
+        return CheckResult(name, "N/A", "Ningún clúster worker aprovisionado todavía", critical=False)
+    if sin_egress:
+        return CheckResult(name, "FAIL", f"Sin salida a Internet vía NAT: {sin_egress}")
+    return CheckResult(name, "OK", f"{len(revisados)} clúster(es) con salida a Internet: {revisados}")
 
 
 def check_litellm_lists_models(ctx: VerificationContext) -> CheckResult:
@@ -541,19 +554,27 @@ def check_litellm_pool_health(ctx: VerificationContext) -> CheckResult:
 
 def check_end_to_end_completion(ctx: VerificationContext) -> CheckResult:
     name = "Petición end-to-end responde (/v1/chat/completions)"
-    if not ctx.base_url or not ctx.config.get("workloads"):
-        return CheckResult(name, "N/A", "No hay IP de gateway o workloads", critical=False)
+    # Solo workloads de texto: un modelo de embeddings no expone
+    # /v1/chat/completions -postearle ahí es un FAIL esperado, no un bug.
+    workloads = [wl for wl in ctx.config.get("workloads", []) if wl.get("tipo_tarea", "llm-texto") == "llm-texto"]
+    if not ctx.base_url or not workloads:
+        return CheckResult(name, "N/A", "No hay IP de gateway o workloads de texto", critical=False)
 
+    # CORREGIDO: antes solo se probaba workloads[0] -con dos modelos
+    # desplegados, un segundo modelo roto pasaba esta comprobación igual.
+    # Se prueban TODOS los modelos de texto declarados.
     master_key = _read_env_var("LITELLM_MASTER_KEY")
     headers = {"Authorization": f"Bearer {master_key}"} if master_key else {}
-    model = ctx.config["workloads"][0].get("nombre_publico", ctx.config["workloads"][0]["id"])
-    payload = {"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 16}
-    resp = _http_post(f"{ctx.base_url}/v1/chat/completions", payload, headers=headers)
-    if resp is None or "error" in resp:
-        return CheckResult(name, "FAIL", str(resp.get("error") if resp else "sin respuesta"))
-    if "choices" not in resp.get("json", {}):
-        return CheckResult(name, "FAIL", f"Respuesta inesperada: {resp.get('json')}")
-    return CheckResult(name, "OK", "Respuesta con 'choices' recibida")
+    fallidos: List[str] = []
+    for wl in workloads:
+        model = wl.get("nombre_publico", wl["id"])
+        payload = {"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 16}
+        resp = _http_post(f"{ctx.base_url}/v1/chat/completions", payload, headers=headers)
+        if resp is None or "error" in resp or "choices" not in resp.get("json", {}):
+            fallidos.append(model)
+    if fallidos:
+        return CheckResult(name, "FAIL", f"Sin respuesta válida ('choices'): {fallidos}")
+    return CheckResult(name, "OK", f"{len(workloads)} modelo(s) respondieron con 'choices'")
 
 
 def check_nginx_routes(ctx: VerificationContext) -> CheckResult:
