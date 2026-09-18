@@ -199,6 +199,13 @@ def _http_post(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, st
 # =============================================================================
 def check_private_route_to_nat(ctx: VerificationContext) -> CheckResult:
     name = "Subred privada rutea a NAT"
+    if ctx.config["red_y_aislamiento"].get("cloud", "aws") != "aws":
+        # Azure asocia el NAT Gateway directo a la subred (sin Route Table
+        # separada -ver azure_network.py), así que este chequeo AWS-específico
+        # no aplica. No hay 'rtb-private' registrado para Azure, con lo que de
+        # todos modos caería en el N/A de abajo -este guard solo lo hace
+        # explícito en vez de depender de ese efecto colateral.
+        return CheckResult(name, "N/A", "Chequeo específico de AWS (Route Tables); no aplica a Azure", critical=False)
     private_rt_ids = [r["aws_id"] for r in ctx.resources if r["component"] == "rtb-private" and r["aws_id"]]
     if not private_rt_ids:
         return CheckResult(name, "N/A", "No hay route tables privadas registradas", critical=False)
@@ -224,6 +231,10 @@ def check_private_route_to_nat(ctx: VerificationContext) -> CheckResult:
 
 def check_public_route_to_igw(ctx: VerificationContext) -> CheckResult:
     name = "Subred pública rutea a IGW"
+    if ctx.config["red_y_aislamiento"].get("cloud", "aws") != "aws":
+        # Azure no tiene un recurso IGW explícito -la salida a internet es una
+        # ruta de sistema implícita (ver azure_network.py).
+        return CheckResult(name, "N/A", "Chequeo específico de AWS (Internet Gateway); no aplica a Azure", critical=False)
     public_rt_ids = [r["aws_id"] for r in ctx.resources if r["component"] == "rtb-public" and r["aws_id"]]
     if not public_rt_ids:
         return CheckResult(name, "N/A", "No hay route table pública registrada", critical=False)
@@ -246,6 +257,17 @@ def check_public_route_to_igw(ctx: VerificationContext) -> CheckResult:
 
 def check_workers_no_public_ip(ctx: VerificationContext) -> CheckResult:
     name = "Los workers no tienen IP pública"
+    if ctx.config["red_y_aislamiento"].get("cloud", "aws") != "aws":
+        # IMPORTANTE: el componente 'subnet-private' SÍ existe en el estado de
+        # un despliegue Azure (mismo nombre de componente, ver azure_network.py),
+        # pero con un resource ID de Azure -pasarlo a boto3.describe_instances()
+        # rompería en vez de devolver N/A por lista vacía. Falta el equivalente
+        # Azure (azure-mgmt-compute: listar VMs por subred + IP pública en el NIC).
+        return CheckResult(
+            name, "N/A",
+            "Chequeo específico de AWS (boto3 describe_instances); equivalente Azure no implementado todavía",
+            critical=False,
+        )
     private_subnet_ids = [r["aws_id"] for r in ctx.resources if r["component"] == "subnet-private" and r["aws_id"]]
     if not private_subnet_ids:
         return CheckResult(name, "N/A", "No hay subredes privadas registradas", critical=False)
@@ -273,6 +295,12 @@ def check_workers_no_public_ip(ctx: VerificationContext) -> CheckResult:
 
 def check_workers_sg_no_open_cidr(ctx: VerificationContext) -> CheckResult:
     name = "SG de workers no acepta 0.0.0.0/0 en el puerto vLLM"
+    if ctx.config["red_y_aislamiento"].get("cloud", "aws") != "aws":
+        # El componente Azure equivalente se llama 'nsg-workers' (no
+        # 'sg-workers'), así que esto ya caería en N/A por no encontrarlo -este
+        # guard solo lo hace explícito. Equivalente Azure (leer security_rules
+        # del NSG) no implementado todavía.
+        return CheckResult(name, "N/A", "Chequeo específico de AWS (Security Group); equivalente NSG no implementado todavía", critical=False)
     sg_id = next((r["aws_id"] for r in ctx.resources if r["component"] == "sg-workers" and r["aws_id"]), None)
     if not sg_id:
         return CheckResult(name, "N/A", "No hay SG de workers registrado", critical=False)
