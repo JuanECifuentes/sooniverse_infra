@@ -196,7 +196,7 @@ Columnas nuevas de `token_usage_event`, todas con `ADD COLUMN IF NOT EXISTS`: `t
 - **`ttft_ms`** — sin él no se distingue "el modelo tarda en arrancar" de "el modelo genera lento", que es justo la distinción que necesita cualquier diagnóstico de saturación.
 - **`model_group`** / **`model_id`** — el nombre público con el que enrutó LiteLLM y el deployment concreto del pool. Más estables que la IP privada del worker, que cambia entre despliegues.
 - **`cache_hit`** — un acierto de caché con `latency_ms=3` hunde el p95 y hace creer que la infraestructura es más rápida de lo que es. `latency_percentiles()` lo excluye por defecto.
-- **`call_type`** — permite dejar fuera de los percentiles de chat las llamadas de embeddings o los health checks.
+- **`call_type`** — permite dejar fuera de los percentiles de chat las llamadas de embeddings. `latency_percentiles()` (parámetro `p_incluir_embeddings`, default `FALSE`) y el mapa de calor de `analytics.py::_heatmap_percentil` excluyen `call_type LIKE '%embedding%'` por defecto.
 
 La política de privacidad se mantiene intacta: ninguna columna nueva almacena prompts, mensajes ni respuestas.
 

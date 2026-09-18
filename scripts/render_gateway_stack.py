@@ -646,6 +646,13 @@ services:
       # en ese script) -sin esto, el operador humano quedaba como 'user' normal
       # en el chat aunque fuera superusuario del panel.
       DJANGO_SUPERUSER_EMAIL: ${{DJANGO_SUPERUSER_EMAIL:-}}
+    volumes:
+      # Fuente de verdad de qué endpoint es de embeddings ('model_info.mode',
+      # ver render_litellm_config.py) -GET /v1/models de LiteLLM no expone
+      # 'mode' en su respuesta pública (formato OpenAI estándar), así que
+      # bootstrap_models.py lee este archivo directamente para no registrar
+      # un modelo de embeddings como chat-seleccionable en Open WebUI.
+      - ./litellm_config.yaml:/app/litellm_config.yaml:ro
     depends_on:
       open-webui:
         condition: service_healthy

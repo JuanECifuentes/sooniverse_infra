@@ -721,6 +721,20 @@ class ConfigValidator:
                         f"Workload '{wl_id}': 'capacidades.tool_calling: true' requiere "
                         "'capacidades.tool_call_parser' (ej. 'hermes', 'qwen')."
                     )
+                # Un runner de pooling (embeddings) no genera texto ni acepta
+                # herramientas -declarar estas capacidades ahí es siempre un
+                # error de configuración, nunca una intención real.
+                if wl.get("tipo_tarea") == "embeddings":
+                    if capacidades.get("vision"):
+                        raise ConfigValidationError(
+                            f"Workload '{wl_id}': 'tipo_tarea: embeddings' no puede declarar "
+                            "'capacidades.vision: true' -un runner de pooling no genera texto."
+                        )
+                    if capacidades.get("tool_calling"):
+                        raise ConfigValidationError(
+                            f"Workload '{wl_id}': 'tipo_tarea: embeddings' no puede declarar "
+                            "'capacidades.tool_calling: true' -un runner de pooling no acepta herramientas."
+                        )
 
             cls._validate_concurrencia(wl_id, wl)
             cls._validate_runtime_vllm(wl_id, wl)
@@ -1010,6 +1024,9 @@ export KV_CACHE_DTYPE="${{KV_CACHE_DTYPE:-}}"
 export ENFORCE_EAGER="${{ENFORCE_EAGER:-}}"
 export MAMBA_SSM_CACHE_DTYPE="${{MAMBA_SSM_CACHE_DTYPE:-}}"
 export VLLM_ATTENTION_BACKEND="${{VLLM_ATTENTION_BACKEND:-}}"
+# Tarea de vLLM (workloads[].tipo_tarea: embeddings -> --task embed). Vacío
+# para el caso normal (llm-texto); el entrypoint decide su propio default.
+export VLLM_TASK="${{VLLM_TASK:-}}"
 
 sudo docker compose up -d
 sudo docker compose ps
@@ -1507,13 +1524,26 @@ class TopologyBuilder:
             # Capacidades declaradas (ver config_global.yaml): el entrypoint solo
             # agrega --enable-auto-tool-choice/--limit-mm-per-prompt si aquí están
             # activas, para no anunciarle a un cliente (Open WebUI, LiteLLM) una
-            # función que este modelo no soporta de verdad.
-            "ENABLE_VISION": "1" if capacidades.get("vision", True) else "0",
+            # función que este modelo no soporta de verdad. El default es
+            # 'true' para no forzar a declarar 'capacidades' en un workload de
+            # texto -pero un runner de pooling (embeddings) nunca tiene torre
+            # de visión, así que ahí el default correcto es 'false' (el
+            # ConfigValidator ya rechaza declarar 'vision: true' explícito
+            # para 'tipo_tarea: embeddings', ver _validate_workloads).
+            "ENABLE_VISION": "1" if capacidades.get(
+                "vision", wl.get("tipo_tarea", "llm-texto") != "embeddings"
+            ) else "0",
             "ENABLE_TOOL_CALLING": "1"
             if capacidades.get("tool_calling", False)
             else "0",
             "TOOL_CALL_PARSER": capacidades.get("tool_call_parser") or "",
         }
+        # Tarea de vLLM (--task embed en vez del default --task generate).
+        # Vacío para 'llm-texto' (el entrypoint no exporta ningún --task,
+        # vLLM usa su propio default); solo se exporta para 'embeddings',
+        # que necesita un runner de pooling, no generativo.
+        if wl.get("tipo_tarea", "llm-texto") == "embeddings":
+            envs["VLLM_TASK"] = "embed"
         # 'runtime_vllm.*' -> env var solo si el workload la declara (ver arriba).
         for campo, env_var in RUNTIME_VLLM_ENV_MAP.items():
             valor = runtime_vllm.get(campo)
@@ -2028,6 +2058,14 @@ WORKLOAD_RECREATE_KEYS = {
     "modelo",
     "replicas",
     "concurrencia",
+    # CORREGIDO: ninguno de estos dos estaba en ninguna de las dos listas -un
+    # cambio de 'tipo_tarea' (ej. de 'llm-texto' a 'embeddings') o de
+    # 'runtime_vllm' (DTYPE/attention_backend/etc., necesarios para T4) se
+    # diagnosticaba como "sin cambios" y nunca relanzaba el worker, pese a
+    # que ambos son flags de ARRANQUE de vLLM -no se pueden aplicar sobre un
+    # proceso vivo, igual que 'concurrencia'.
+    "tipo_tarea",
+    "runtime_vllm",
 }
 # Campos que solo requieren re-renderizar litellm_config.yaml + reload (sin tocar SkyPilot).
 WORKLOAD_IN_PLACE_KEYS = {"nombre_publico", "peso_balanceo", "asignacion_fraccional"}

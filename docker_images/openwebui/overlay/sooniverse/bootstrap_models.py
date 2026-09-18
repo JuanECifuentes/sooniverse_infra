@@ -320,6 +320,39 @@ def fetch_litellm_models() -> List[str]:
     return sorted({m["id"] for m in data if "id" in m})
 
 
+LITELLM_CONFIG_PATH = os.environ.get("LITELLM_CONFIG_PATH", "/app/litellm_config.yaml")
+
+
+def fetch_embedding_model_names() -> set:
+    """`model_name`s con `model_info.mode: embedding` en litellm_config.yaml
+    -GET /v1/models de LiteLLM (formato OpenAI estándar) NO expone 'mode' en
+    su respuesta pública, así que se lee directo del YAML generado por
+    render_litellm_config.py (montado de solo lectura en este contenedor).
+
+    Parser de línea deliberadamente simple (sin depender de PyYAML, que no
+    está garantizado en la imagen base de Open WebUI) -el archivo es
+    enteramente GENERADO por nuestro propio código con una indentación fija
+    de 2 espacios por nivel (yaml.dump default_flow_style=False), así que
+    basta con rastrear en qué entrada de 'model_list' está cada línea."""
+    try:
+        with open(LITELLM_CONFIG_PATH, "r", encoding="utf-8") as f:
+            lineas = f.readlines()
+    except OSError as exc:
+        print(f"[WARNING] No se pudo leer {LITELLM_CONFIG_PATH} para detectar modelos de "
+              f"embeddings: {exc}. Se asume que ninguno lo es.")
+        return set()
+
+    embeddings: set = set()
+    model_name_actual: Optional[str] = None
+    for linea in lineas:
+        stripped = linea.strip()
+        if linea.startswith("- model_name:"):
+            model_name_actual = stripped.split(":", 1)[1].strip().strip("'\"")
+        elif model_name_actual and stripped == "mode: embedding":
+            embeddings.add(model_name_actual)
+    return embeddings
+
+
 def fetch_capabilities_by_model() -> Dict[str, Dict[str, Any]]:
     """Lee sooniverse.model_capability (nuestra tabla, psycopg2 directo -no
     tiene nada que ver con el esquema interno de Open WebUI)."""
@@ -450,6 +483,21 @@ def main() -> int:
         litellm_models = fetch_litellm_models()
         if not litellm_models:
             print("[bootstrap] LiteLLM no reporta modelos todavía; nada que sincronizar.")
+            return 0
+
+        # Un modelo de embeddings no expone /v1/chat/completions -registrarlo
+        # como modelo de chat en Open WebUI (el comportamiento de antes,
+        # idéntico para cualquier id de LiteLLM) lo dejaba seleccionable en el
+        # selector del chat, donde cualquier mensaje le fallaría. Se excluye
+        # de la sincronización por completo (ni se crea ni se actualiza).
+        modelos_embeddings = fetch_embedding_model_names()
+        if modelos_embeddings:
+            omitidos = [m for m in litellm_models if m in modelos_embeddings]
+            if omitidos:
+                print(f"[bootstrap] Omitiendo del selector de chat (son de embeddings): {omitidos}")
+            litellm_models = [m for m in litellm_models if m not in modelos_embeddings]
+        if not litellm_models:
+            print("[bootstrap] Solo hay modelos de embeddings; nada que sincronizar en el chat.")
             return 0
 
         capabilities = fetch_capabilities_by_model()

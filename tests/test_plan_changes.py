@@ -263,3 +263,36 @@ def test_quitar_uno_de_dos_workloads_solo_marca_el_quitado():
     plan = plan_changes(base, nuevo)
 
     assert plan.clusters_to_recreate == ["nemotron-llm"]
+
+
+# -- tipo_tarea/runtime_vllm exigen relanzar el worker (Fase 4/1) -----------
+def test_cambiar_tipo_tarea_exige_relanzar_el_worker():
+    """Bug real: 'tipo_tarea' no estaba en ninguna de las dos listas -un
+    cambio de 'llm-texto' a 'embeddings' (una invocación de vLLM
+    completamente distinta) se diagnosticaba como "sin cambios"."""
+    base = load_base_config()
+    nuevo = clone(base)
+    nuevo["workloads"][0]["tipo_tarea"] = "embeddings"
+    del nuevo["workloads"][0]["capacidades"]  # embeddings no puede declarar vision/tool_calling
+
+    plan = plan_changes(base, nuevo)
+
+    assert plan.requires_destroy is False
+    assert plan.clusters_to_recreate == [base["workloads"][0]["id"]]
+    assert any(c.classification == RECREATE_CLUSTER and c.field.endswith(".tipo_tarea")
+               for c in plan.changes)
+
+
+def test_cambiar_runtime_vllm_exige_relanzar_el_worker():
+    """Mismo caso para 'runtime_vllm' (DTYPE/attention_backend/...) -son
+    flags de arranque de vLLM, no se pueden aplicar sobre un proceso vivo."""
+    base = load_base_config()
+    nuevo = clone(base)
+    nuevo["workloads"][0]["runtime_vllm"] = {"dtype": "half"}
+
+    plan = plan_changes(base, nuevo)
+
+    assert plan.requires_destroy is False
+    assert plan.clusters_to_recreate == [base["workloads"][0]["id"]]
+    assert any(c.classification == RECREATE_CLUSTER and c.field.endswith(".runtime_vllm")
+               for c in plan.changes)

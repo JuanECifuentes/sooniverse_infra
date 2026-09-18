@@ -146,3 +146,34 @@ def test_peso_balanceo_distinto_se_propaga_como_weight_por_endpoint():
     pesos = {m["litellm_params"]["api_base"]: m["litellm_params"]["weight"] for m in model_list}
     assert pesos["http://10.0.1.5:8007/v1"] == 3
     assert pesos["http://10.0.1.6:8007/v1"] == 1
+
+
+# -- workloads de embeddings: mode: embedding (Fase 4) -----------------------
+def test_endpoint_de_embeddings_lleva_mode_embedding():
+    """Sin esto, LiteLLM sondea /health con una llamada de CHAT -contra un
+    runner de pooling eso falla siempre y el deployment queda 'no sano'."""
+    model_list = build_model_list([_endpoint(tipo_tarea="embeddings")])
+    assert model_list[0]["model_info"]["mode"] == "embedding"
+
+
+def test_endpoint_de_texto_no_lleva_mode():
+    """'mode' ausente equivale a 'chat' para LiteLLM -no hay que fijarlo
+    explícitamente para el caso normal."""
+    model_list = build_model_list([_endpoint(tipo_tarea="llm-texto")])
+    assert "mode" not in model_list[0]["model_info"]
+
+
+def test_endpoint_sin_tipo_tarea_no_lleva_mode():
+    """Compatibilidad hacia atrás: un endpoint sin 'tipo_tarea' (contrato
+    viejo) se comporta igual que 'llm-texto'."""
+    model_list = build_model_list([_endpoint()])
+    assert "mode" not in model_list[0]["model_info"]
+
+
+def test_endpoint_de_embeddings_no_lleva_max_output_tokens():
+    """Un runner de pooling no genera tokens de salida -max_output_tokens no
+    tiene sentido, a diferencia de max_input_tokens (sí aplica)."""
+    model_list = build_model_list([_endpoint(tipo_tarea="embeddings", max_model_len=8192)])
+    info = model_list[0]["model_info"]
+    assert info["max_input_tokens"] == 8192
+    assert "max_output_tokens" not in info

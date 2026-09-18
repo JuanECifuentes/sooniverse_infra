@@ -179,3 +179,52 @@ def test_main_writes_json_summary_with_effective_capabilities(monkeypatch, tmp_p
     assert model["effective_vision"] is False
     assert model["effective_tool_calling"] is False
     assert model["effective_json_object"] is True
+
+
+def test_main_omite_probes_de_chat_para_workloads_de_embeddings(monkeypatch, tmp_path, capsys):
+    """Un workload de embeddings no expone /v1/chat/completions -las 4 sondas
+    fallarían siempre. Antes esto se contaba como "declaraste 'true' pero el
+    modelo lo rechazó" (capacidades.vision default=True) y hacía exit code 1
+    sin que hubiera ningún problema real."""
+    config_path = REPO_ROOT / "config_global.yaml"
+
+    monkeypatch.setattr(tmc, "discover_gateway_ip", lambda cliente: "1.2.3.4")
+    monkeypatch.setattr(tmc, "_read_env_var", lambda key: "sk-test")
+
+    probes_llamadas = []
+
+    def _tracked(nombre):
+        def _probe(*a, **k):
+            probes_llamadas.append(nombre)
+            return tmc.ProbeResult(True, "ok")
+        return _probe
+
+    monkeypatch.setattr(tmc, "probe_vision", _tracked("vision"))
+    monkeypatch.setattr(tmc, "probe_tool_calling", _tracked("tool_calling"))
+    monkeypatch.setattr(tmc, "probe_json_object", _tracked("json_object"))
+    monkeypatch.setattr(tmc, "probe_streaming", _tracked("streaming"))
+
+    import yaml
+    with config_path.open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    embeddings_wl = {
+        "id": "gte-qwen2-embed", "modelo": "gte-qwen2-embed", "tipo_tarea": "embeddings",
+        "accelerator": "T4", "cantidad_gpus": 1, "replicas": 1, "puerto": 8009,
+        "nombre_publico": "sooniverse-embeddings",
+        # Nota: sin bloque 'capacidades' -el default vision=True de
+        # capacidades.get("vision", True) es justo el escenario que causaba
+        # el falso mismatch antes de este fix.
+    }
+    cfg["workloads"].append(embeddings_wl)
+    patched_path = tmp_path / "config_global.yaml"
+    with patched_path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f)
+
+    monkeypatch.setattr(sys, "argv", ["test_model_capabilities.py", "--config", str(patched_path)])
+    exit_code = tmc.main()
+
+    assert exit_code == 0
+    assert probes_llamadas == ["vision", "tool_calling", "json_object", "streaming"]  # solo el workload de texto
+    salida = capsys.readouterr().out
+    assert "sooniverse-embeddings" in salida
+    assert "(embeddings)" in salida
