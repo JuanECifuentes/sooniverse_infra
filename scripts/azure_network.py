@@ -317,15 +317,87 @@ class AzureNetworkManager:
         fields.update(extra)
         self.state.record_resource(self.deployment_id, **fields)
 
-    def _find_existing(self, component: str) -> Optional[Dict[str, Any]]:
-        """Busca en el ESTADO (no en Azure) un recurso ya registrado para este
-        deployment_id + component -usado por cada `ensure_*` antes de crear, para
-        que `provision()` sea idempotente sin depender de listar por tag en Azure
-        en cada paso (más lento que Postgres)."""
+    def _find_existing(
+        self,
+        component: str,
+        rg_name: Optional[str] = None,
+        vnet_name: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Busca un recurso ya registrado para este deployment_id + component.
+
+        Primero mira el ESTADO (Postgres) -rápido, y es la fuente de verdad
+        para la relación 1:1 con deployment_id (la que necesitan
+        destroy()/scan_orphans() para decidir qué es "nuestro"). CORREGIDO: si
+        el estado no tiene el recurso (BD perdida/reiniciada, o esta es una
+        corrida de recuperación), se consulta Azure DIRECTAMENTE por el
+        nombre determinista -todos los nombres de este módulo son
+        'sooniverse-<cliente>-<entorno>-<componente>', sin deployment_id- y,
+        si existe, se auto-registra en el estado bajo el deployment_id ACTUAL
+        antes de devolverlo. Sin esto, un estado perdido no duplicaba el
+        recurso Azure en sí (el PUT de ARM ya es idempotente por nombre),
+        pero sí dejaba una fila de estado huérfana del deployment_id viejo y
+        forzaba un create_or_update evitable en cada `ensure_*` -equivalente
+        funcional del `_find_by_component()` de aws_network.py, que sí
+        consulta AWS en vivo porque `create_vpc()`/etc. NO son idempotentes
+        por nombre."""
         for res in self.state.list_resources(self.deployment_id):
             if res.get("component") == component:
                 return res
-        return None
+
+        azure_id, name = self._lookup_live(component, rg_name, vnet_name)
+        if azure_id is None:
+            return None
+        logger.info(
+            "[RED-AZURE] %s no estaba en el estado pero SÍ existe en Azure (%s); "
+            "se adopta bajo deployment_id=%s.",
+            component, name, self.deployment_id,
+        )
+        self._record(component, component, azure_id, attributes={"name": name})
+        return {"aws_id": azure_id, "component": component, "attributes": {"name": name}}
+
+    def _lookup_live(
+        self,
+        component: str,
+        rg_name: Optional[str],
+        vnet_name: Optional[str],
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """GET directo a Azure por el nombre determinista del componente (ver
+        `_find_existing`). Devuelve (azure_id, name) o (None, None) si no
+        existe o si falta el `rg_name`/`vnet_name` necesario para el GET."""
+        try:
+            if component == "resource-group":
+                # Convención de este módulo: el 'azure_id' registrado para
+                # resource-group es el NOMBRE desnudo (ver ensure_resource_group,
+                # que devuelve 'name' y no el resourceId completo de ARM) -aquí
+                # se respeta esa convención en vez del rg.id que devolvería el SDK.
+                name = self.resource_group_name
+                self.resource_client.resource_groups.get(name)
+                return name, name
+            if not rg_name:
+                return None, None
+            if component == "vnet":
+                name = self._name("vnet")
+                vnet = self.network_client.virtual_networks.get(rg_name, name)
+                return vnet.id, name
+            if component in ("nsg-gateway", "nsg-workers"):
+                name = self._name(component.replace("nsg-", ""))
+                nsg = self.network_client.network_security_groups.get(rg_name, name)
+                return nsg.id, name
+            if component == "pip-nat":
+                name = self._name("pip-nat")
+                pip = self.network_client.public_ip_addresses.get(rg_name, name)
+                return pip.id, name
+            if component == "natgw":
+                name = self._name("natgw")
+                nat = self.network_client.nat_gateways.get(rg_name, name)
+                return nat.id, name
+            if component in ("subnet-public", "subnet-private") and vnet_name:
+                name = component.replace("subnet-", "subred-")
+                subnet = self.network_client.subnets.get(rg_name, vnet_name, name)
+                return subnet.id, name
+        except ResourceNotFoundError:
+            return None, None
+        return None, None
 
     # -------------------------------------------------------------------
     # ensure_* (idempotentes)
@@ -348,7 +420,7 @@ class AzureNetworkManager:
     def ensure_vnet(self, rg_name: str) -> Tuple[str, str]:
         """Devuelve (vnet_id, vnet_name)."""
         name = self._name("vnet")
-        existing = self._find_existing("vnet")
+        existing = self._find_existing("vnet", rg_name=rg_name)
         if existing:
             logger.info("[SKIP][RED-AZURE] VNet ya registrada: %s", name)
             return existing["aws_id"], name
@@ -366,6 +438,21 @@ class AzureNetworkManager:
         self._record("vnet", "vnet", vnet.id, parent_aws_id=rg_name, attributes={"name": name})
         logger.info("[RED-AZURE] VNet creada: %s", vnet.id)
         return vnet.id, name
+
+    def _resolve_subnet_cidrs(self) -> Tuple[str, str]:
+        """(cidr_publico, cidr_privado) reales de ESTE despliegue: honra los
+        CIDR explícitos de 'red_y_aislamiento.subredes.publicas/privadas' si
+        se declararon, igual que `ensure_subnets()`. CORREGIDO: antes
+        `ensure_security_groups()` recalculaba SIEMPRE con
+        `compute_subnet_cidrs(vnet_cidr)` sin mirar los CIDR explícitos -si el
+        operador los fijaba a mano, las reglas NSG de los workers acababan
+        permitiendo el CIDR equivocado (el calculado, no el real de la subred
+        pública donde vive el Gateway), bloqueando en silencio el tráfico
+        gateway -> worker. Único punto de verdad para que ambos métodos no
+        puedan volver a divergir."""
+        if self.spec.public_subnet_cidrs and self.spec.private_subnet_cidrs:
+            return self.spec.public_subnet_cidrs[0], self.spec.private_subnet_cidrs[0]
+        return compute_subnet_cidrs(self.spec.vnet_cidr)
 
     def ensure_security_groups(self, rg_name: str) -> Tuple[str, str]:
         """Crea (o reutiliza) los NSG de gateway y workers, y sincroniza sus reglas
@@ -392,7 +479,7 @@ class AzureNetworkManager:
                 gw_rules.append({"port": port, "cidrs": public_cidrs})
         self._sync_nsg_rules(rg_name, gw_name, gw_rules)
 
-        public_cidr, private_cidr = compute_subnet_cidrs(self.spec.vnet_cidr)
+        public_cidr, private_cidr = self._resolve_subnet_cidrs()
         worker_ports = self.spec.worker_ports or []
         worker_rules: List[Dict[str, Any]] = [{"port": 22, "cidrs": [public_cidr]}]
         for port in worker_ports:
@@ -406,7 +493,7 @@ class AzureNetworkManager:
 
     def _ensure_nsg(self, rg_name: str, component: str) -> Tuple[str, str]:
         name = self._name(component.replace("nsg-", ""))
-        existing = self._find_existing(component)
+        existing = self._find_existing(component, rg_name=rg_name)
         if existing:
             logger.info("[SKIP][RED-AZURE] NSG %s ya registrado: %s", component, name)
             return existing["aws_id"], name
@@ -424,7 +511,15 @@ class AzureNetworkManager:
         current = list(self.network_client.security_rules.list(rg_name, nsg_name))
         current_by_name = {r.name: r for r in current}
 
+        # CORREGIDO: la prioridad se calculaba como 100 + idx*10 + cidr_idx, que
+        # colisiona en cuanto una regla trae 10 o más CIDR (cidr_idx=10 en la
+        # regla idx=0 da la misma prioridad -110- que cidr_idx=0 en idx=1);
+        # Azure exige prioridad ÚNICA por NSG y rechaza el create/update con un
+        # error de "prioridad duplicada". Un contador monotónico sobre el par
+        # (idx, cidr_idx) aplanado es única por construcción sin importar
+        # cuántos CIDR traiga cada regla.
         wanted: Dict[str, Dict[str, Any]] = {}
+        priority = 100
         for idx, rule in enumerate(rules):
             for cidr_idx, cidr in enumerate(rule["cidrs"]):
                 rule_name = f"allow-{rule['port']}-{idx}-{cidr_idx}"
@@ -436,8 +531,9 @@ class AzureNetworkManager:
                     "destination_address_prefix": "*",
                     "access": "Allow",
                     "direction": "Inbound",
-                    "priority": 100 + (idx * 10) + cidr_idx,
+                    "priority": priority,
                 }
+                priority += 1
 
         for rule_name, body in wanted.items():
             existing_rule = current_by_name.get(rule_name)
@@ -461,7 +557,7 @@ class AzureNetworkManager:
         if self.spec.nat_mode == "none":
             return None
 
-        existing_nat = self._find_existing("natgw")
+        existing_nat = self._find_existing("natgw", rg_name=rg_name)
         if existing_nat:
             logger.info("[SKIP][RED-AZURE] NAT Gateway ya registrado.")
             return existing_nat["aws_id"]
@@ -511,11 +607,7 @@ class AzureNetworkManager:
                 self.spec.az_count,
             )
 
-        public_cidr, private_cidr = (
-            (self.spec.public_subnet_cidrs[0], self.spec.private_subnet_cidrs[0])
-            if self.spec.public_subnet_cidrs and self.spec.private_subnet_cidrs
-            else compute_subnet_cidrs(self.spec.vnet_cidr)
-        )
+        public_cidr, private_cidr = self._resolve_subnet_cidrs()
 
         public_id = self._ensure_one_subnet(
             rg_name, vnet_name, "subnet-public", public_cidr, nsg_gateway_id, nat_gateway_id=None
@@ -535,7 +627,7 @@ class AzureNetworkManager:
         nat_gateway_id: Optional[str],
     ) -> str:
         name = component.replace("subnet-", "subred-")
-        existing = self._find_existing(component)
+        existing = self._find_existing(component, rg_name=rg_name, vnet_name=vnet_name)
         if existing:
             logger.info("[SKIP][RED-AZURE] Subred %s ya registrada.", component)
             return existing["aws_id"]
