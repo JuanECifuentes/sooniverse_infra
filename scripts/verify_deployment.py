@@ -197,15 +197,54 @@ def _http_post(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, st
 # =============================================================================
 # Comprobaciones (cada una: ctx -> CheckResult)
 # =============================================================================
+def _azure_clients(ctx: VerificationContext):
+    """Credenciales + clientes de red/cómputo de Azure para las comprobaciones
+    de verify_deployment.py. Import perezoso: el SDK de Azure solo hace falta
+    aquí, igual que 'import boto3' en las comprobaciones AWS de este archivo."""
+    from azure.mgmt.compute import ComputeManagementClient
+    from azure.mgmt.network import NetworkManagementClient
+    from azure_network import _default_credential
+
+    credential, sub_id = _default_credential()
+    return (
+        NetworkManagementClient(credential, sub_id),
+        ComputeManagementClient(credential, sub_id),
+    )
+
+
+def _azure_resource_group_name(ctx: VerificationContext) -> Optional[str]:
+    row = next((r for r in ctx.resources if r["component"] == "resource-group"), None)
+    if not row:
+        return None
+    return (row.get("attributes") or {}).get("name") or row.get("aws_id")
+
+
 def check_private_route_to_nat(ctx: VerificationContext) -> CheckResult:
     name = "Subred privada rutea a NAT"
+    if ctx.config["red_y_aislamiento"].get("cloud", "aws") == "azure":
+        # Azure asocia el NAT Gateway DIRECTAMENTE a la subred (sin Route
+        # Table separada, ver azure_network.py::_ensure_one_subnet) -esa
+        # asociación ES la ruta 0.0.0.0/0 -> NAT, así que el chequeo
+        # equivalente es leer subnet.nat_gateway en vez de una route table.
+        subnet_row = next((r for r in ctx.resources if r["component"] == "subnet-private"), None)
+        rg_name = _azure_resource_group_name(ctx)
+        if not subnet_row or not rg_name:
+            return CheckResult(name, "N/A", "No hay subred privada/Resource Group registrados", critical=False)
+        subnet_name = (subnet_row.get("attributes") or {}).get("name") or "subred-private"
+        vnet_row = next((r for r in ctx.resources if r["component"] == "vnet"), None)
+        vnet_name = (vnet_row.get("attributes") or {}).get("name") if vnet_row else None
+        if not vnet_name:
+            return CheckResult(name, "N/A", "No hay VNet registrada", critical=False)
+        try:
+            network_client, _ = _azure_clients(ctx)
+            subnet = network_client.subnets.get(rg_name, vnet_name, subnet_name)
+        except Exception as exc:  # noqa: BLE001
+            return CheckResult(name, "FAIL", f"{subnet_name}: {exc}")
+        if subnet.nat_gateway and subnet.nat_gateway.id:
+            return CheckResult(name, "OK", f"Subred '{subnet_name}' asociada a {subnet.nat_gateway.id}")
+        return CheckResult(name, "FAIL", f"Subred '{subnet_name}' no tiene NAT Gateway asociado")
     if ctx.config["red_y_aislamiento"].get("cloud", "aws") != "aws":
-        # Azure asocia el NAT Gateway directo a la subred (sin Route Table
-        # separada -ver azure_network.py), así que este chequeo AWS-específico
-        # no aplica. No hay 'rtb-private' registrado para Azure, con lo que de
-        # todos modos caería en el N/A de abajo -este guard solo lo hace
-        # explícito en vez de depender de ese efecto colateral.
-        return CheckResult(name, "N/A", "Chequeo específico de AWS (Route Tables); no aplica a Azure", critical=False)
+        return CheckResult(name, "N/A", "Chequeo específico de AWS/Azure; no aplica a esta nube", critical=False)
     private_rt_ids = [r["aws_id"] for r in ctx.resources if r["component"] == "rtb-private" and r["aws_id"]]
     if not private_rt_ids:
         return CheckResult(name, "N/A", "No hay route tables privadas registradas", critical=False)
@@ -255,19 +294,54 @@ def check_public_route_to_igw(ctx: VerificationContext) -> CheckResult:
     return CheckResult(name, "OK" if ok else "FAIL", f"{len(public_rt_ids)} route table(s) verificadas")
 
 
+_NIC_ID_RE = re.compile(
+    r"/resourceGroups/([^/]+)/providers/Microsoft\.Network/networkInterfaces/([^/]+)", re.IGNORECASE
+)
+
+
 def check_workers_no_public_ip(ctx: VerificationContext) -> CheckResult:
     name = "Los workers no tienen IP pública"
+    if ctx.config["red_y_aislamiento"].get("cloud", "aws") == "azure":
+        rg_name = _azure_resource_group_name(ctx)
+        subnet_row = next((r for r in ctx.resources if r["component"] == "subnet-private"), None)
+        private_subnet_id = (subnet_row or {}).get("aws_id")
+        if not rg_name or not private_subnet_id:
+            return CheckResult(name, "N/A", "No hay subred privada/Resource Group registrados", critical=False)
+
+        try:
+            network_client, compute_client = _azure_clients(ctx)
+            vms = list(compute_client.virtual_machines.list(rg_name))
+        except Exception as exc:  # noqa: BLE001
+            return CheckResult(name, "FAIL", f"{exc}")
+        if not vms:
+            return CheckResult(name, "N/A", "No hay VMs corriendo en el Resource Group todavía", critical=False)
+
+        con_ip_publica: List[str] = []
+        en_subred_privada = 0
+        for vm in vms:
+            if not vm.network_profile:
+                continue
+            for nic_ref in vm.network_profile.network_interfaces:
+                match = _NIC_ID_RE.search(nic_ref.id or "")
+                if not match:
+                    continue
+                try:
+                    nic = network_client.network_interfaces.get(match.group(1), match.group(2))
+                except Exception:  # noqa: BLE001 - NIC transitoriamente ilegible; se ignora, no se falla el check
+                    continue
+                for ip_cfg in nic.ip_configurations or []:
+                    subnet_ref = ip_cfg.subnet.id if ip_cfg.subnet else None
+                    if subnet_ref and subnet_ref.lower() == private_subnet_id.lower():
+                        en_subred_privada += 1
+                        if ip_cfg.public_ip_address:
+                            con_ip_publica.append(vm.name)
+        if en_subred_privada == 0:
+            return CheckResult(name, "N/A", "No hay VMs en la subred privada todavía", critical=False)
+        if con_ip_publica:
+            return CheckResult(name, "FAIL", f"VMs con IP pública: {con_ip_publica}")
+        return CheckResult(name, "OK", f"{en_subred_privada} VM(s) verificadas sin IP pública")
     if ctx.config["red_y_aislamiento"].get("cloud", "aws") != "aws":
-        # IMPORTANTE: el componente 'subnet-private' SÍ existe en el estado de
-        # un despliegue Azure (mismo nombre de componente, ver azure_network.py),
-        # pero con un resource ID de Azure -pasarlo a boto3.describe_instances()
-        # rompería en vez de devolver N/A por lista vacía. Falta el equivalente
-        # Azure (azure-mgmt-compute: listar VMs por subred + IP pública en el NIC).
-        return CheckResult(
-            name, "N/A",
-            "Chequeo específico de AWS (boto3 describe_instances); equivalente Azure no implementado todavía",
-            critical=False,
-        )
+        return CheckResult(name, "N/A", "Chequeo específico de AWS/Azure; no aplica a esta nube", critical=False)
     private_subnet_ids = [r["aws_id"] for r in ctx.resources if r["component"] == "subnet-private" and r["aws_id"]]
     if not private_subnet_ids:
         return CheckResult(name, "N/A", "No hay subredes privadas registradas", critical=False)
@@ -293,14 +367,64 @@ def check_workers_no_public_ip(ctx: VerificationContext) -> CheckResult:
     return CheckResult(name, "OK", f"{len(instances)} instancia(s) verificadas sin IP pública")
 
 
+def _port_in_azure_range(port: int, destination_port_range: str) -> bool:
+    """'destination_port_range' de una regla NSG es '*', un puerto único
+    ('8007') o un rango ('8000-9000'). Devuelve True si `port` cae dentro."""
+    rango = (destination_port_range or "").strip()
+    if rango == "*":
+        return True
+    if "-" in rango:
+        try:
+            lo, hi = (int(x) for x in rango.split("-", 1))
+        except ValueError:
+            return False
+        return lo <= port <= hi
+    try:
+        return int(rango) == port
+    except ValueError:
+        return False
+
+
 def check_workers_sg_no_open_cidr(ctx: VerificationContext) -> CheckResult:
     name = "SG de workers no acepta 0.0.0.0/0 en el puerto vLLM"
+    if ctx.config["red_y_aislamiento"].get("cloud", "aws") == "azure":
+        rg_name = _azure_resource_group_name(ctx)
+        nsg_row = next((r for r in ctx.resources if r["component"] == "nsg-workers"), None)
+        if not rg_name or not nsg_row:
+            return CheckResult(name, "N/A", "No hay NSG de workers/Resource Group registrados", critical=False)
+        nsg_name = (nsg_row.get("attributes") or {}).get("name") or "sooniverse-workers"
+        worker_ports = {wl["puerto"] for wl in ctx.config["workloads"]}
+
+        try:
+            network_client, _ = _azure_clients(ctx)
+            rules = list(network_client.security_rules.list(rg_name, nsg_name))
+        except Exception as exc:  # noqa: BLE001
+            return CheckResult(name, "FAIL", f"{nsg_name}: {exc}")
+
+        # Las reglas '0.0.0.0/0' NO son necesariamente un fallo aquí -por
+        # diseño, azure_network.py acota el ingreso hacia los workers por CIDR
+        # de SUBRED (pública/privada), no con '0.0.0.0/0' (ver docstring del
+        # módulo sobre por qué no hay equivalente 1:1 a SG->SG en Azure). Este
+        # chequeo detecta el caso realmente peligroso: una regla que se cuele
+        # abriendo el puerto vLLM a internet entero.
+        for rule in rules:
+            if rule.direction != "Inbound" or rule.access != "Allow":
+                continue
+            prefijos = [rule.source_address_prefix] if rule.source_address_prefix else []
+            prefijos += list(rule.source_address_prefixes or [])
+            if "0.0.0.0/0" not in prefijos and "*" not in prefijos:
+                continue
+            rangos = [rule.destination_port_range] if rule.destination_port_range else []
+            rangos += list(rule.destination_port_ranges or [])
+            for puerto in worker_ports:
+                if any(_port_in_azure_range(puerto, r) for r in rangos):
+                    return CheckResult(
+                        name, "FAIL",
+                        f"Regla '{rule.name}' abre el puerto {puerto} a 0.0.0.0/0",
+                    )
+        return CheckResult(name, "OK", f"{len(worker_ports)} puerto(s) vLLM revisados en el NSG, ninguno abierto a 0.0.0.0/0")
     if ctx.config["red_y_aislamiento"].get("cloud", "aws") != "aws":
-        # El componente Azure equivalente se llama 'nsg-workers' (no
-        # 'sg-workers'), así que esto ya caería en N/A por no encontrarlo -este
-        # guard solo lo hace explícito. Equivalente Azure (leer security_rules
-        # del NSG) no implementado todavía.
-        return CheckResult(name, "N/A", "Chequeo específico de AWS (Security Group); equivalente NSG no implementado todavía", critical=False)
+        return CheckResult(name, "N/A", "Chequeo específico de AWS/Azure; no aplica a esta nube", critical=False)
     sg_id = next((r["aws_id"] for r in ctx.resources if r["component"] == "sg-workers" and r["aws_id"]), None)
     if not sg_id:
         return CheckResult(name, "N/A", "No hay SG de workers registrado", critical=False)
