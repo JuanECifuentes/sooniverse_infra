@@ -421,6 +421,18 @@ def main() -> int:
 
     for wl in config.get("workloads", []):
         model = wl.get("nombre_publico", wl["id"])
+        if wl.get("tipo_tarea", "llm-texto") == "embeddings":
+            # Las 4 sondas de abajo postean a /v1/chat/completions -un
+            # endpoint de embeddings (runner de pooling) no lo expone, así
+            # que fallarían siempre. Antes esto se contaba como "declaraste
+            # 'true' pero el modelo lo rechazó" (con 'capacidades.vision'
+            # defaulteando a True cuando el workload no la declara, ver
+            # abajo), marcando el despliegue como roto sin serlo -y
+            # devolviendo exit code 1 (ver el chequeo de mismatches al final
+            # de main()). Un modelo de embeddings no tiene capacidades de
+            # chat que sondear; se omite por completo.
+            print(f"{model:<26}{'(embeddings)':<15}{'n/a':<11}{'n/a':<9}{'0':<10}Sin capacidades de chat que sondear.")
+            continue
         capacidades = wl.get("capacidades", {})
         declared_vision = capacidades.get("vision", True)
         declared_tools = capacidades.get("tool_calling", False)

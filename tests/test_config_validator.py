@@ -683,3 +683,34 @@ def test_peso_balanceo_uno_no_avisa_nunca():
     cfg = load_base_config()
     assert cfg["workloads"][0].get("peso_balanceo", 1) == 1
     ConfigValidator.validate(cfg)
+
+
+# -- tipo_tarea: embeddings no puede declarar capacidades de chat -----------
+def test_embeddings_con_vision_true_rechazado():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["tipo_tarea"] = "embeddings"
+    cfg["workloads"][0]["capacidades"]["vision"] = True
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_embeddings_con_tool_calling_true_rechazado():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["tipo_tarea"] = "embeddings"
+    cfg["workloads"][0]["capacidades"] = {"tool_calling": True, "tool_call_parser": "hermes"}
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_embeddings_sin_capacidades_es_valido():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["tipo_tarea"] = "embeddings"
+    del cfg["workloads"][0]["capacidades"]
+    ConfigValidator.validate(cfg)
+
+
+def test_embeddings_con_vision_false_explicito_es_valido():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["tipo_tarea"] = "embeddings"
+    cfg["workloads"][0]["capacidades"] = {"vision": False}
+    ConfigValidator.validate(cfg)

@@ -263,3 +263,42 @@ def test_preserve_keys_incluye_allowed_hosts_y_csrf():
     assert '"HTTPS_ACTIVO"' in fuente
     assert '"CHAT_URL"' in fuente
     assert '"SOONIVERSE_PANEL_URL"' in fuente
+
+
+# -- tipo_tarea: embeddings (Fase 4) -----------------------------------------
+def test_vllm_task_vacio_para_workload_de_texto():
+    cfg = load_base_config()
+    assert cfg["workloads"][0].get("tipo_tarea", "llm-texto") == "llm-texto"
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    assert "VLLM_TASK" not in envs
+
+
+def test_vllm_task_embed_para_workload_de_embeddings():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["tipo_tarea"] = "embeddings"
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    assert envs["VLLM_TASK"] == "embed"
+
+
+def test_vllm_task_se_exporta_en_worker_run_script():
+    cfg = load_base_config()
+    run = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["run"]
+    assert 'export VLLM_TASK="${VLLM_TASK:-}"' in run
+
+
+def test_enable_vision_default_es_false_para_embeddings_sin_capacidades():
+    """Un runner de pooling (embeddings) nunca tiene torre de visión -a
+    diferencia de un workload de texto, donde el default es 'true' para no
+    forzar a declarar 'capacidades' explícitamente."""
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["tipo_tarea"] = "embeddings"
+    del cfg["workloads"][0]["capacidades"]
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    assert envs["ENABLE_VISION"] == "0"
+
+
+def test_enable_vision_default_sigue_siendo_true_para_texto_sin_capacidades():
+    cfg = clone(load_base_config())
+    del cfg["workloads"][0]["capacidades"]
+    envs = TopologyBuilder(cfg).build_worker(cfg["workloads"][0])["envs"]
+    assert envs["ENABLE_VISION"] == "1"

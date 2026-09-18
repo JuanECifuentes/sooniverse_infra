@@ -444,6 +444,13 @@ def build_endpoints(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "workload_id": wl["id"],
                 "cluster": cluster,
                 "model_public_name": model_public_name,
+                # CORREGIDO: 'tipo_tarea' nunca viajaba hasta aquí -sin esto,
+                # render_litellm_config.py no tenía forma de saber que un
+                # endpoint es de embeddings y ponerle 'mode: embedding' en
+                # model_info (LiteLLM sondea /health con una llamada de CHAT
+                # por defecto; contra un endpoint de pooling eso siempre
+                # falla, reportando el deployment como no sano para siempre).
+                "tipo_tarea": wl.get("tipo_tarea", "llm-texto"),
                 "hf_repo": wl.get("hf_repo", "unknown"),
                 "accelerator": wl.get("accelerator"),
                 "ip": ip,
