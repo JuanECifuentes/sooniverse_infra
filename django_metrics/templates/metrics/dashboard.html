@@ -308,7 +308,7 @@
 
         {# ---------------------------------------------------- GRÁFICA + POOL VPC #}
         <section class="l-grid l-grid--split l-mb-lg">
-            <article class="sv-card l-card--flush">
+            <article class="sv-card l-card--flush" id="card-chart">
                 {% comment %} El selector de lente vive en el head de la tarjeta, que ya es
                    flex con hueco a la derecha: no añade una fila al grid ni
                    cambia la altura de la tarjeta. {% endcomment %}
@@ -339,7 +339,7 @@
                 </div>
             </article>
 
-            <article class="sv-card">
+            <article class="sv-card" id="card-pool">
                 <div class="l-stack l-stack--tight l-mb-md">
                     <span class="sv-eyebrow">Pool vLLM</span>
                     <h3>Workers en la VPC</h3>
@@ -354,16 +354,18 @@
                     </span>
                 </div>
 
-                {% if not pool.restart_disponible or not pool.ec2_disponible %}
-                    <p class="sv-help l-mb-md">
-                        {% if not pool.restart_disponible %}"Reiniciar" no está disponible: falta la clave SSH del bastion en este despliegue.{% endif %}
-                        {% if not pool.ec2_disponible %}"Apagar"/"Arrancar" no están disponibles: las credenciales AWS de este despliegue no tienen permiso para apagar/arrancar instancias EC2 (o no están configuradas).{% endif %}
-                    </p>
+                {% if not VITRINA %}
+                    {% if not pool.restart_disponible or not pool.ec2_disponible %}
+                        <p class="sv-help l-mb-md">
+                            {% if not pool.restart_disponible %}"Reiniciar" no está disponible: falta la clave SSH del bastion en este despliegue.{% endif %}
+                            {% if not pool.ec2_disponible %}"Apagar"/"Arrancar" no están disponibles: las credenciales AWS de este despliegue no tienen permiso para apagar/arrancar instancias EC2 (o no están configuradas).{% endif %}
+                        </p>
+                    {% endif %}
                 {% endif %}
 
                 <div class="sv-divider"></div>
 
-                <div class="l-stack l-stack--tight">
+                <div class="l-stack l-stack--tight l-worker-list">
                     {% for nodo in pool.nodos %}
                         <div class="l-worker-row">
                             <div class="l-row">
@@ -374,6 +376,9 @@
                                     {% else %}sv-dot--warn{% endif %}"></span>
                                 <span class="sv-mono">{{ nodo.private_ip }}:{{ nodo.port }}</span>
                                 <span class="l-spacer"></span>
+                                {% if nodo.model_name %}
+                                    <span class="sv-badge sv-badge--secure">{{ nodo.model_name }}</span>
+                                {% endif %}
                                 <span class="sv-badge sv-badge--muted">{{ nodo.accelerator|default:"—" }}</span>
                                 <span class="sv-badge
                                     {% if nodo.estado_operativo == 'sano' %}sv-badge--success
@@ -436,13 +441,7 @@
                     </form>
                 </dialog>
 
-                {% if pool.modelos %}
-                    <div class="sv-divider"></div>
-                    <span class="sv-eyebrow">Modelos publicados</span>
-                    <div class="l-row" style="margin-top:8px">
-                        {% for m in pool.modelos %}<span class="sv-badge sv-badge--secure">{{ m }}</span>{% endfor %}
-                    </div>
-                {% endif %}
+
             </article>
         </section>
 
