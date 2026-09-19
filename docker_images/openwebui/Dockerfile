@@ -35,11 +35,18 @@ COPY overlay/static/favicon.png /app/build/favicon.png
 # Botón de navegación chat -> panel (la URL la escribe entrypoint.sh en
 # sooniverse-nav-config.js, que lee en runtime SOONIVERSE_PANEL_URL).
 COPY overlay/static/sooniverse-nav.js /app/build/sooniverse-nav.js
+# Auto-login SSO (ver el docstring del archivo): debe ejecutarse ANTES que
+# cualquier otro script, incluido el bundle principal de la SPA.
+COPY overlay/static/sooniverse-auto-login.js /app/build/sooniverse-auto-login.js
 
 # Configurar index.html para usar SVG nativos en splash/favicon, activar
 # sooniverse.css y cargar el botón de navegación (sooniverse-nav-config.js lo
 # escribe entrypoint.sh en cada arranque; debe ir ANTES de sooniverse-nav.js).
-RUN sed -i 's|</head>|    <link rel="stylesheet" href="/sooniverse.css" />\n    <script src="/sooniverse-nav-config.js"></script>\n    <script src="/sooniverse-nav.js" defer></script>\n</head>|g' /app/build/index.html \
+# El auto-login se inserta al PRINCIPIO del <head> (sin defer, bloqueante a
+# propósito) para que corra antes que el bundle de la SPA; los demás overlays
+# siguen insertándose al final del <head>, como antes.
+RUN sed -i 's|<head>|<head>\n    <script src="/sooniverse-auto-login.js"></script>|' /app/build/index.html \
+ && sed -i 's|</head>|    <link rel="stylesheet" href="/sooniverse.css" />\n    <script src="/sooniverse-nav-config.js"></script>\n    <script src="/sooniverse-nav.js" defer></script>\n</head>|g' /app/build/index.html \
  && sed -i 's|/static/splash-dark.png|/static/splash-dark.svg|g' /app/build/index.html \
  && sed -i 's|/static/splash.png|/static/splash.svg|g' /app/build/index.html
 
