@@ -69,6 +69,13 @@ if [ "${ENABLE_TOOL_CALLING}" = "1" ]; then
   fi
   EXTRA_ARGS+=(--enable-auto-tool-choice --tool-call-parser "${TOOL_CALL_PARSER}")
 fi
+# Ver docker_images/qwen3.5/entrypoint.sh: en vLLM 0.24.0 VLLM_ATTENTION_BACKEND
+# ya no es una variable de entorno (se ignora con solo un WARNING); ahora es
+# el flag de CLI '--attention-backend'. No cambia el veredicto de este modelo
+# en T4 (ver docker-compose.yml), pero mantiene el mecanismo consistente.
+if [ -n "${VLLM_ATTENTION_BACKEND}" ]; then
+  EXTRA_ARGS+=(--attention-backend "${VLLM_ATTENTION_BACKEND}")
+fi
 
 echo "==> Levantando ${MODEL_NAME}"
 echo "    max-model-len=${MAX_MODEL_LEN} gpu-mem-util=${GPU_MEMORY_UTILIZATION} max-num-seqs=${MAX_NUM_SEQS} tp=${TENSOR_PARALLEL_SIZE}"
