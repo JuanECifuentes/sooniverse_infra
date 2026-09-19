@@ -90,3 +90,14 @@ Un usuario nuevo autenticado vía SSO se auto-aprovisiona en Open WebUI (mismo m
 normal) con `DEFAULT_USER_ROLE: "pending"` — necesita que un admin de Open WebUI lo promueva a `user`
 antes de poder chatear, salvo que sea el primer usuario de la instancia (asciende a `admin`
 automáticamente; en la práctica ese primer puesto ya lo ocupa la cuenta técnica de bootstrap).
+`ensure_default_user_role_is_user()` corrige `DEFAULT_USER_ROLE` a `"user"` en cada corrida del
+bootstrap para que cualquier humano real que se auto-aprovisione después pueda chatear de inmediato.
+
+**Refuerzo de cliente (`overlay/static/sooniverse-auto-login.js`):** verificado en un despliegue real
+que el auto-login `signInHandler()` documentado arriba no siempre deja al frontend con un token
+utilizable en el primer render (el navegador podía quedarse en la pantalla de login de Open WebUI, o
+`/api/models` respondía `401 Not authenticated` pese a la sesión de Django activa). Este script se
+inyecta como el PRIMER `<script>` del `<head>` (sin `defer`, XHR síncrono a propósito) y repite el
+mismo `/api/v1/auths/signin` con valores dummy si no hay token en `localStorage` -confiando en la
+MISMA cabecera de confianza que ya inyecta nginx para esa petición. No-op si ya hay un token guardado;
+silencioso si falla (acceso directo por IP sin pasar por el dominio, SSO desactivado).
