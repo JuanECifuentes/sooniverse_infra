@@ -20,4 +20,5 @@ def branding(request):
         "PUBLIC_BASE_URL": settings.PUBLIC_BASE_URL,
         "CHAT_URL": settings.CHAT_URL,
         "ES_ADMIN_CREDENCIALES": es_admin,
+        "VITRINA": getattr(settings, "VITRINA", False),
     }
