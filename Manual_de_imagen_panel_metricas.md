@@ -28,7 +28,7 @@ Fondo casi negro real, superficies diferenciadas por luminancia (no por bordes g
 | Texto primario | `--text-primary` | `#ececec` | Color de texto de body/botones de Open WebUI (`#ebebeb`) | Títulos, valores numéricos destacados |
 | Texto secundario | `--text-secondary` | `#a8a8ac` | Texto secundario L85 de Open WebUI (`#cecece`, ajustado a AA sobre `#0d0d0e`) | Copy, ejes de gráfica |
 | Texto muted | `--text-muted` | `#6f6f76` | Derivado, para el nivel más bajo de énfasis | Labels, placeholders, ticks |
-| Acento único | `--accent` / `-hover` / `-pressed` | `#8A2BE2` / `#9d4edd` / `#7422be` | Único color saturado (violeta) usado para estados activos | Foco, botón primario, serie principal de gráfica |
+| Acento único | `--accent` / `-hover` / `-pressed` | `#60EFFF` / `#7af2ff` / `#38d8e8` | Único color saturado (cyan) usado para estados activos | Foco, botón primario, serie principal de gráfica |
 | Positivo | `--positive` | `#3fb968` | Punto de estado "online" de Open WebUI (`#00c950`), desaturado para uso extendido en UI | Badges de éxito |
 | Advertencia | `--warning` | `#d99a3d` | Convención estándar, sin equivalente directo en Open WebUI | Badges de advertencia |
 | Negativo | `--negative` | `#e0616f` | Convención estándar | Errores, acción destructiva |
@@ -40,7 +40,7 @@ Fondo casi negro real, superficies diferenciadas por luminancia (no por bordes g
 
 ### 1.1 Paleta de series (gráficas)
 
-`--chart-1: #8A2BE2` (= `--accent`) y `--chart-2: #a8a8ac` (= `--text-secondary`) son las dos series activas hoy (Prompt / Completion, barras apiladas). `--chart-3` a `--chart-6` quedan reservados para series futuras y deben mantenerse desaturados y con luminancia decreciente para seguir siendo legibles en escala de grises.
+`--chart-1: #60EFFF` (= `--accent`) y `--chart-2: #a8a8ac` (= `--text-secondary`) son las dos series activas hoy (Prompt / Completion, barras apiladas). `--chart-3` a `--chart-6` quedan reservados para series futuras y deben mantenerse desaturados y con luminancia decreciente para seguir siendo legibles en escala de grises.
 
 Las gráficas (Chart.js) **leen estas variables en tiempo de ejecución** vía `getComputedStyle(document.documentElement)` — nunca hardcodees un color de serie en JS. Si cambias `theme-sooniverse.css`, la gráfica se re-tematiza sola.
 
@@ -115,7 +115,7 @@ Vendorizado en `static/js/vendor/chart.umd.min.js` (sin CDN). Barras apiladas, `
 ```text
 [INSTRUCCIÓN DE DISEÑO: PANEL DE MÉTRICAS SOONIVERSE]
 Al generar cualquier componente para django_metrics, obedezca la paleta
-casi-negra '#0d0d0e' como fondo absoluto y '#8A2BE2' como único acento
+casi-negra '#0d0d0e' como fondo absoluto y '#60EFFF' como único acento
 saturado. No reintroduzca gradientes decorativos, resplandores de color
 (box-shadow/filter con color) ni mayúsculas forzadas en botones. Todo color
 vive en theme-sooniverse.css (o theme-debug.css como alternativa de prueba);

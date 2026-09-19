@@ -27,7 +27,7 @@
      --text-primary   ~ color de texto de body/botones:      #ebebeb
      --text-secondary ~ color de texto secundario (L85 oklch): #cecece
      --accent         ~ único color saturado usado para estados activos
-                        (violeta), hover/pressed:             #8A2BE2 / #7422be
+                        (cyan), hover/pressed:                #60EFFF / #38d8e8
      --positive       ~ punto de estado "online":             #00c950
    ============================================================================ */
 
@@ -51,10 +51,10 @@
     --text-muted: #6f6f76;
 
     /* Acento único: úsalo con restricción (foco, estado activo, serie principal) */
-    --accent: #8A2BE2;
-    --accent-hover: #9d4edd;
-    --accent-pressed: #7422be;
-    --accent-soft: rgba(138, 43, 226, 0.14);
+    --accent: #60EFFF;
+    --accent-hover: #7af2ff;
+    --accent-pressed: #38d8e8;
+    --accent-soft: rgba(96, 239, 255, 0.14);
 
     /* Semántica de estado */
     --positive: #3fb968;
@@ -66,12 +66,12 @@
     --negative: #e0616f;
     --negative-soft: rgba(224, 97, 111, 0.12);
     --negative-border: rgba(224, 97, 111, 0.35);
-    --accent-border: rgba(138, 43, 226, 0.35);
+    --accent-border: rgba(96, 239, 255, 0.35);
 
     /* Paleta de series: acento de marca + escala de grises, coherente con el
        resto del panel (--accent / --text-secondary), distinguible también en
        escala de grises (luminancia decreciente 1→6) */
-    --chart-1: #8A2BE2;
+    --chart-1: #60EFFF;
     --chart-2: #a8a8ac;
     --chart-3: #d9a75c;
     --chart-4: #c98aa3;
@@ -87,11 +87,11 @@
        Los saltos son de >=16 puntos de opacidad para que dos pasos contiguos
        sigan siendo distinguibles. */
     --heat-0: var(--surface-2);
-    --heat-1: rgba(138, 43, 226, 0.12);
-    --heat-2: rgba(138, 43, 226, 0.28);
-    --heat-3: rgba(138, 43, 226, 0.46);
-    --heat-4: rgba(138, 43, 226, 0.66);
-    --heat-5: rgba(138, 43, 226, 0.88);
+    --heat-1: rgba(96, 239, 255, 0.12);
+    --heat-2: rgba(96, 239, 255, 0.28);
+    --heat-3: rgba(96, 239, 255, 0.46);
+    --heat-4: rgba(96, 239, 255, 0.66);
+    --heat-5: rgba(96, 239, 255, 0.88);
     /* Borde de las celdas SIN datos agregados (distinto de "cero peticiones"). */
     --heat-border: var(--border-strong);
 
