@@ -132,3 +132,22 @@ workloads:
       habilitado: true
       gpu_memory_utilization: 0.95
       max_model_len: 16384
+    # T4 = Turing (SM75): sin FlashAttention-2 (exige SM80+, era el default
+    # hardcodeado del compose -ver docker_images/qwen3.5/docker-compose.yml)
+    # ni bfloat16. TRITON_ATTN es el backend de atención que vLLM 0.24.0 sí
+    # soporta en Turing ('XFORMERS' fue retirado del motor V1 -verificado
+    # contra el registro real de backends en la prueba local de Fase 3).
+    # DTYPE=half ya es el default del compose, se deja explícito aquí por
+    # autodocumentación.
+    runtime_vllm:
+      attention_backend: "TRITON_ATTN"
+      dtype: "half"
+    # '--attention-backend' solo controla la atención del LM: la prueba local
+    # mostró que la torre de visión (ViT) de este checkpoint sigue forzando
+    # FLASH_ATTN por su cuenta ("Using backend AttentionBackendEnum.FLASH_ATTN
+    # for vit attention" / mm_encoder_attention.py) sin importar este flag.
+    # En T4 eso reventaría igual que el LM sin el fix. Vision no hace falta
+    # para la prueba de balanceador multi-modelo -se desactiva para no
+    # heredar ese riesgo sin verificar.
+    capacidades:
+      vision: false

@@ -10,6 +10,24 @@
 #   MAX_NUM_SEQS=8 docker compose up -d
 # (el cache Mamba en float32 consume ~280 MB por secuencia; con BF16 el
 # presupuesto de la L4 no da para 16 secuencias).
+#
+# ⚠️ RESULTADO DE LA PRUEBA LOCAL (Fase 3 del plan, RTX 5070/sm_120): el
+# checkpoint AWQ-4bit por default ('cyankiwi/NVIDIA-Nemotron-Nano-9B-v2-AWQ-4bit')
+# NO CARGA EN NINGUNA GPU -no es un problema específico de T4/Turing. vLLM
+# 0.10.1 lo detecta como cuantización 'compressed-tensors' WNA16 y NINGÚN
+# kernel disponible puede implementar sus capas lineales: Marlin rechaza la
+# forma de los pesos ("input_size_per_partition = 15680 no es divisible por
+# min_thread_k = 128"), Exllama exige activaciones float16 puras, BitBLAS no
+# está instalado, y Dynamic4bit solo corre en CPU. Es decir: el propio
+# checkpoint cuantizado de este tercero está empaquetado de forma que vLLM
+# 0.10.1 no puede servirlo en GPU, independientemente de la arquitectura.
+# El repo oficial BF16 tampoco es alternativa para T4 (16 GB): pesa 18.6 GB
+# sin cuantizar. CONCLUSIÓN: para la prueba multi-modelo en T4 (Paso D/E del
+# plan) se usa docker_images/qwen2.5-7b-instruct-awq/ como segundo modelo
+# generativo -esta imagen queda documentada y con sus bugs de compose
+# corregidos (puerto/GPU-count/FlashInfer), pero NO se usa en el despliegue
+# real hasta encontrar un checkpoint AWQ/GPTQ de Nemotron-Nano-9B-v2 que sí
+# cargue.
 services:
   vllm:
     build:
@@ -40,13 +58,21 @@ services:
       - TOOL_PARSER_PLUGIN=${TOOL_PARSER_PLUGIN:-/app/nemotron_toolcall_parser_no_streaming.py}
       - VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-}
       - HF_TOKEN=${HF_TOKEN:-}
+      # Encontrado en la prueba local de Fase 3 (ver
+      # docker_images/qwen2.5-7b-instruct-awq/docker-compose.yml): sin esto,
+      # el sampler de FlashInfer intenta compilar un kernel JIT si no hay un
+      # cubin precompilado para la GPU -y esta imagen (base 'runtime') no
+      # trae nvcc, así que revienta con "Could not find nvcc" en el primer
+      # arranque. Antes SOLO qwen3.5/qwen3.8 tenían este fix; faltaba aquí.
+      - VLLM_USE_FLASHINFER_SAMPLER=0
       - CUDA_MODULE_LOADING=LAZY
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
       - PYTHONUNBUFFERED=1
       - HF_HOME=/root/.cache/huggingface
     ports:
-      - "8008:8008"
+      # CORREGIDO: hardcodeado -no honraba workloads[].puerto si se cambiaba.
+      - "${PORT:-8008}:${PORT:-8008}"
     volumes:
       - ./hf_cache:/root/.cache/huggingface
     deploy:
@@ -54,6 +80,8 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              # CORREGIDO: fijo en 1 pese a que TENSOR_PARALLEL_SIZE puede
+              # pedir más de una GPU -ver docker_images/qwen3.5/docker-compose.yml.
+              count: all
               capabilities: [gpu]
     restart: unless-stopped

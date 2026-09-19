@@ -65,6 +65,16 @@ if [ "${ENABLE_TOOL_CALLING}" = "1" ]; then
   fi
   EXTRA_ARGS+=(--enable-auto-tool-choice --tool-call-parser "${TOOL_CALL_PARSER}")
 fi
+# CORREGIDO durante la prueba local (Fase 3): en vLLM 0.24.0 la variable de
+# entorno VLLM_ATTENTION_BACKEND ya NO existe -se comprobó en vivo que solo
+# emite "WARNING: Unknown vLLM environment variable detected" y no cambia
+# nada. Se reemplazó por el flag de CLI '--attention-backend'. Además
+# 'XFORMERS' fue RETIRADO del motor V1 (vllm.v1.attention.backends.registry
+# ya no lo registra); el reemplazo para GPUs sin FlashAttention-2 (T4/Turing,
+# SM75) es 'TRITON_ATTN'.
+if [ -n "${VLLM_ATTENTION_BACKEND}" ]; then
+  EXTRA_ARGS+=(--attention-backend "${VLLM_ATTENTION_BACKEND}")
+fi
 
 echo "==> Levantando ${MODEL_NAME}"
 echo "    max-model-len=${MAX_MODEL_LEN} gpu-mem-util=${GPU_MEMORY_UTILIZATION} max-num-seqs=${MAX_NUM_SEQS} tp=${TENSOR_PARALLEL_SIZE}"
