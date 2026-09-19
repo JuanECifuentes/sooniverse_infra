@@ -41,6 +41,8 @@ if _ENV_FILE.exists():
 # -----------------------------------------------------------------------------
 SECRET_KEY = _env("SECRET_KEY", "insecure-dev-key-change-me")
 DEBUG = _bool("DEBUG", False)
+# Modo Vitrina / Demostración
+VITRINA = _bool("VITRINA", False)
 ALLOWED_HOSTS = [h.strip() for h in _env("ALLOWED_HOSTS", "*").split(",") if h.strip()]
 CSRF_TRUSTED_ORIGINS = [
     o.strip() for o in _env("CSRF_TRUSTED_ORIGINS", "").split(",") if o.strip()

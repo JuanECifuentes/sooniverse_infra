@@ -94,7 +94,9 @@ class EjecutarAccionWorkerTests(SimpleTestCase):
         fn.assert_called_once_with(worker)
         audit.assert_called_once()
         self.assertEqual(audit.call_args.kwargs["estado"], "ok")
-        save.assert_not_called()
+        save.assert_called_once_with(
+            update_fields=["is_healthy", "last_seen_at", "last_health_check", "health_status", "estado_operativo"]
+        )
         self.assertEqual(mensaje, "OK")
 
     def test_stop_exitoso_marca_apagado(self):
@@ -147,7 +149,8 @@ class EstadoPoolDerivacionTests(SimpleTestCase):
         cliente.health.return_value = health or {"healthy_endpoints": [], "unhealthy_endpoints": []}
         cliente.models.return_value = []
         with patch("metrics.services.WorkerNode.objects") as manager, \
-             patch("metrics.services.LiteLLMClient", return_value=cliente):
+             patch("metrics.services.LiteLLMClient", return_value=cliente), \
+             self.settings(VITRINA=False):
             manager.filter.return_value = nodos
             return services.estado_pool()
 
@@ -185,3 +188,19 @@ class EstadoPoolDerivacionTests(SimpleTestCase):
         estado = self._run([worker], health={"healthy_endpoints": [], "unhealthy_endpoints": []})
         self.assertEqual(worker.estado_operativo, "degradado")
         self.assertEqual(estado["nodos_sanos"], 0)
+
+    def test_vitrina_activa_fuerza_nodos_sanos_y_litellm_ok(self):
+        worker = _fake_worker(estado_operativo="desincronizado")
+        cliente = MagicMock()
+        cliente.is_reachable.return_value = False
+        with patch("metrics.services.WorkerNode.objects") as manager, \
+             patch("metrics.services.LiteLLMClient", return_value=cliente), \
+             self.settings(VITRINA=True):
+            manager.filter.return_value = [worker]
+            estado = services.estado_pool()
+        self.assertTrue(estado["litellm_ok"])
+        self.assertEqual(worker.estado_operativo, "sano")
+        self.assertEqual(estado["nodos_sanos"], 1)
+        self.assertTrue(estado["restart_disponible"])
+        self.assertTrue(estado["ec2_disponible"])
+

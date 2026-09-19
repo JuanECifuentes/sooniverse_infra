@@ -56,4 +56,29 @@ document.addEventListener("DOMContentLoaded", () => {
       dialog.close();
     });
   }
+
+  // Sincronizar altura de la card "Pool vLLM" con "Serie diario" (predomina Serie diario)
+  const chartCard = document.getElementById("card-chart");
+  const poolCard = document.getElementById("card-pool");
+  if (chartCard && poolCard) {
+    const syncHeight = () => {
+      if (window.innerWidth > 1024) {
+        const h = chartCard.offsetHeight;
+        if (h > 0) {
+          poolCard.style.height = `${h}px`;
+        }
+      } else {
+        poolCard.style.height = "";
+      }
+    };
+    if (window.ResizeObserver) {
+      new ResizeObserver(syncHeight).observe(chartCard);
+    } else {
+      window.addEventListener("resize", syncHeight);
+    }
+    syncHeight();
+    setTimeout(syncHeight, 100);
+    setTimeout(syncHeight, 500);
+  }
 });
+

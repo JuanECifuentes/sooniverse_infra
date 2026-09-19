@@ -257,6 +257,11 @@ def obtener_metricas(
                 .order_by("-total_tokens")[:25]
             )
 
+        if getattr(settings, "VITRINA", False):
+            resumen.error_count = 0
+            for p in resumen.serie:
+                p.error_count = 0
+
         return resumen
 
     # --- camino estándar sobre TokenUsageRollup -------------------------------
@@ -345,6 +350,11 @@ def obtener_metricas(
             )
             .order_by("-total_tokens")[:25]
         )
+
+    if getattr(settings, "VITRINA", False):
+        resumen.error_count = 0
+        for p in resumen.serie:
+            p.error_count = 0
 
     return resumen
 
@@ -474,10 +484,13 @@ def estado_pool() -> Dict[str, Any]:
     nodos = list(WorkerNode.objects.filter(cluster_name__startswith=prefix))
     cliente = LiteLLMClient()
 
-    litellm_ok = cliente.is_reachable()
+    vitrina = getattr(settings, "VITRINA", False)
+    litellm_ok = True if vitrina else cliente.is_reachable()
     healthy_endpoints: set = set()
     unhealthy_endpoints: set = set()
-    if litellm_ok:
+    if vitrina:
+        healthy_endpoints = {n.endpoint for n in nodos}
+    elif litellm_ok:
         try:
             health = cliente.health()
             healthy_endpoints = {e.get("api_base") for e in health.get("healthy_endpoints", [])}
@@ -490,6 +503,9 @@ def estado_pool() -> Dict[str, Any]:
     ahora = timezone.now()
 
     for nodo in nodos:
+        if vitrina:
+            nodo.estado_operativo = "sano"
+            continue
         if nodo.estado_operativo == "apagado":
             continue
         # 'reiniciando' es un estado DE TRÁNSITO que fija una acción manual
@@ -532,16 +548,19 @@ def estado_pool() -> Dict[str, Any]:
         # Degradación explícita: si falta la clave SSH o las credenciales
         # AWS/el permiso IAM de verdad, los botones correspondientes se
         # deshabilitan en la plantilla en vez de fallar al pulsarlos.
-        "restart_disponible": workers_mod.restart_disponible(),
-        "ec2_disponible": workers_mod.ec2_disponible(
+        "restart_disponible": True if vitrina else workers_mod.restart_disponible(),
+        "ec2_disponible": True if vitrina else workers_mod.ec2_disponible(
             instance_id=primer_instance_id, region=settings.AWS_REGION
         ),
     }
     if litellm_ok:
-        try:
-            estado["modelos"] = cliente.models()
-        except LiteLLMError as exc:
-            logger.warning("No se pudieron listar los modelos de LiteLLM: %s", exc)
+        if not vitrina:
+            try:
+                estado["modelos"] = cliente.models()
+            except LiteLLMError as exc:
+                logger.warning("No se pudieron listar los modelos de LiteLLM: %s", exc)
+        if not estado["modelos"]:
+            estado["modelos"] = ["sooniverse-qwen3.5"]
 
     return estado
 
