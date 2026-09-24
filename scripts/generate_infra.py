@@ -1401,6 +1401,16 @@ class TopologyBuilder:
             "ports": public_ports,
             "labels": {**self.red.get("tags_obligatorios", {}), "rol": "gateway"},
         }
+        # Zona de disponibilidad explícita (opcional): 'red_y_aislamiento.zona'.
+        # AWS resuelve capacidad entre AZs automáticamente, pero en Azure la
+        # capacidad de una SKU concreta a veces solo existe en UNA zona
+        # específica de la región -confirmado en un despliegue real: SkyPilot
+        # reportaba "Failed to acquire resources in all zones" para
+        # Standard_NC4as_T4_v3 en westus3 pese a que el operador SÍ pudo
+        # aprovisionar esa misma SKU a mano en la Zone 1 del Portal. Sin forma
+        # de fijar la zona, SkyPilot seguía probando (y fallando en) las otras.
+        if self.red.get("zona"):
+            resources["zone"] = str(self.red["zona"])
 
         envs = {
             **self._base_envs(),
@@ -1539,6 +1549,12 @@ class TopologyBuilder:
             resources["image_id"] = self.red["image_id"]
         if wl.get("tipo_instancia"):
             resources["instance_type"] = wl["tipo_instancia"]
+        # Ver el mismo comentario en build_gateway(): 'workloads[].zona'
+        # sobreescribe 'red_y_aislamiento.zona' si el workload necesita una
+        # zona distinta a la del resto del despliegue.
+        zona = wl.get("zona", self.red.get("zona"))
+        if zona:
+            resources["zone"] = str(zona)
 
         capacidades = wl.get("capacidades", {})
         conc = wl.get("concurrencia", {}) or {}
