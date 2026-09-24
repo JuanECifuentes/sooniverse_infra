@@ -304,6 +304,54 @@ def test_sync_nsg_rules_prioridad_estable_entre_corridas_identicas(manager):
     assert primera == segunda
 
 
+def test_sync_nsg_rules_borra_reglas_obsoletas_antes_de_crear_las_nuevas(manager):
+    """Regresión de un despliegue real: al quitar un workload (cambia el
+    conjunto de puertos), los nombres de regla se recalculan por índice
+    posicional -un puerto que sigue existiendo puede terminar con un nombre
+    de regla NUEVO. Con el orden viejo (crear antes de borrar), la regla
+    obsoleta -todavía viva con su prioridad anterior- colisionaba con la
+    nueva que pedía esa MISMA prioridad numérica, y Azure rechazaba el
+    create con 'SecurityRuleConflict'."""
+    manager.network_client.security_rules.list.return_value = []
+    primera_pasada = [
+        {"port": 22, "cidrs": ["1.2.3.4/32"]},
+        {"port": 8010, "cidrs": ["0.0.0.0/0"]},
+        {"port": 8011, "cidrs": ["0.0.0.0/0"]},
+    ]
+    manager._sync_nsg_rules("rg-x", "nsg-x", primera_pasada)
+    creadas_primera = {
+        call.args[2]: MagicMock(
+            name=call.args[2],
+            source_address_prefix=call.args[3].source_address_prefix,
+            destination_port_range=call.args[3].destination_port_range,
+        )
+        for call in manager.network_client.security_rules.begin_create_or_update.call_args_list
+    }
+    for mock_rule, real_name in zip(creadas_primera.values(), creadas_primera.keys()):
+        mock_rule.name = real_name  # MagicMock(name=...) no fija .name -ver docstring del módulo.
+
+    # Segunda pasada: se quita el workload de 8010 (embeddings) -mismo efecto
+    # que la config real. Azure ya tiene las reglas de la primera pasada.
+    manager.network_client.security_rules.list.return_value = list(creadas_primera.values())
+    manager.network_client.security_rules.begin_create_or_update.reset_mock()
+    segunda_pasada = [
+        {"port": 22, "cidrs": ["1.2.3.4/32"]},
+        {"port": 8011, "cidrs": ["0.0.0.0/0"]},
+    ]
+
+    # No debe lanzar (la prioridad no puede colisionar) y debe borrar la
+    # regla de 8010 antes de crear/actualizar cualquier otra.
+    manager._sync_nsg_rules("rg-x", "nsg-x", segunda_pasada)
+
+    delete_calls = [c.args[2] for c in manager.network_client.security_rules.begin_delete.call_args_list]
+    create_calls = [c.args[2] for c in manager.network_client.security_rules.begin_create_or_update.call_args_list]
+    assert any("8010" in name for name in delete_calls)
+    prioridades_creadas = [
+        c.args[3].priority for c in manager.network_client.security_rules.begin_create_or_update.call_args_list
+    ]
+    assert len(prioridades_creadas) == len(set(prioridades_creadas)), "prioridades NSG duplicadas"
+
+
 # -- ensure_security_groups: honra los CIDR explícitos (fix A4) -------------
 def test_ensure_security_groups_usa_cidrs_explicitos_de_subredes(manager):
     """CORREGIDO: antes ensure_security_groups() SIEMPRE recalculaba con

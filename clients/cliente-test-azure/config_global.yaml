@@ -2,14 +2,23 @@
 # CLIENTE DE PRUEBA -- AZURE, modo "hosted" (cuenta propia de Sooniverse)
 # ==============================================================================
 # Contraparte Azure de clients/cliente-test/ (AWS, byoc) -mismo propósito:
-# despliegue real de prueba, no una plantilla ("_ejemplo*"). Región y familia
-# de GPU elegidas para que coincidan con la cuota solicitada en
-# scripts/azure_check_gpu_quota.py (ver README.md §7.1.1):
-#   python scripts/azure_check_gpu_quota.py --request-increase southcentralus "Standard NCASv3_T4 Family" 16
-#   python scripts/azure_check_gpu_quota.py --request-increase southcentralus StandardNVADSA10v5Family 16
+# despliegue real de prueba, no una plantilla ("_ejemplo*").
 #
-# Esta primera prueba usa SOLO T4 (workloads[].accelerator abajo) -A10 queda
-# con cuota pedida para una segunda prueba posterior, no se usa todavía.
+# Región = westus3 (NO southcentralus, usado en un primer intento fallido):
+# la cuota real (12 vCPU, "Standard NCASv3_T4 Family") está aprobada en
+# westus3. southcentralus/westus2/eastus tienen el SKU disponible pero SIN
+# cuota (0). Se creyó -incorrectamente- que westus3 no tenía el SKU
+# disponible para esta suscripción por un bug de comparación de mayúsculas/
+# minúsculas en scripts/azure_check_gpu_quota.py (ya corregido): 'westus3'
+# SÍ está en la lista de regiones "orderable" para Standard_NC4as_T4_v3.
+#
+# Multi-modelo (3x Standard_NC4as_T4_v3 = 12 vCPU, el techo exacto de la
+# cuota): qwen3.5 (llm-texto, con visión) + qwen2.5-7b-instruct-awq
+# (llm-texto, reemplazo de nemotron -su checkpoint AWQ no cargó en NINGUNA
+# GPU en la prueba local, ver docker_images/nemotron-nano-9b-v2/docker-
+# compose.yml) + gte-qwen2-1.5b-embed (embeddings). Verifica: los dos
+# generativos coexisten y son seleccionables en chat/panel, el de embeddings
+# NO aparece como modelo de chat, y el pool completo queda sano.
 #
 # Dominio: 'gateway.dominio.habilitado' queda en false a propósito. El generador
 # lo bloquea explícitamente en Azure (ConfigValidator._validate_dominio) porque
@@ -32,7 +41,7 @@ cliente:
 # 2. Variables de Red y Aislamiento
 red_y_aislamiento:
   cloud: "azure"                  # NUEVO: aws (default) | azure
-  region: "southcentralus"         # slug de Azure -verificado sin restricción de suscripción para T4/A10 (ver README §7.1.1)
+  region: "westus3"                # slug de Azure -región real de la cuota T4 aprobada (ver encabezado)
   aws_profile: null                 # sin efecto con cloud: azure (ver .env.example AZURE_*)
   image_id: "Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest"
   gestion_red: "auto"                # único modo soportado en Azure por ahora
@@ -64,7 +73,18 @@ red_y_aislamiento:
 # 3. Nodo Gateway
 gateway:
   habilitado: true
-  tipo_instancia: "Standard_D2as_v5"   # SKU de Azure (CPU-only), no "t4g.large"
+  # CORREGIDO: Standard_D2as_v5, Standard_D2s_v5 Y Standard_B2ms fallaron en
+  # TODAS las zonas de westus3 -no es capacidad transitoria de una SKU: la
+  # suscripción tiene cuota=0 en TODAS las familias de propósito general
+  # ("standardDSv5Family", "standardBsv2Family", etc.) en esta región -solo
+  # se aprobó explícitamente la familia T4 (confirmado con
+  # ComputeManagementClient.usage.list('westus3')). '--request-increase' para
+  # esas familias falla con el mismo QuotaNotAvailableForResource documentado
+  # arriba -no es automatizable, requiere soporte de Azure. Se usa la MISMA
+  # familia T4 para el Gateway (GPU sin usar, solo aprovecha su cuota) para
+  # no bloquear la prueba -ver el ajuste de 'workloads' más abajo (2 modelos
+  # generativos en vez de 3 con embeddings, para no exceder los 12 vCPU).
+  tipo_instancia: "Standard_NC4as_T4_v3"   # SKU de Azure (CPU-only), no "t4g.large"
   disk_size: 100
   exponer_puertos_directos: false
   puertos_publicos:
@@ -112,10 +132,8 @@ base_de_datos:
   auto_refresh_metrics: true
   schema_dir: "database"
 
-# 5. Perfil de Cargas de Trabajo -- SOLO T4 para esta primera prueba Azure.
-#    Cuota pedida: familia "Standard NCASv3_T4 Family", southcentralus, 16 vCPUs
-#    (ver scripts/azure_check_gpu_quota.py --quota southcentralus para confirmar
-#    que ya fue aprobada antes de intentar un despliegue real).
+# 5. Perfil de Cargas de Trabajo -- multi-modelo en T4 (3x Standard_NC4as_T4_v3
+#    = 12 vCPU exactos, el techo de la cuota aprobada en westus3).
 workloads:
   - id: "qwen3-5-llm"
     modelo: "qwen3.5"
@@ -151,3 +169,60 @@ workloads:
     # heredar ese riesgo sin verificar.
     capacidades:
       vision: false
+
+  # Segundo modelo generativo -reemplazo de nemotron-nano-9b-v2: su
+  # checkpoint AWQ-4bit (cyankiwi) NO cargó en NINGUNA GPU en la prueba local
+  # (vLLM lo detecta como compressed-tensors WNA16 y ningún kernel disponible
+  # puede implementar sus capas, ver docker_images/nemotron-nano-9b-v2/
+  # docker-compose.yml). Qwen2.5-7B-Instruct-AWQ es AWQ real (no
+  # compressed-tensors): vLLM sí tiene kernels AWQ para SM75, confirmado en
+  # la prueba local (auto_awq.py eligió MarlinLinearKernel en SM120; en T4
+  # cae al kernel AWQ puro, sin Marlin -ambos casos cubiertos por el mismo
+  # QUANTIZATION vacío, autodetectado).
+  - id: "qwen25-7b-awq-llm"
+    modelo: "qwen2.5-7b-instruct-awq"
+    hf_repo: "Qwen/Qwen2.5-7B-Instruct-AWQ"
+    tipo_tarea: "llm-texto"
+    accelerator: "T4"
+    cantidad_gpus: 1
+    replicas: 1
+    tipo_instancia: "Standard_NC4as_T4_v3"
+    puerto: 8011
+    nombre_publico: "sooniverse-qwen2.5-7b"
+    peso_balanceo: 1
+    asignacion_fraccional:
+      habilitado: true
+      gpu_memory_utilization: 0.90
+      max_model_len: 16384
+    runtime_vllm:
+      attention_backend: "TRITON_ATTN"
+      dtype: "half"
+    capacidades:
+      vision: false
+
+  # Workload de embeddings -Fase 4 (wiring de extremo a extremo), FUERA de
+  # esta pasada: el Gateway tuvo que pasar a ocupar una de las 3 instancias
+  # T4 (única familia con cuota en westus3; ver el comentario en
+  # gateway.tipo_instancia), dejando solo 2x Standard_NC4as_T4_v3 para
+  # workloads. Se prioriza la prueba multi-modelo generativo (el objetivo
+  # central del balanceador). Para probar embeddings, pedir cuota de una
+  # familia de propósito general (standardDSv5Family/standardBsv2Family) en
+  # westus3 y volver a agregar este bloque:
+  # - id: "gte-qwen2-embed"
+  #   modelo: "gte-qwen2-1.5b-embed"
+  #   hf_repo: "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
+  #   tipo_tarea: "embeddings"
+  #   accelerator: "T4"
+  #   cantidad_gpus: 1
+  #   replicas: 1
+  #   tipo_instancia: "Standard_NC4as_T4_v3"
+  #   puerto: 8010
+  #   nombre_publico: "sooniverse-embed-gte-qwen2"
+  #   peso_balanceo: 1
+  #   asignacion_fraccional:
+  #     habilitado: true
+  #     gpu_memory_utilization: 0.90
+  #     max_model_len: 8192
+  #   runtime_vllm:
+  #     attention_backend: "TRITON_ATTN"
+  #     dtype: "half"
