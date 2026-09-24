@@ -42,6 +42,12 @@ cliente:
 red_y_aislamiento:
   cloud: "azure"                  # NUEVO: aws (default) | azure
   region: "westus3"                # slug de Azure -región real de la cuota T4 aprobada (ver encabezado)
+  # Zona fijada a mano: SkyPilot reportaba "Failed to acquire resources in
+  # all zones" para Standard_NC4as_T4_v3 en TODAS las zonas, pero el operador
+  # SÍ pudo aprovisionar esa misma SKU manualmente en el Portal, en Zone 1
+  # -confirmado en un despliegue real. Sin fijarla, SkyPilot seguía
+  # probando (y fallando en) zonas sin capacidad real.
+  zona: "1"
   aws_profile: null                 # sin efecto con cloud: azure (ver .env.example AZURE_*)
   image_id: "Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest"
   gestion_red: "auto"                # único modo soportado en Azure por ahora
