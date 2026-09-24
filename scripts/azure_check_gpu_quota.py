@@ -94,7 +94,13 @@ def cmd_skus(regions: Iterable[str] | None) -> None:
     cred, subscription_id = _credential_and_subscription()
     compute = ComputeManagementClient(cred, subscription_id)
 
-    region_filter = set(regions) if regions else None
+    # CORREGIDO: 'sku.locations' viene de Azure con capitalización inconsistente
+    # entre SKUs (p.ej. 'westus2' en minúsculas, pero 'WestUS3' con mayúsculas
+    # específicas para otras) -comparar sin normalizar casing producía falsos
+    # negativos: '--skus --region westus3' reportaba "ninguna SKU visible" para
+    # una región que SÍ tenía el SKU (confirmado comparando contra el escaneo
+    # sin filtro, que sí la listaba). Se normaliza todo a minúsculas para comparar.
+    region_filter = {r.lower() for r in regions} if regions else None
     families: dict[tuple[str, str], dict] = {}
     for sku in compute.resource_skus.list():
         if sku.resource_type != "virtualMachines":
@@ -102,11 +108,14 @@ def cmd_skus(regions: Iterable[str] | None) -> None:
         name = sku.name or ""
         if not GPU_NAME_RE.match(name):
             continue
-        locs = set(sku.locations or [])
-        if region_filter and not (locs & {r.lower() for r in region_filter} | locs & region_filter):
+        # Todo se normaliza a minúsculas al insertar (no solo al filtrar): la
+        # resta 'locations - restricted' de abajo también fallaría en silencio
+        # si una fuente trae 'WestUS3' y la otra 'westus3' para la misma región.
+        locs = {loc.lower() for loc in (sku.locations or [])}
+        if region_filter and not (locs & region_filter):
             continue
         restricted_locs = {
-            loc
+            loc.lower()
             for r in (sku.restrictions or [])
             if r.reason_code and "NOT_AVAILABLE" in str(r.reason_code)
             for loc in (r.restriction_info.locations if r.restriction_info else [])
