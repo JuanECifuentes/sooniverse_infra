@@ -614,6 +614,23 @@ class AzureNetworkManager:
                 }
                 priority += 1
 
+        # CORREGIDO: se borra ANTES de crear/actualizar. Los nombres de regla
+        # incluyen el índice POSICIONAL de 'rules' (allow-{port}-{idx}-{cidr_idx}):
+        # si el conjunto de workloads cambia (se agrega/quita uno), el índice
+        # de los puertos que SÍ siguen existiendo se recorre, así que un mismo
+        # puerto puede terminar con un nombre de regla NUEVO en esta corrida.
+        # Con el orden anterior (crear primero, borrar después), la regla
+        # vieja -todavía viva bajo su nombre/prioridad anteriores, ya que
+        # 'wanted' no la vuelve a mencionar con ese nombre- seguía ocupando su
+        # prioridad numérica cuando la regla nueva pedía esa MISMA prioridad
+        # (el contador es monotónico desde 100 en cada corrida), y Azure
+        # rechazaba el create con 'SecurityRuleConflict' -confirmado en un
+        # despliegue real al quitar un workload (embeddings) de la config.
+        for rule_name in list(current_by_name):
+            if rule_name not in wanted:
+                self.network_client.security_rules.begin_delete(rg_name, nsg_name, rule_name).result()
+                del current_by_name[rule_name]
+
         for rule_name, body in wanted.items():
             existing_rule = current_by_name.get(rule_name)
             if existing_rule and (
@@ -624,10 +641,6 @@ class AzureNetworkManager:
             self.network_client.security_rules.begin_create_or_update(
                 rg_name, nsg_name, rule_name, SecurityRule(**body)
             ).result()
-
-        for rule_name in current_by_name:
-            if rule_name not in wanted:
-                self.network_client.security_rules.begin_delete(rg_name, nsg_name, rule_name).result()
 
     def ensure_nat_gateway(self, rg_name: str) -> Optional[str]:
         """Crea (o reutiliza) una Public IP Standard + NAT Gateway. `nat_mode: none`
