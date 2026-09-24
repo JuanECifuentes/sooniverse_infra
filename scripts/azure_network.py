@@ -74,7 +74,20 @@ try:
     from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
     from azure.identity import ClientSecretCredential
     from azure.mgmt.network import NetworkManagementClient
+    from azure.mgmt.network.models import (
+        AddressSpace,
+        NatGateway,
+        NatGatewaySku,
+        NetworkSecurityGroup,
+        PublicIPAddress,
+        PublicIPAddressSku,
+        SecurityRule,
+        SubResource,
+        Subnet,
+        VirtualNetwork,
+    )
     from azure.mgmt.resource.resources import ResourceManagementClient
+    from azure.mgmt.resource.resources.models import ResourceGroup
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "Falta el SDK de Azure. Instala con: "
@@ -470,8 +483,14 @@ class AzureNetworkManager:
             logger.info("[SKIP][RED-AZURE] Resource Group ya registrado: %s", name)
             return name
 
+        # CORREGIDO: azure-mgmt-network/resource >=33 (API 2026-01-01) ya no
+        # acepta un dict plano en estas llamadas -el servidor lo deserializa
+        # como un 'ResourceDefinition' genérico y rechaza propiedades como
+        # 'address_space' con InvalidRequestContent. Confirmado en un
+        # despliegue real; se usa el modelo tipado explícito en todas las
+        # llamadas de este módulo.
         self.resource_client.resource_groups.create_or_update(
-            name, {"location": self.spec.region, "tags": self._tags("resource-group")}
+            name, ResourceGroup(location=self.spec.region, tags=self._tags("resource-group"))
         )
         self._record("resource-group", "resource-group", name, attributes={"name": name})
         logger.info("[RED-AZURE] Resource Group creado: %s", name)
@@ -488,11 +507,11 @@ class AzureNetworkManager:
         poller = self.network_client.virtual_networks.begin_create_or_update(
             rg_name,
             name,
-            {
-                "location": self.spec.region,
-                "address_space": {"address_prefixes": [self.spec.vnet_cidr]},
-                "tags": self._tags("vnet"),
-            },
+            VirtualNetwork(
+                location=self.spec.region,
+                address_space=AddressSpace(address_prefixes=[self.spec.vnet_cidr]),
+                tags=self._tags("vnet"),
+            ),
         )
         vnet = poller.result()
         self._record("vnet", "vnet", vnet.id, parent_aws_id=rg_name, attributes={"name": name})
@@ -559,7 +578,7 @@ class AzureNetworkManager:
             return existing["aws_id"], name
 
         poller = self.network_client.network_security_groups.begin_create_or_update(
-            rg_name, name, {"location": self.spec.region, "tags": self._tags(component)}
+            rg_name, name, NetworkSecurityGroup(location=self.spec.region, tags=self._tags(component))
         )
         nsg = poller.result()
         self._record(component, component, nsg.id, parent_aws_id=rg_name, attributes={"name": name})
@@ -603,7 +622,7 @@ class AzureNetworkManager:
             ):
                 continue
             self.network_client.security_rules.begin_create_or_update(
-                rg_name, nsg_name, rule_name, body
+                rg_name, nsg_name, rule_name, SecurityRule(**body)
             ).result()
 
         for rule_name in current_by_name:
@@ -626,12 +645,12 @@ class AzureNetworkManager:
         pip_poller = self.network_client.public_ip_addresses.begin_create_or_update(
             rg_name,
             pip_name,
-            {
-                "location": self.spec.region,
-                "sku": {"name": "Standard"},
-                "public_ip_allocation_method": "Static",
-                "tags": self._tags("pip-nat"),
-            },
+            PublicIPAddress(
+                location=self.spec.region,
+                sku=PublicIPAddressSku(name="Standard"),
+                public_ip_allocation_method="Static",
+                tags=self._tags("pip-nat"),
+            ),
         )
         pip = pip_poller.result()
         self._record("pip-nat", "pip-nat", pip.id, parent_aws_id=rg_name, attributes={"name": pip_name})
@@ -641,12 +660,12 @@ class AzureNetworkManager:
         nat_poller = self.network_client.nat_gateways.begin_create_or_update(
             rg_name,
             nat_name,
-            {
-                "location": self.spec.region,
-                "sku": {"name": "Standard"},
-                "public_ip_addresses": [{"id": pip.id}],
-                "tags": self._tags("natgw"),
-            },
+            NatGateway(
+                location=self.spec.region,
+                sku=NatGatewaySku(name="Standard"),
+                public_ip_addresses=[SubResource(id=pip.id)],
+                tags=self._tags("natgw"),
+            ),
         )
         nat = nat_poller.result()
         self._record("natgw", "natgw", nat.id, parent_aws_id=rg_name, attributes={"name": nat_name})
@@ -673,12 +692,12 @@ class AzureNetworkManager:
         poller = self.network_client.public_ip_addresses.begin_create_or_update(
             rg_name,
             name,
-            {
-                "location": self.spec.region,
-                "sku": {"name": "Standard"},
-                "public_ip_allocation_method": "Static",
-                "tags": self._tags("pip-gateway"),
-            },
+            PublicIPAddress(
+                location=self.spec.region,
+                sku=PublicIPAddressSku(name="Standard"),
+                public_ip_allocation_method="Static",
+                tags=self._tags("pip-gateway"),
+            ),
         )
         pip = poller.result()
         self._record(
@@ -732,14 +751,16 @@ class AzureNetworkManager:
             logger.info("[SKIP][RED-AZURE] Subred %s ya registrada.", component)
             return existing["aws_id"]
 
-        body: Dict[str, Any] = {
+        subnet_kwargs: Dict[str, Any] = {
             "address_prefix": cidr,
-            "network_security_group": {"id": nsg_id},
+            "network_security_group": SubResource(id=nsg_id),
         }
         if nat_gateway_id:
-            body["nat_gateway"] = {"id": nat_gateway_id}
+            subnet_kwargs["nat_gateway"] = SubResource(id=nat_gateway_id)
 
-        poller = self.network_client.subnets.begin_create_or_update(rg_name, vnet_name, name, body)
+        poller = self.network_client.subnets.begin_create_or_update(
+            rg_name, vnet_name, name, Subnet(**subnet_kwargs)
+        )
         subnet = poller.result()
         self._record(component, component, subnet.id, parent_aws_id=vnet_name, attributes={"name": name})
         logger.info("[RED-AZURE] Subred %s (%s) creada: %s", component, cidr, subnet.id)

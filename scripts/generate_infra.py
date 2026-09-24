@@ -2791,6 +2791,7 @@ def _find_and_associate_azure_public_ip(
 
     from azure.mgmt.compute import ComputeManagementClient
     from azure.mgmt.network import NetworkManagementClient
+    from azure.mgmt.network.models import PublicIPAddress
 
     from azure_network import _default_credential  # noqa: PLC0415 - import perezoso
 
@@ -2836,7 +2837,10 @@ def _find_and_associate_azure_public_ip(
         raise GatewayEipAssociationError(
             f"La NIC '{nic_name}' de la VM '{vm.name}' no tiene ninguna ip_configuration."
         )
-    nic.ip_configurations[0].public_ip_address = {"id": pip_id}
+    # CORREGIDO: azure-mgmt-network >=33 (API 2026-01-01) rechaza dicts planos
+    # en estas llamadas -ver el mismo fix en azure_network.py, confirmado en
+    # un despliegue real (InvalidRequestContent: "ResourceDefinition").
+    nic.ip_configurations[0].public_ip_address = PublicIPAddress(id=pip_id)
     network_client.network_interfaces.begin_create_or_update(nic_rg, nic_name, nic).result()
 
 

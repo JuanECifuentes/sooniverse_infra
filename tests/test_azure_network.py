@@ -274,7 +274,7 @@ def test_sync_nsg_rules_prioridad_unica_con_mas_de_diez_cidrs(manager):
     manager._sync_nsg_rules("rg-x", "nsg-x", rules)
 
     prioridades = [
-        call.args[3]["priority"]
+        call.args[3].priority
         for call in manager.network_client.security_rules.begin_create_or_update.call_args_list
     ]
     assert len(prioridades) == 15
@@ -290,14 +290,14 @@ def test_sync_nsg_rules_prioridad_estable_entre_corridas_identicas(manager):
 
     manager._sync_nsg_rules("rg-x", "nsg-x", rules)
     primera = {
-        call.args[2]: call.args[3]["priority"]
+        call.args[2]: call.args[3].priority
         for call in manager.network_client.security_rules.begin_create_or_update.call_args_list
     }
 
     manager.network_client.security_rules.begin_create_or_update.reset_mock()
     manager._sync_nsg_rules("rg-x", "nsg-x", rules)
     segunda = {
-        call.args[2]: call.args[3]["priority"]
+        call.args[2]: call.args[3].priority
         for call in manager.network_client.security_rules.begin_create_or_update.call_args_list
     }
 
@@ -333,7 +333,7 @@ def test_ensure_security_groups_usa_cidrs_explicitos_de_subredes(manager):
     manager.ensure_security_groups("rg-x")
 
     origenes = {
-        call.args[3]["source_address_prefix"]
+        call.args[3].source_address_prefix
         for call in manager.network_client.security_rules.begin_create_or_update.call_args_list
     }
     assert "10.0.99.0/24" in origenes    # regla del worker hacia el gateway
