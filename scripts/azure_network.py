@@ -67,6 +67,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -254,7 +255,36 @@ def compute_subnet_cidrs(vnet_cidr: str) -> Tuple[str, str]:
     return str(all_subnets[0]), str(all_subnets[half])
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_env_azure_vars(env_path: Path = _REPO_ROOT / ".env") -> None:
+    """Carga AZURE_* de .env en os.environ si no están ya seteadas (mismo
+    mecanismo/prioridad que scripts/azure_check_gpu_quota.py::_load_env y
+    scripts/db_setup.py::resolve_db_config: variables ya presentes en el
+    proceso ganan sobre el archivo).
+
+    CORREGIDO: generate_infra.py (a diferencia de azure_check_gpu_quota.py)
+    nunca cargaba .env en os.environ -boto3 (AWS) resuelve credenciales solo
+    con el perfil de la CLI sin necesitar esto, pero ClientSecretCredential
+    (Azure) exige las 4 variables directamente en el entorno. Cualquier
+    invocación de 'generate_infra.py --config <cliente-azure> --run' desde
+    una terminal limpia (sin exportar las AZURE_* a mano primero) fallaba con
+    'Faltan credenciales de Azure' pese a que .env las tenía -confirmado en
+    un despliegue real."""
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.startswith("AZURE_") and value and key not in os.environ:
+            os.environ[key] = value.strip().strip('"').strip("'")
+
+
 def _default_credential(subscription_id: Optional[str] = None) -> Tuple["ClientSecretCredential", str]:
+    _load_env_azure_vars()
     tenant_id = os.environ.get("AZURE_TENANT_ID")
     client_id = os.environ.get("AZURE_CLIENT_ID")
     client_secret = os.environ.get("AZURE_CLIENT_SECRET")
