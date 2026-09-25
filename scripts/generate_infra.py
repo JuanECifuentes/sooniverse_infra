@@ -1401,6 +1401,16 @@ class TopologyBuilder:
             "ports": public_ports,
             "labels": {**self.red.get("tags_obligatorios", {}), "rol": "gateway"},
         }
+        # 'gateway.image_id' (NO 'red_y_aislamiento.image_id', que ya usan los
+        # workers para todas las nubes -incluido AWS en producción; reusarlo
+        # aquí forzaría esa misma AMI/imagen GPU-específica sobre el Gateway
+        # CPU-only y rompería AWS). Solo aplica si el operador lo declara
+        # explícito -confirmado en un despliegue real de Azure: la imagen
+        # propia de SkyPilot ('skypilot:custom-gpu-ubuntu-v2') seguía sin
+        # capacidad en una zona donde el operador SÍ pudo aprovisionar a mano
+        # la misma SKU con la oferta pública 'canonical:ubuntu-24_04-lts'.
+        if gw.get("image_id"):
+            resources["image_id"] = gw["image_id"]
 
         envs = {
             **self._base_envs(),
