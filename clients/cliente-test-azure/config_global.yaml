@@ -43,7 +43,12 @@ red_y_aislamiento:
   cloud: "azure"                  # NUEVO: aws (default) | azure
   region: "westus3"                # slug de Azure -región real de la cuota T4 aprobada (ver encabezado)
   aws_profile: null                 # sin efecto con cloud: azure (ver .env.example AZURE_*)
-  image_id: "Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest"
+  # CORREGIDO: la imagen propia de SkyPilot Y esta oferta (Ubuntu 22.04
+  # Jammy) seguían sin capacidad en westus3 pese a tener cuota T4 aprobada.
+  # El operador SÍ pudo aprovisionar Standard_NC4as_T4_v3 a mano en West US 3
+  # Zone 1 con la oferta pública 'canonical:ubuntu-24_04-lts:server:latest'
+  # (Ubuntu 24.04, Trusted Launch) -confirmado con el JSON real de esa VM.
+  image_id: "canonical:ubuntu-24_04-lts:server:latest"
   gestion_red: "auto"                # único modo soportado en Azure por ahora
   vpc_name: null
   vpc_id: null
@@ -85,6 +90,9 @@ gateway:
   # no bloquear la prueba -ver el ajuste de 'workloads' más abajo (2 modelos
   # generativos en vez de 3 con embeddings, para no exceder los 12 vCPU).
   tipo_instancia: "Standard_NC4as_T4_v3"   # SKU de Azure (CPU-only), no "t4g.large"
+  # Ver el comentario de 'red_y_aislamiento.image_id': misma imagen
+  # confirmada con capacidad real para esta SKU en esta zona.
+  image_id: "canonical:ubuntu-24_04-lts:server:latest"
   disk_size: 100
   exponer_puertos_directos: false
   puertos_publicos:
