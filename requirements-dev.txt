@@ -22,6 +22,10 @@ azure-mgmt-resource>=23.0
 azure-mgmt-compute>=30.0
 azure-mgmt-quota>=1.0
 azure-mgmt-subscription>=3.1
+# azure_network.py::ensure_remote_identity() -ver su docstring sobre por qué
+# es obligatoria (evita el permiso Microsoft.Authorization/roleAssignments/write
+# que SkyPilot exigiría de otro modo).
+azure-mgmt-msi>=7.0
 # scripts/gcp_network.py (Fase 7, GCP teórico -sin equivalente a moto):
 # tests/test_gcp_network.py mockea googleapiclient directamente, pero
 # necesita poder importar el módulo real.

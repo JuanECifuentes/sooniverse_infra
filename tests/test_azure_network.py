@@ -59,6 +59,7 @@ def manager():
     # cualquier método sí lo haría si no se reemplaza aquí.
     mgr.resource_client = MagicMock()
     mgr.network_client = MagicMock()
+    mgr.msi_client = MagicMock()
     # _find_existing() cae a un GET en vivo cuando el estado no tiene el
     # recurso (ver azure_network.py::_lookup_live, fix de idempotencia con BD
     # perdida). Un MagicMock().get(...) "encuentra" cualquier cosa por
@@ -73,6 +74,7 @@ def manager():
     mgr.network_client.public_ip_addresses.get.side_effect = not_found
     mgr.network_client.nat_gateways.get.side_effect = not_found
     mgr.network_client.subnets.get.side_effect = not_found
+    mgr.msi_client.user_assigned_identities.get.side_effect = not_found
     return mgr
 
 
