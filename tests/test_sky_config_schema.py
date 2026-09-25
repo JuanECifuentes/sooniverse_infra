@@ -61,6 +61,7 @@ class _FakeAzureOutputs:
     vnet_name = "sooniverse-acme-prod-vnet"
     nsg_gateway_name = "sooniverse-acme-prod-gateway"
     nsg_workers_name = "sooniverse-acme-prod-workers"
+    remote_identity_name = "sooniverse-acme-prod-msi"
 
 
 def _validate_provider_block(cloud_key: str, block: dict) -> None:
@@ -110,6 +111,10 @@ def test_build_sky_gateway_config_azure_no_usa_claves_inexistentes():
             f"'{clave_invalida}' no existe en el esquema 'azure' de SkyPilot"
         )
     assert generated["resource_group_vm"] == "sooniverse-acme-prod-rg"
+    # 'remote_identity': ver el docstring de AzureNetworkManager.ensure_remote_identity()
+    # -sin esto, SkyPilot exige Microsoft.Authorization/roleAssignments/write,
+    # permiso que el Service Principal de este despliegue no tiene.
+    assert generated["remote_identity"] == "sooniverse-acme-prod-msi"
     assert generated["vpc_name"] == "sooniverse-acme-prod-vnet"
 
 

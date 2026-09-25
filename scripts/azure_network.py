@@ -88,10 +88,12 @@ try:
     )
     from azure.mgmt.resource.resources import ResourceManagementClient
     from azure.mgmt.resource.resources.models import ResourceGroup
+    from azure.mgmt.msi import ManagedServiceIdentityClient
+    from azure.mgmt.msi.models import Identity
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "Falta el SDK de Azure. Instala con: "
-        "pip install azure-identity azure-mgmt-network azure-mgmt-resource"
+        "pip install azure-identity azure-mgmt-network azure-mgmt-resource azure-mgmt-msi"
     ) from exc
 
 from infra_state import InfraStateStore, InMemoryInfraStateStore  # type: ignore
@@ -120,6 +122,10 @@ DELETE_ORDER = {
     "nsg-workers": 30,
     "nsg-gateway": 31,
     "vnet": 40,
+    # Sin rol asignado (ver ensure_remote_identity()); el borrado del
+    # Resource Group completo ya la arrastraría igual, este orden es solo
+    # por consistencia con el resto del plan.
+    "remote-identity": 41,
     # pip-gateway (dominio propio, ver AzureNetworkSpec.gateway_eip) se
     # intenta destruir aquí en el orden normal SI 'persistente' es false o
     # force=True; con el default (persistente), destroy() la conserva y de
@@ -216,6 +222,10 @@ class AzureNetworkOutputs:
     # por nube -mismo patrón que el campo 'aws_id' genérico de InfraStateStore.
     gateway_eip_allocation_id: Optional[str] = None
     gateway_eip_public_ip: Optional[str] = None
+    # Nombre de la User-Assigned Managed Identity que 'remote_identity' del
+    # bloque 'azure' de SkyPilot debe usar -ver ensure_remote_identity() y el
+    # docstring del módulo sobre por qué es obligatoria en esta suscripción.
+    remote_identity_name: Optional[str] = None
 
 
 @dataclass
@@ -333,6 +343,7 @@ class AzureNetworkManager:
 
         self.resource_client = ResourceManagementClient(self._credential, self._subscription_id)
         self.network_client = NetworkManagementClient(self._credential, self._subscription_id)
+        self.msi_client = ManagedServiceIdentityClient(self._credential, self._subscription_id)
 
         if deployment_id:
             self.deployment_id = deployment_id
@@ -448,6 +459,10 @@ class AzureNetworkManager:
                 return name, name
             if not rg_name:
                 return None, None
+            if component == "remote-identity":
+                name = self._name("msi")
+                identity = self.msi_client.user_assigned_identities.get(rg_name, name)
+                return identity.id, name
             if component == "vnet":
                 name = self._name("vnet")
                 vnet = self.network_client.virtual_networks.get(rg_name, name)
@@ -494,6 +509,52 @@ class AzureNetworkManager:
         )
         self._record("resource-group", "resource-group", name, attributes={"name": name})
         logger.info("[RED-AZURE] Resource Group creado: %s", name)
+        return name
+
+    def ensure_remote_identity(self, rg_name: str) -> str:
+        """Crea (o reutiliza) una User-Assigned Managed Identity SIN ningún
+        rol asignado, y devuelve su nombre corto (para 'azure.remote_identity'
+        del bloque de cliente de SkyPilot -ver build_sky_gateway_config()/
+        build_sky_workers_config() en generate_infra.py).
+
+        Por qué es obligatoria en esta suscripción: sin 'remote_identity'
+        explícito, SkyPilot crea SU PROPIA Managed Identity por cada cluster
+        Y le asigna el rol Contributor sobre el Resource Group (plantilla ARM
+        embebida, ver sky/provision/azure/config.py). Eso exige el permiso
+        'Microsoft.Authorization/roleAssignments/write' sobre el Resource
+        Group -que el Service Principal de este despliegue NO tiene (solo
+        Contributor "puro", sin permisos de IAM)-, y CADA 'sky launch' fallaba
+        con 'InvalidTemplateDeployment: Authorization failed for template
+        resource ... roleAssignments'. El mensaje de SkyPilot en ese caso es
+        el genérico "Failed to acquire resources in all zones" -confirmado en
+        un despliegue real que el problema NUNCA fue capacidad de GPU/VM: se
+        reprodujo igual con CPU-only SKUs, y el operador SÍ pudo aprovisionar
+        la misma SKU T4 a mano con sus propios permisos de Portal.
+
+        Crear una identidad YA EXISTENTE (sin rol) y pasarla como
+        'remote_identity' hace que SkyPilot elimine los recursos de MSI/
+        roleAssignment de su plantilla ARM por completo
+        (sky/provision/azure/config.py::_remove_msi_resources_from_template),
+        evitando ese permiso. Crear la identidad en sí solo exige
+        'Microsoft.ManagedIdentity/userAssignedIdentities/write' -parte del
+        rol Contributor normal, confirmado que el Service Principal SÍ lo
+        tiene. Sin ningún rol asignado, la identidad no le da a la VM ningún
+        permiso adicional sobre la API de Azure -aceptable porque el Gateway/
+        los workers no llaman a esa API desde dentro de la VM."""
+        name = self._name("msi")
+        existing = self._find_existing("remote-identity", rg_name=rg_name)
+        if existing:
+            logger.info("[SKIP][RED-AZURE] Managed Identity ya registrada: %s", name)
+            return name
+
+        # A diferencia de begin_create_or_update() (async, devuelve un
+        # poller), create_or_update() de MSI es síncrono y devuelve el
+        # objeto Identity ya resuelto -sin necesitar un GET adicional.
+        identity = self.msi_client.user_assigned_identities.create_or_update(
+            rg_name, name, Identity(location=self.spec.region, tags=self._tags("remote-identity"))
+        )
+        self._record("remote-identity", "remote-identity", identity.id, parent_aws_id=rg_name, attributes={"name": name})
+        logger.info("[RED-AZURE] Managed Identity lista: %s", identity.id)
         return name
 
     def ensure_vnet(self, rg_name: str) -> Tuple[str, str]:
@@ -794,6 +855,7 @@ class AzureNetworkManager:
         self.state.set_deployment_status(self.deployment_id, "creating")
         try:
             rg_name = self.ensure_resource_group()
+            remote_identity_name = self.ensure_remote_identity(rg_name)
             vnet_id, vnet_name = self.ensure_vnet(rg_name)
             nsg_gateway_id, nsg_workers_id = self.ensure_security_groups(rg_name)
             nat_gateway_id = self.ensure_nat_gateway(rg_name)
@@ -827,6 +889,7 @@ class AzureNetworkManager:
             managed_by_us=True,
             gateway_eip_allocation_id=gateway_eip_alloc_id,
             gateway_eip_public_ip=gateway_eip_public_ip,
+            remote_identity_name=remote_identity_name,
         )
 
     def status(self) -> Dict[str, Any]:
@@ -879,6 +942,8 @@ class AzureNetworkManager:
                 obj = self.network_client.public_ip_addresses.get(rg_name, self._name("pip-nat"))
             elif component == "pip-gateway":
                 obj = self.network_client.public_ip_addresses.get(rg_name, self._name("pip-gateway"))
+            elif component == "remote-identity":
+                obj = self.msi_client.user_assigned_identities.get(rg_name, self._name("msi"))
             else:
                 return False
         except ResourceNotFoundError:
@@ -1024,6 +1089,8 @@ class AzureNetworkManager:
             self.network_client.network_security_groups.begin_delete(rg_name, self._name("workers")).result()
         elif component == "vnet":
             self.network_client.virtual_networks.begin_delete(rg_name, self._name("vnet")).result()
+        elif component == "remote-identity":
+            self.msi_client.user_assigned_identities.delete(rg_name, self._name("msi"))
         elif component == "resource-group":
             # Última red de seguridad: borra en cascada cualquier recurso no
             # rastreado que haya quedado dentro (equivalente a

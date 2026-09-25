@@ -1667,6 +1667,22 @@ class TopologyBuilder:
             if net:
                 azure_cfg["resource_group_vm"] = net.resource_group_name
                 azure_cfg["vpc_name"] = net.vnet_name
+                # CORREGIDO: sin esto, SkyPilot crea SU PROPIA Managed
+                # Identity por cluster y le asigna el rol Contributor sobre
+                # el Resource Group (plantilla ARM embebida) -exige el
+                # permiso 'Microsoft.Authorization/roleAssignments/write',
+                # que el Service Principal de este despliegue no tiene.
+                # 'sky launch' fallaba con 'InvalidTemplateDeployment:
+                # Authorization failed ... roleAssignments', reportado por
+                # SkyPilot como el genérico "Failed to acquire resources in
+                # all zones" -confirmado en un despliegue real que NUNCA fue
+                # un problema de capacidad de GPU/VM. Pasar una identidad YA
+                # EXISTENTE (creada sin ningún rol por
+                # AzureNetworkManager.ensure_remote_identity(), ver su
+                # docstring) hace que SkyPilot omita esos recursos de la
+                # plantilla ARM por completo.
+                if getattr(net, "remote_identity_name", None):
+                    azure_cfg["remote_identity"] = net.remote_identity_name
             return {"azure": azure_cfg} if azure_cfg else {}
 
         if self.red.get("cloud", "aws") == "gcp":
@@ -1705,11 +1721,14 @@ class TopologyBuilder:
         net = self._network_outputs
 
         if self.red.get("cloud", "aws") == "azure":
-            # Mismas claves verificadas que build_sky_gateway_config().
+            # Mismas claves verificadas que build_sky_gateway_config()
+            # (incluido 'remote_identity' -ver el comentario ahí).
             azure_cfg: Dict[str, Any] = {}
             if net:
                 azure_cfg["resource_group_vm"] = net.resource_group_name
                 azure_cfg["vpc_name"] = net.vnet_name
+                if getattr(net, "remote_identity_name", None):
+                    azure_cfg["remote_identity"] = net.remote_identity_name
             if self.red.get("workers_en_subred_privada", True):
                 azure_cfg["use_internal_ips"] = True
                 if gateway_ip:
@@ -2018,6 +2037,7 @@ def load_network_outputs_from_state(
             managed_by_us=True,
             gateway_eip_allocation_id=(first("pip-gateway") or {}).get("aws_id"),
             gateway_eip_public_ip=((first("pip-gateway") or {}).get("attributes") or {}).get("public_ip"),
+            remote_identity_name=((first("remote-identity") or {}).get("attributes") or {}).get("name"),
         )
 
     if red.get("cloud", "aws") == "gcp":
