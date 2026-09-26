@@ -37,9 +37,11 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+from cloud_remote import remote_root_for, remote_user_for  # noqa: E402
+
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config_global.yaml"
 LITELLM_CONFIG = REPO_ROOT / "docker_images" / "gateway" / "litellm_config.yaml"
-REMOTE_ROOT = "/home/ubuntu/sooniverse_infra"
+# REMOTE_ROOT: ver scripts/cloud_remote.py (remote_root_for(cloud)); varía por nube.
 
 # Reasignados por configure_paths_for() según --config (multi-cliente, Fase 6):
 # aíslan el caché de endpoints y el bastion entre clientes que comparten cuenta
@@ -167,7 +169,14 @@ def refresh_bastion_config(config: Dict[str, Any], gateway_cluster: str) -> None
     if not red.get("workers_en_subred_privada", True):
         return  # sin subred privada no hay bastion que mantener al día
 
-    gateway_ip = _gateway_public_ip(gateway_cluster, aws_profile=red.get("aws_profile"))
+    # CORREGIDO: esta función escribía SIEMPRE bajo la clave 'aws' de
+    # .sky_config_workers.yaml sin importar 'red_y_aislamiento.cloud' -en un
+    # despliegue Azure/GCP eso dejaba el bastion configurado bajo la nube
+    # equivocada (SkyPilot ignora silenciosamente una clave 'aws' cuando el
+    # workload es 'azure'/'gcp'). Ver scripts/cloud_remote.py.
+    cloud = red.get("cloud", "aws")
+    aws_profile = red.get("aws_profile") if cloud == "aws" else None
+    gateway_ip = _gateway_public_ip(gateway_cluster, aws_profile=aws_profile)
     if not gateway_ip:
         print(f"[WARNING] No se pudo obtener la IP pública de '{gateway_cluster}'; "
               "se usará el bastion existente (si lo hay) sin refrescar.")
@@ -176,9 +185,9 @@ def refresh_bastion_config(config: Dict[str, Any], gateway_cluster: str) -> None
     current: Dict[str, Any] = {}
     if SKY_WORKERS_CONFIG.exists():
         current = yaml.safe_load(SKY_WORKERS_CONFIG.read_text(encoding="utf-8")) or {}
-    aws_cfg = current.get("aws", {})
+    cloud_cfg = current.get(cloud, {})
 
-    if aws_cfg.get("ssh_proxy_command") and gateway_ip in aws_cfg["ssh_proxy_command"]:
+    if cloud_cfg.get("ssh_proxy_command") and gateway_ip in cloud_cfg["ssh_proxy_command"]:
         return  # ya apunta a la IP correcta, no reescribir innecesariamente
 
     gateway_ssh_key = Path.home() / ".sky" / "generated" / "ssh-keys" / f"{gateway_cluster}.key"
@@ -188,15 +197,20 @@ def refresh_bastion_config(config: Dict[str, Any], gateway_cluster: str) -> None
         return
     os.chmod(gateway_ssh_key, 0o600)
 
-    aws_cfg["ssh_proxy_command"] = (
+    cloud_cfg["ssh_proxy_command"] = (
         f"ssh -W %h:%p -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-        f"-o ConnectTimeout=10 -i {gateway_ssh_key} ubuntu@{gateway_ip}"
+        f"-o ConnectTimeout=10 -i {gateway_ssh_key} {remote_user_for(cloud)}@{gateway_ip}"
     )
-    aws_cfg.setdefault("vpc_name", red.get("vpc_name"))
-    aws_cfg.setdefault("use_internal_ips", True)
+    cloud_cfg.setdefault("vpc_name", red.get("vpc_name"))
+    cloud_cfg.setdefault("use_internal_ips", True)
     if red.get("security_group_workers"):
-        aws_cfg.setdefault("security_group_name", red["security_group_workers"])
-    current["aws"] = {k: v for k, v in aws_cfg.items() if v is not None}
+        cloud_cfg.setdefault("security_group_name", red["security_group_workers"])
+    current[cloud] = {k: v for k, v in cloud_cfg.items() if v is not None}
+    # Limpia una clave de OTRA nube que haya quedado de un despliegue anterior
+    # sobre este mismo directorio de artefactos (p.ej. reconfigurar de aws a azure).
+    for otra in ("aws", "azure", "gcp"):
+        if otra != cloud:
+            current.pop(otra, None)
 
     SKY_WORKERS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
     SKY_WORKERS_CONFIG.write_text(yaml.dump(current, default_flow_style=False, sort_keys=False), encoding="utf-8")
@@ -430,6 +444,13 @@ def build_endpoints(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "workload_id": wl["id"],
                 "cluster": cluster,
                 "model_public_name": model_public_name,
+                # CORREGIDO: 'tipo_tarea' nunca viajaba hasta aquí -sin esto,
+                # render_litellm_config.py no tenía forma de saber que un
+                # endpoint es de embeddings y ponerle 'mode: embedding' en
+                # model_info (LiteLLM sondea /health con una llamada de CHAT
+                # por defecto; contra un endpoint de pooling eso siempre
+                # falla, reportando el deployment como no sano para siempre).
+                "tipo_tarea": wl.get("tipo_tarea", "llm-texto"),
                 "hf_repo": wl.get("hf_repo", "unknown"),
                 "accelerator": wl.get("accelerator"),
                 "ip": ip,
@@ -484,14 +505,15 @@ def render_config(endpoints: List[Dict[str, Any]], config: Dict[str, Any]) -> No
     healthy_json.unlink(missing_ok=True)
 
 
-def push_and_reload(gateway_cluster: str) -> bool:
+def push_and_reload(gateway_cluster: str, cloud: Optional[str] = None) -> bool:
     """Envía el config al Gateway y recarga únicamente el contenedor de LiteLLM."""
     sky = sky_bin()
     if not sky:
         print("[WARNING] 'sky' no está en el PATH; no se puede empujar el config al Gateway.")
         return False
 
-    remote_cfg = f"{REMOTE_ROOT}/docker_images/gateway/litellm_config.yaml"
+    remote_root = remote_root_for(cloud)
+    remote_cfg = f"{remote_root}/docker_images/gateway/litellm_config.yaml"
     print(f"[EXEC] sky rsync {LITELLM_CONFIG.name} -> {gateway_cluster}:{remote_cfg}")
     try:
         subprocess.run(
@@ -529,8 +551,8 @@ def push_and_reload(gateway_cluster: str) -> bool:
     # vía `docker inspect` desde el host sin publicar el puerto) en vez de
     # reinventar la comprobación HTTP.
     reload_cmd = (
-        f"cd {REMOTE_ROOT}/docker_images/gateway && "
-        f"sudo docker compose --env-file {REMOTE_ROOT}/.env restart litellm && "
+        f"cd {remote_root}/docker_images/gateway && "
+        f"sudo docker compose --env-file {remote_root}/.env restart litellm && "
         f"for i in $(seq 1 {attempts}); do "
         f"status=$(sudo docker inspect --format '{{{{.State.Health.Status}}}}' sooniverse-litellm 2>/dev/null); "
         f"if [ \"$status\" = healthy ]; then echo SOONIVERSE_LITELLM_READY; exit 0; fi; "
@@ -636,7 +658,16 @@ def register_in_db(endpoints: List[Dict[str, Any]], cluster_of: Dict[str, str], 
                     (expected_clusters,),
                 )
 
-            for rank, ep in enumerate(endpoints):
+            # CORREGIDO: 'rank' era un índice GLOBAL sobre la lista completa
+            # de endpoints (concatenación de TODOS los workloads), no el
+            # rango del nodo DENTRO de su propio clúster -con 2 workloads de
+            # 2 réplicas cada uno, los node_rank salían 0,1,2,3 en vez de
+            # 0,1 / 0,1. Se cuenta por separado dentro de cada 'cluster'.
+            rank_by_cluster: Dict[str, int] = {}
+            for ep in endpoints:
+                cluster = ep["cluster"]
+                rank = rank_by_cluster.get(cluster, 0)
+                rank_by_cluster[cluster] = rank + 1
                 healthy = ep.get("healthy", True)
                 cur.execute(
                     """
@@ -720,7 +751,7 @@ def run_once(config: Dict[str, Any], args: argparse.Namespace) -> int:
         register_in_db(endpoints, names, config)
 
     if not args.skip_push:
-        if not push_and_reload(names["__gateway__"]):
+        if not push_and_reload(names["__gateway__"], config["red_y_aislamiento"].get("cloud")):
             print("\n[ERROR] LiteLLM no quedó sano tras la recarga; el pool NO quedó sincronizado.")
             return 1
 
@@ -768,7 +799,9 @@ def main() -> int:
     #   [Unit]
     #   Description=Sooniverse sync_endpoints watch
     #   [Service]
-    #   ExecStart=/usr/bin/python3 /home/ubuntu/sooniverse_infra/scripts/sync_endpoints.py --watch
+    #   ExecStart=/usr/bin/python3 <home-del-usuario-remoto>/sooniverse_infra/scripts/sync_endpoints.py --watch
+    #     (usuario remoto según la nube: ubuntu en AWS, azureuser en Azure, gcpuser en GCP -
+    #      ver scripts/cloud_remote.py)
     #   Restart=always
     #   [Install]
     #   WantedBy=multi-user.target
@@ -791,7 +824,7 @@ def main() -> int:
                 if not args.skip_db:
                     register_in_db(endpoints, cluster_names(config), config)
                 if not args.skip_push:
-                    push_and_reload(cluster_names(config)["__gateway__"])
+                    push_and_reload(cluster_names(config)["__gateway__"], config["red_y_aislamiento"].get("cloud"))
             except Exception as exc:  # noqa: BLE001 - una corrida fallida no debe tumbar el watch
                 print(f"[WARNING] Corrida de --watch falló: {exc}")
 

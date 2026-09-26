@@ -525,3 +525,247 @@ def test_capacidad_deshabilitada_es_valida():
     cfg = clone(load_base_config())
     cfg["capacidad"]["habilitado"] = False
     ConfigValidator.validate(cfg)
+
+
+# -- runtime_vllm (overrides de bajo nivel para GPUs Turing/T4) --------------
+def test_runtime_vllm_ausente_es_valida():
+    cfg = clone(load_base_config())
+    assert "runtime_vllm" not in cfg["workloads"][0]
+    ConfigValidator.validate(cfg)
+
+
+def test_runtime_vllm_valida_con_todos_los_campos():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["runtime_vllm"] = {
+        "dtype": "half",
+        "kv_cache_dtype": "auto",
+        "enforce_eager": True,
+        "mamba_ssm_cache_dtype": "float32",
+        "attention_backend": "FLASHINFER",
+    }
+    ConfigValidator.validate(cfg)
+
+
+def test_runtime_vllm_no_objeto_rechazado():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["runtime_vllm"] = "half"
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_runtime_vllm_campo_desconocido_rechazado():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["runtime_vllm"] = {"quantization": "awq"}
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_runtime_vllm_enforce_eager_no_booleano_rechazado():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["runtime_vllm"] = {"enforce_eager": "true"}
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+@pytest.mark.parametrize("campo", ["dtype", "kv_cache_dtype", "mamba_ssm_cache_dtype", "attention_backend"])
+def test_runtime_vllm_campo_texto_no_string_rechazado(campo):
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["runtime_vllm"] = {campo: 123}
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+# -- gateway.dominio en Azure (Fase 2.2: Public IP persistente implementada) -
+def test_dominio_habilitado_es_valido_en_azure():
+    """ANTES 'gateway.dominio.habilitado: true' se rechazaba para cualquier
+    cloud != aws -ahora que azure_network.py tiene una Public IP dedicada y
+    persistente (ensure_gateway_public_ip), Azure también es válido."""
+    cfg = clone(load_base_config())
+    cfg["red_y_aislamiento"]["cloud"] = "azure"
+    assert cfg["gateway"]["dominio"]["habilitado"] is True
+    ConfigValidator.validate(cfg)
+
+
+def test_dominio_habilitado_sigue_siendo_valido_en_aws():
+    """No-regresión: el config base (AWS + dominio) sigue validando."""
+    cfg = load_base_config()
+    assert cfg["red_y_aislamiento"].get("cloud", "aws") == "aws"
+    assert cfg["gateway"]["dominio"]["habilitado"] is True
+    ConfigValidator.validate(cfg)
+
+
+# -- cloud: gcp (Fase 7, implementación teórica -ver scripts/gcp_network.py) -
+def _make_gcp_config():
+    with (REPO_ROOT / "clients" / "_ejemplo_gcp" / "config_global.yaml").open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def test_ejemplo_gcp_config_es_valido():
+    ConfigValidator.validate(_make_gcp_config())
+
+
+def test_dominio_habilitado_sigue_rechazado_en_gcp():
+    """A diferencia de Azure (Fase 2.2), GCP NO tiene IP externa persistente
+    ni reasignación de IP al Gateway implementada en esta versión -ver el
+    docstring de scripts/gcp_network.py. 'gateway.dominio.habilitado: true'
+    debe seguir rechazándose para 'cloud: gcp'."""
+    cfg = clone(_make_gcp_config())
+    cfg["gateway"]["dominio"]["habilitado"] = True
+    cfg["gateway"]["dominio"]["seleccionado"] = "ia.ejemplo.com"
+    cfg["gateway"]["dominio"]["disponibles"] = [
+        {"nombre": "ia.ejemplo.com", "email_acme": "contacto@ejemplo.com"}
+    ]
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_gcp_azs_distinto_de_uno_rechazado():
+    """Las subredes de GCP son REGIONALES, no zonales -a diferencia de AWS,
+    donde 'azs' > 1 es el caso normal."""
+    cfg = clone(_make_gcp_config())
+    cfg["red_y_aislamiento"]["azs"] = 2
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_gcp_nat_modo_per_az_rechazado():
+    cfg = clone(_make_gcp_config())
+    cfg["red_y_aislamiento"]["nat_gateway"]["modo"] = "per-az"
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_gcp_requiere_gcp_project():
+    cfg = clone(_make_gcp_config())
+    del cfg["red_y_aislamiento"]["gcp_project"]
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_gcp_workers_privados_sin_nat_rechazado():
+    cfg = clone(_make_gcp_config())
+    cfg["red_y_aislamiento"]["nat_gateway"]["modo"] = "none"
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+# -- colisiones entre workloads (balanceador multi-modelo) ------------------
+def test_worker_cluster_normalizado_colisiona_es_rechazado():
+    """'qwen3.5-llm' y 'qwen3-5-llm' son 'id' distintos, pero
+    TopologyBuilder.worker_cluster() los normaliza (minúsculas, '.'/'_' ->
+    '-') al MISMO nombre de clúster SkyPilot -el segundo 'sky launch'
+    pisaría al primero en silencio."""
+    cfg = clone(load_base_config())
+    segundo = clone(cfg["workloads"][0])
+    segundo["id"] = "qwen3.5-llm"  # normaliza igual que "qwen3-5-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = "sooniverse-otro-modelo"
+    cfg["workloads"].append(segundo)
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_worker_cluster_no_colisiona_con_ids_distintos():
+    cfg = clone(load_base_config())
+    segundo = clone(cfg["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = "sooniverse-nemotron"
+    cfg["workloads"].append(segundo)
+    ConfigValidator.validate(cfg)
+
+
+def test_nombre_publico_duplicado_es_rechazado():
+    """Dos workloads con el mismo 'nombre_publico' se fusionan en un único
+    modelo de LiteLLM -el router los trataría como intercambiables."""
+    cfg = clone(load_base_config())
+    segundo = clone(cfg["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    # 'nombre_publico' deliberadamente IGUAL al del primer workload.
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg | {"workloads": cfg["workloads"] + [segundo]})
+
+
+def test_nombre_publico_duplicado_implicito_por_id_es_rechazado():
+    """Sin 'nombre_publico' explícito, build_worker() usa el 'id' como
+    fallback -dos workloads con el mismo 'id' YA se rechazan por 'vistos',
+    pero un 'nombre_publico' explícito que coincide con el 'id' fallback de
+    OTRO workload también debe detectarse."""
+    cfg = clone(load_base_config())
+    segundo = clone(cfg["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = cfg["workloads"][0]["nombre_publico"]
+    cfg["workloads"].append(segundo)
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_dos_workloads_con_nombres_distintos_es_valido():
+    cfg = clone(load_base_config())
+    segundo = clone(cfg["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = "sooniverse-nemotron"
+    cfg["workloads"].append(segundo)
+    ConfigValidator.validate(cfg)
+
+
+# -- peso_balanceo ignorado en silencio con la estrategia por defecto -------
+def test_peso_balanceo_distinto_de_uno_avisa_con_estrategia_que_lo_ignora(capsys):
+    """LiteLLM solo honra 'weight' con routing_strategy: simple-shuffle -con
+    cualquier otra estrategia (incluida la default) era un no-op silencioso."""
+    cfg = clone(load_base_config())
+    assert cfg["gateway"]["load_balancing_strategy"] == "latency-based-routing"
+    cfg["workloads"][0]["peso_balanceo"] = 3
+    ConfigValidator.validate(cfg)  # no debe lanzar -es un aviso, no un error
+    salida = capsys.readouterr().out
+    assert "peso_balanceo" in salida
+    assert "WARNING" in salida
+
+
+def test_peso_balanceo_distinto_de_uno_no_avisa_con_simple_shuffle(capsys):
+    cfg = clone(load_base_config())
+    cfg["gateway"]["load_balancing_strategy"] = "simple-shuffle"
+    cfg["workloads"][0]["peso_balanceo"] = 3
+    ConfigValidator.validate(cfg)
+    salida = capsys.readouterr().out
+    assert "peso_balanceo" not in salida
+
+
+def test_peso_balanceo_uno_no_avisa_nunca():
+    cfg = load_base_config()
+    assert cfg["workloads"][0].get("peso_balanceo", 1) == 1
+    ConfigValidator.validate(cfg)
+
+
+# -- tipo_tarea: embeddings no puede declarar capacidades de chat -----------
+def test_embeddings_con_vision_true_rechazado():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["tipo_tarea"] = "embeddings"
+    cfg["workloads"][0]["capacidades"]["vision"] = True
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_embeddings_con_tool_calling_true_rechazado():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["tipo_tarea"] = "embeddings"
+    cfg["workloads"][0]["capacidades"] = {"tool_calling": True, "tool_call_parser": "hermes"}
+    with pytest.raises(ConfigValidationError):
+        ConfigValidator.validate(cfg)
+
+
+def test_embeddings_sin_capacidades_es_valido():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["tipo_tarea"] = "embeddings"
+    del cfg["workloads"][0]["capacidades"]
+    ConfigValidator.validate(cfg)
+
+
+def test_embeddings_con_vision_false_explicito_es_valido():
+    cfg = clone(load_base_config())
+    cfg["workloads"][0]["tipo_tarea"] = "embeddings"
+    cfg["workloads"][0]["capacidades"] = {"vision": False}
+    ConfigValidator.validate(cfg)

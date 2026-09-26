@@ -6,3 +6,28 @@
 # ==============================================================================
 pytest>=9.0
 moto[ec2]>=5.2
+# tests/test_sky_config_schema.py: valida los manifiestos generados contra
+# el esquema real de SkyPilot (get_config_schema() ya usa jsonschema
+# internamente; se fija aquí también por si se instala sin 'skypilot').
+jsonschema>=4.0
+# No existe un equivalente a moto para Azure: tests/test_azure_network.py
+# mockea directamente resource_client/network_client, pero necesita poder
+# importar scripts/azure_network.py (que a su vez importa estos paquetes).
+azure-core>=1.30
+azure-identity>=1.15
+azure-mgmt-network>=25.0
+azure-mgmt-resource>=23.0
+# scripts/azure_check_gpu_quota.py (diagnóstico de cuota GPU, no forma parte
+# del pipeline de deploy en sí, pero sin estos tres tampoco importa).
+azure-mgmt-compute>=30.0
+azure-mgmt-quota>=1.0
+azure-mgmt-subscription>=3.1
+# azure_network.py::ensure_remote_identity() -ver su docstring sobre por qué
+# es obligatoria (evita el permiso Microsoft.Authorization/roleAssignments/write
+# que SkyPilot exigiría de otro modo).
+azure-mgmt-msi>=7.0
+# scripts/gcp_network.py (Fase 7, GCP teórico -sin equivalente a moto):
+# tests/test_gcp_network.py mockea googleapiclient directamente, pero
+# necesita poder importar el módulo real.
+google-api-python-client>=2.100
+google-auth>=2.30

@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -90,11 +91,25 @@ DESTROY_MAX_WAIT_SECONDS = 1200
 DESTROY_RETRY_INTERVAL_SECONDS = 60
 
 
-def _instances_pending(clusters: List[str], region: str, aws_profile: Optional[str] = None) -> List[str]:
+def _instances_pending(
+    clusters: List[str], region: str, aws_profile: Optional[str] = None, cloud: str = "aws"
+) -> List[str]:
     """IDs de instancia de estos clústeres SkyPilot que NO llegaron todavía a
     'terminated' (incluye 'shutting-down', 'stopping', 'pending', 'running':
     cualquier estado donde el ENI sigue potencialmente 'in-use', que es lo
-    que de verdad bloquea la capa de red con DependencyViolation)."""
+    que de verdad bloquea la capa de red con DependencyViolation).
+
+    BUG CONFIRMADO en un despliegue real: esta función llamaba a la API de
+    EC2 SIN IMPORTAR LA NUBE, usando la región de Azure/GCP como si fuera una
+    región AWS ("Could not connect to the endpoint URL:
+    https://ec2.westus3.amazonaws.com/"), abortando la destrucción completa
+    antes de llegar siquiera a la capa de red. Azure no tiene el mismo
+    patrón de terminación asíncrona de EC2 (el 'begin_delete().result()' de
+    SkyPilot ya espera a que la VM desaparezca de verdad), así que para
+    cualquier nube que no sea AWS basta con confiar en que 'sky down'
+    terminó con éxito -sin este chequeo AWS-específico, que no aplica."""
+    if cloud != "aws":
+        return []
     try:
         import boto3
     except ImportError:
@@ -118,6 +133,7 @@ def _instances_pending(clusters: List[str], region: str, aws_profile: Optional[s
 
 def _teardown_clusters_with_budget(
     clusters: List[str], region: str, deadline: float, aws_profile: Optional[str] = None,
+    cloud: str = "aws",
 ) -> bool:
     """`sky down` de cada clúster de la lista (en orden) y reintenta hasta que
     TODAS sus instancias EC2 confirmen 'terminated', a razón de un intento por
@@ -132,7 +148,7 @@ def _teardown_clusters_with_budget(
         for cluster in clusters:
             _sky_down(cluster, aws_profile=aws_profile)
 
-        pendientes = _instances_pending(clusters, region, aws_profile=aws_profile)
+        pendientes = _instances_pending(clusters, region, aws_profile=aws_profile, cloud=cloud)
         if not pendientes:
             if attempt > 1:
                 print(f"[OK] {', '.join(clusters)}: instancia(s) terminada(s) tras {attempt} intento(s).")
@@ -289,6 +305,48 @@ def print_orphans(orphans: List[Dict[str, Any]]) -> None:
         print(f"{o['type']:<20} {o['aws_id']:<24} {o['name']:<40} {o['deployment_status']}")
 
 
+def scan_orphans_azure(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Equivalente Azure de `scan_orphans()`. A diferencia de AWS (una cuenta/
+    región compartida entre todos los clientes, de ahí el escaneo por tag en
+    TODA la región), cada cliente Azure vive en su propio Resource Group
+    dedicado (ver azure_network.py) -así que alcanza con mirar DENTRO de ese
+    Resource Group, no hace falta escanear la suscripción entera."""
+    from azure_network import AzureNetworkManager
+    from infra_state import PostgresInfraStateStore
+
+    cliente = config["cliente"]
+    red = config["red_y_aislamiento"]
+    state = PostgresInfraStateStore()
+    state.ping()
+    existing = state.get_active_deployment(cliente["id"], cliente["entorno"], red["region"])
+    # Sin despliegue activo: se usa un deployment_id "de un solo uso", nunca
+    # persistido (no se llama a state.open_deployment), así que
+    # list_resources() para él siempre está vacío -y CUALQUIER recurso
+    # encontrado en el Resource Group aparece como huérfano, que es justo lo
+    # correcto cuando no hay un despliegue registrado dueño de ese RG.
+    deployment_id = existing["deployment_id"] if existing else str(uuid.uuid4())
+
+    spec = build_network_spec_from_config(config)
+    mgr = AzureNetworkManager(spec, state=state, deployment_id=deployment_id)
+    orphans = mgr.scan_orphans()
+    status = "activo" if existing else "sin-despliegue-registrado"
+    for o in orphans:
+        o["deployment_status"] = status
+        o["name"] = (o.get("azure_id") or "").rsplit("/", 1)[-1]
+    return orphans
+
+
+def print_orphans_azure(orphans: List[Dict[str, Any]]) -> None:
+    if not orphans:
+        print("[OK] No se encontraron recursos huérfanos en el Resource Group de este cliente.")
+        return
+    print(f"\n{'TIPO':<45} {'NOMBRE':<30} ESTADO DESPLIEGUE")
+    print("-" * 110)
+    for o in orphans:
+        print(f"{o['type']:<45} {o['name']:<30} {o['deployment_status']}")
+        print(f"    {o['azure_id']}")
+
+
 def purge_orphans(orphans: List[Dict[str, Any]], region: str, aws_profile: Optional[str] = None) -> None:
     import boto3
     from aws_network import DELETE_ORDER
@@ -345,6 +403,80 @@ def _component_of(orphan: Dict[str, Any]) -> str:
     }.get(orphan["type"], "")
 
 
+# Orden de borrado para purge_orphans_azure(), por TIPO ARM (minúsculas, ver
+# _azure_delete_order). Mismo criterio que aws_network.DELETE_ORDER: los
+# recursos "hoja" primero (NAT/Public IP/NSG), la VNet al final -a diferencia
+# de AWS, aquí no hace falta desasociar nada antes: Azure rechaza con un error
+# claro (no una excepción de purga silenciosa) si un recurso todavía tiene
+# dependientes, así que el peor caso es un [ERROR] legible, no una purga a
+# medias no detectada.
+_AZURE_ORPHAN_DELETE_ORDER = {
+    "microsoft.network/virtualnetworks/subnets": 10,
+    "microsoft.network/natgateways": 20,
+    "microsoft.network/publicipaddresses": 21,
+    "microsoft.network/networksecuritygroups": 30,
+    "microsoft.network/virtualnetworks": 40,
+}
+
+
+def _azure_delete_order(orphan: Dict[str, Any]) -> int:
+    return _AZURE_ORPHAN_DELETE_ORDER.get((orphan.get("type") or "").lower(), 999)
+
+
+def purge_orphans_azure(orphans: List[Dict[str, Any]]) -> None:
+    """Borra los recursos huérfanos reportados por scan_orphans_azure(), por
+    su resourceId completo. A diferencia de AWS (una llamada boto3 tipada por
+    cada tipo de recurso, ver purge_orphans()), Azure ofrece un único método
+    genérico -resources.begin_delete_by_id()- que funciona para CUALQUIER
+    tipo de recurso sin necesitar un cliente tipado por servicio (network,
+    compute, ...). Solo hace falta el 'api_version' correcto para cada tipo,
+    que se resuelve EN VIVO contra el Resource Provider (resources.providers)
+    en vez de hardcodearlo -así no queda desactualizado si Azure publica una
+    versión nueva del API."""
+    from azure_network import _default_credential
+    from azure.mgmt.resource.resources import ResourceManagementClient
+
+    credential, sub_id = _default_credential()
+    resource_client = ResourceManagementClient(credential, sub_id)
+
+    api_version_cache: Dict[str, Optional[str]] = {}
+
+    def _api_version_for(resource_type: str) -> Optional[str]:
+        if resource_type in api_version_cache:
+            return api_version_cache[resource_type]
+        version = None
+        try:
+            namespace, tipo = resource_type.split("/", 1)
+            provider = resource_client.providers.get(namespace)
+            for rt in provider.resource_types or []:
+                if rt.resource_type.lower() == tipo.lower():
+                    versiones = rt.api_versions or []
+                    # Prioriza versiones estables (sin 'preview') sobre las de
+                    # vista previa; ambas listas vienen ordenadas más reciente
+                    # primero.
+                    estables = [v for v in versiones if "preview" not in v.lower()]
+                    version = (estables or versiones or [None])[0]
+                    break
+        except Exception as exc:  # noqa: BLE001 - se reporta por recurso, no debe abortar el resto
+            print(f"[WARNING] No se pudo resolver el api_version de '{resource_type}': {exc}")
+        api_version_cache[resource_type] = version
+        return version
+
+    ordered = sorted(orphans, key=_azure_delete_order)
+    for o in ordered:
+        resource_id = o["azure_id"]
+        resource_type = o["type"]
+        api_version = _api_version_for(resource_type)
+        if not api_version:
+            print(f"[ERROR] No se pudo borrar {resource_id}: sin api_version resuelto para '{resource_type}'.")
+            continue
+        try:
+            resource_client.resources.begin_delete_by_id(resource_id, api_version).result()
+            print(f"[OK] Purgado: {resource_type} {resource_id}")
+        except Exception as exc:  # noqa: BLE001 - reporte por recurso, no debe abortar el resto
+            print(f"[ERROR] No se pudo purgar {resource_type} {resource_id}: {exc}")
+
+
 # =============================================================================
 # Destrucción normal (sky down workers -> sky down gateway -> red)
 # =============================================================================
@@ -362,6 +494,7 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
         return 1
 
     only = args.only
+    cloud = red.get("cloud", "aws")
 
     if only in ("all",) and not args.dry_run:
         worker_clusters = [builder.worker_cluster(wl["id"]) for wl in config["workloads"]]
@@ -377,7 +510,7 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
         workers_ok = True
         if worker_clusters:
             workers_ok = _teardown_clusters_with_budget(
-                worker_clusters, red["region"], deadline, aws_profile=aws_profile,
+                worker_clusters, red["region"], deadline, aws_profile=aws_profile, cloud=cloud,
             )
 
         if not workers_ok:
@@ -387,7 +520,7 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
 
         print("\n--- [2/3] Nodo Gateway (sky down, mismo presupuesto) ---")
         gateway_ok = _teardown_clusters_with_budget(
-            [builder.gateway_cluster], red["region"], deadline, aws_profile=aws_profile,
+            [builder.gateway_cluster], red["region"], deadline, aws_profile=aws_profile, cloud=cloud,
         )
         if not gateway_ok:
             print("\n[ABORTADO] La capa de red no se toca con el Gateway todavía activo.")
@@ -402,8 +535,7 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
         print("\n[SKIP] 'gestion_red: existente' -> la VPC/SGs no los gestiona este sistema; nada que destruir.")
         return 0
 
-    print("\n--- [3/3] Capa de red AWS ---")
-    from aws_network import AwsNetworkManager
+    print(f"\n--- [3/3] Capa de red {cloud.upper()} ---")
     from infra_state import PostgresInfraStateStore
 
     state = PostgresInfraStateStore()
@@ -416,29 +548,46 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
 
     deployment_id = existing["deployment_id"]
     spec = build_network_spec_from_config(config)
-    mgr = AwsNetworkManager(spec, state=state, deployment_id=deployment_id)
+    if cloud == "azure":
+        from azure_network import AzureNetworkManager
+
+        mgr = AzureNetworkManager(spec, state=state, deployment_id=deployment_id)
+    elif cloud == "gcp":
+        # ⚠️ Teórico, no probado en ejecución (ver scripts/gcp_network.py).
+        from gcp_network import GcpNetworkManager
+
+        mgr = GcpNetworkManager(spec, state=state, deployment_id=deployment_id)
+    else:
+        from aws_network import AwsNetworkManager
+
+        mgr = AwsNetworkManager(spec, state=state, deployment_id=deployment_id)
 
     report = mgr.destroy(dry_run=args.dry_run, force=args.force)
+    # AzureNetworkManager.PlannedDeletion usa 'azure_id'; GcpNetworkManager
+    # usa 'gcp_id' (mismo campo conceptual, nombre distinto -ver los
+    # docstrings de azure_network.py/gcp_network.py).
+    id_attr = {"aws": "aws_id", "azure": "azure_id", "gcp": "gcp_id"}.get(cloud, "aws_id")
 
     if args.dry_run:
-        kept_ids = {item.aws_id for item in report.kept_persistent}
+        kept_ids = {getattr(item, id_attr) for item in getattr(report, "kept_persistent", [])}
         for item in mgr.plan_destroy():
-            if item.aws_id in kept_ids:
-                print(f"  [{item.delete_order:>3}] {item.component:<14} {item.aws_id or '(sin id)'} "
+            item_id = getattr(item, id_attr)
+            if item_id in kept_ids:
+                print(f"  [{item.delete_order:>3}] {item.component:<14} {item_id or '(sin id)'} "
                       f"[CONSERVADO] gateway.dominio.eip_persistente=true")
                 continue
-            print(f"  [{item.delete_order:>3}] {item.component:<14} {item.aws_id or '(sin id)'} "
+            print(f"  [{item.delete_order:>3}] {item.component:<14} {item_id or '(sin id)'} "
                   f"managed_by_us={item.managed_by_us}")
         return 0
 
     print(f"\n[REPORTE] Éxitos: {len(report.succeeded)} | Fallos: {len(report.failed)} | "
           f"Omitidos (no nuestros): {len(report.skipped_not_ours)} | "
-          f"Conservados (dominio.eip_persistente): {len(report.kept_persistent)}")
-    for item in report.kept_persistent:
-        print(f"  [CONSERVADO] {item.component} {item.aws_id} (gateway.dominio.eip_persistente=true)")
+          f"Conservados (dominio.eip_persistente): {len(getattr(report, 'kept_persistent', []))}")
+    for item in getattr(report, "kept_persistent", []):
+        print(f"  [CONSERVADO] {item.component} {getattr(item, id_attr)} (gateway.dominio.eip_persistente=true)")
     for failure in report.failed:
         item = failure["item"]
-        print(f"  [FALLO] {item.component} {item.aws_id}: {failure['error']}")
+        print(f"  [FALLO] {item.component} {getattr(item, id_attr)}: {failure['error']}")
     for action in report.manual_actions_required:
         print(f"  [MANUAL] {action}")
 
@@ -446,17 +595,21 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
     # ver generate_infra.py fase 'network'): best-effort, nunca bloquea el
     # resto de la destrucción. Si nunca se creó (credenciales del despliegue
     # sin permiso IAM), esto simplemente no encuentra nada que borrar.
-    try:
-        from aws_iam_worker_control import delete_worker_control_user
+    # Concepto EXCLUSIVO de AWS (IAM) -confirmado en un despliegue real: para
+    # Azure 'mgr' es un AzureNetworkManager sin atributo 'session', así que
+    # esto emitía un WARNING falso en cada destroy que no era AWS.
+    if cloud == "aws":
+        try:
+            from aws_iam_worker_control import delete_worker_control_user
 
-        tags_ob = red.get("tags_obligatorios", {}) or {}
-        delete_worker_control_user(
-            mgr.session,
-            cliente_id=tags_ob.get("cliente_id", cliente["id"]),
-            entorno=tags_ob.get("entorno", cliente["entorno"]),
-        )
-    except Exception as exc:  # noqa: BLE001 - best-effort
-        print(f"[WARNING] No se pudo limpiar el usuario IAM de control de workers: {exc}")
+            tags_ob = red.get("tags_obligatorios", {}) or {}
+            delete_worker_control_user(
+                mgr.session,
+                cliente_id=tags_ob.get("cliente_id", cliente["id"]),
+                entorno=tags_ob.get("entorno", cliente["entorno"]),
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            print(f"[WARNING] No se pudo limpiar el usuario IAM de control de workers: {exc}")
 
     return 0 if report.ok else 2
 
@@ -482,6 +635,41 @@ def main() -> int:
         return 1
 
     if args.scan_orphans:
+        cloud = config["red_y_aislamiento"].get("cloud", "aws")
+        if cloud == "azure":
+            orphans = scan_orphans_azure(config)
+            print_orphans_azure(orphans)
+            if args.purge_orphans:
+                if not args.yes:
+                    print("[ABORTADO] --purge-orphans requiere --yes.")
+                    return 1
+                purge_orphans_azure(orphans)
+            return 0
+
+        if cloud == "gcp":
+            # ⚠️ Teórico, no probado en ejecución. GcpNetworkManager.scan_orphans()
+            # ya lista huérfanos reales (ver scripts/gcp_network.py), pero
+            # --purge-orphans NO está implementado todavía para GCP -bórralos a
+            # mano con 'gcloud compute <tipo> delete <nombre>' hasta que se
+            # implemente y verifique contra un proyecto real.
+            from gcp_network import GcpNetworkManager
+
+            spec = build_network_spec_from_config(config)
+            mgr = GcpNetworkManager(spec, deployment_id="scan-orphans-temporal")
+            orphans = mgr.scan_orphans()
+            if not orphans:
+                print("[OK] No se encontraron recursos huérfanos de sooniverse en el proyecto/región.")
+            else:
+                print(f"\n{'TIPO':<20} ID")
+                print("-" * 100)
+                for o in orphans:
+                    print(f"{o['type']:<20} {o['gcp_id']}")
+            if args.purge_orphans:
+                print("[ABORTADO] --purge-orphans no está implementado para GCP en esta versión "
+                      "(implementación teórica, no probada). Bórralos manualmente con 'gcloud'.")
+                return 1
+            return 0
+
         region = config["red_y_aislamiento"]["region"]
         aws_profile = config["red_y_aislamiento"].get("aws_profile")
         orphans = scan_orphans(region, aws_profile=aws_profile)

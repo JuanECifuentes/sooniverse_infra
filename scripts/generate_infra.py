@@ -38,6 +38,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from cloud_remote import remote_root_for, remote_user_for  # noqa: E402
+
 # Con stdout/stderr redirigidos a un archivo (el patrón real de uso: 'nohup
 # ... --run > deploy.log 2>&1 &'), Python usa buffering POR BLOQUE en vez de
 # por línea -confirmado en un despliegue real: los `print()` de ESTE script
@@ -77,10 +79,16 @@ ENDPOINTS_HEALTH_TIMEOUT_SECONDS = 480
 ENDPOINTS_HEALTH_POLL_INTERVAL_SECONDS = 20
 # `sky launch --retry-until-up` (fase 'workers') no tiene límite propio: sin
 # esto, capacidad GPU que nunca aparece deja el despliegue colgado para
-# siempre. 25 min cubre instancia + descarga de pesos por NAT con margen; con
-# WORKER_LAUNCH_MAX_ATTEMPTS=2 el peor caso total queda acotado en ~50 min +
-# backoff antes de fallar con un error explícito.
-WORKER_LAUNCH_TIMEOUT_SECONDS = 1500
+# siempre. Confirmado en un despliegue real en Azure: una imagen pública
+# 'canonical:...' sin conda/uv/Docker preinstalados (a diferencia de la AMI
+# usada en AWS) necesita >25 min solo para el runtime bootstrap de SkyPilot
+# (miniconda + uv + ray + rueda de skypilot, todo por red, ANTES de que
+# 'setup:' llegue siquiera a instalar Docker) -verificado por SSH directo al
+# worker mientras estaba en INIT: sin locks de apt, sin errores, cloud-init ya
+# terminado, solo un 'uv pip install' aún corriendo. 40 min da margen real sin
+# ocultar un cuelgue genuino (WORKER_LAUNCH_MAX_ATTEMPTS sigue acotando el
+# peor caso).
+WORKER_LAUNCH_TIMEOUT_SECONDS = 2400
 WORKER_LAUNCH_MAX_ATTEMPTS = 2
 # Mismo problema que WORKER_LAUNCH_TIMEOUT_SECONDS pero en la fase 'gateway':
 # `GATEWAY_SETUP_SCRIPT` corre `apt-get update`/`apt-get install` e imágenes
@@ -100,6 +108,17 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "config_global.yaml"
 # 'concurrencia'; el razonamiento del valor está en config_global.yaml.
 DEFAULT_MAX_NUM_SEQS = 16
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
+
+# workloads[].runtime_vllm.<campo> -> nombre de la env var que WORKER_RUN_SCRIPT
+# exporta a 'docker compose' (ver TopologyBuilder.build_worker). Ausente/None =
+# no se exporta y el entrypoint/compose usa su propio default.
+RUNTIME_VLLM_ENV_MAP = {
+    "dtype": "DTYPE",
+    "kv_cache_dtype": "KV_CACHE_DTYPE",
+    "enforce_eager": "ENFORCE_EAGER",
+    "mamba_ssm_cache_dtype": "MAMBA_SSM_CACHE_DTYPE",
+    "attention_backend": "VLLM_ATTENTION_BACKEND",
+}
 
 # Rampa por defecto del benchmark de capacidad (sección 'capacidad').
 DEFAULT_NIVELES_CONCURRENCIA = [1, 2, 4, 8, 16]
@@ -131,7 +150,9 @@ def artifacts_dir_for(config_path: Path, config: Dict[str, Any]) -> Path:
     return per_client_dir
 
 
-REMOTE_ROOT = "/home/ubuntu/sooniverse_infra"
+# REMOTE_ROOT ya NO es una constante: varía por nube (usuario SSH que SkyPilot crea
+# en el Gateway/Workers -'ubuntu' en AWS, 'azureuser' en Azure, 'gcpuser' en GCP,
+# ver scripts/cloud_remote.py). Usa remote_root_for(cloud) / remote_user_for(cloud).
 
 
 class ConfigValidationError(Exception):
@@ -154,8 +175,18 @@ class ConfigValidator:
         "usage-based-routing",
         "usage-based-routing-v2",
     }
+    # "aws" es el default histórico e implícito: ningún config_global.yaml
+    # existente trae 'cloud', así que su ausencia debe seguir comportándose
+    # exactamente igual que hoy (ver ConfigValidator._validate_red).
+    ALLOWED_CLOUDS = {"aws", "azure", "gcp"}
     ALLOWED_GESTION_RED = {"auto", "existente"}
     ALLOWED_NAT_MODOS = {"single", "per-az", "none"}
+    # Azure NAT Gateway se asocia a nivel de subred, sin el concepto "per-az" de
+    # AWS (las subredes de Azure no son zonales) -ver scripts/azure_network.py.
+    ALLOWED_NAT_MODOS_AZURE = {"single", "none"}
+    # GCP: mismo motivo que Azure (subredes REGIONALES, no zonales) -ver
+    # scripts/gcp_network.py. Implementación teórica, no probada en ejecución.
+    ALLOWED_NAT_MODOS_GCP = {"single", "none"}
     ALLOWED_TLS_MODOS = {"self-signed", "letsencrypt", "acm"}
     # 'segun_capacidades' (default): la verdad observada en sooniverse.model_capability
     # decide. 'activado'/'desactivado': escape manual del operador.
@@ -221,6 +252,16 @@ class ConfigValidator:
                 "Falta la sección obligatoria 'red_y_aislamiento'."
             )
 
+        # 'cloud' es NUEVO y opcional: ausente = 'aws' (comportamiento histórico,
+        # ningún config_global.yaml existente lo trae). No confundir con
+        # 'cliente.modo' (byoc|hosted, quién es dueño de la cuenta) -'cloud' es
+        # ortogonal: EN QUÉ nube se despliega.
+        cloud = red.get("cloud", "aws")
+        if cloud not in cls.ALLOWED_CLOUDS:
+            raise ConfigValidationError(
+                f"'red_y_aislamiento.cloud' inválido: '{cloud}'. Permitidos: {cls.ALLOWED_CLOUDS}"
+            )
+
         if not red.get("region"):
             raise ConfigValidationError("Falta 'red_y_aislamiento.region'.")
 
@@ -241,6 +282,11 @@ class ConfigValidator:
             )
 
         if gestion_red == "existente":
+            if cloud != "aws":
+                raise ConfigValidationError(
+                    "'red_y_aislamiento.gestion_red: existente' (red pre-creada a mano) todavía no está "
+                    f"implementado para 'cloud: {cloud}' -solo 'auto' (AzureNetworkManager crea la red)."
+                )
             # Modo legado: la VPC/SGs ya existen y se referencian por nombre.
             if privada and not red.get("vpc_name"):
                 print(
@@ -250,8 +296,13 @@ class ConfigValidator:
                 )
             return
 
-        # gestion_red == "auto": AwsNetworkManager crea la VPC; validar el resto del contrato.
-        cls._validate_red_auto(red)
+        # gestion_red == "auto": *NetworkManager crea la red; validar el resto del contrato.
+        if cloud == "azure":
+            cls._validate_red_azure(red)
+        elif cloud == "gcp":
+            cls._validate_red_gcp(red)
+        else:
+            cls._validate_red_auto(red)
 
     @classmethod
     def _validate_red_auto(cls, red: Dict[str, Any]) -> None:
@@ -329,6 +380,85 @@ class ConfigValidator:
                         f"'red_y_aislamiento.subredes': los CIDR '{cidr}' y '{other}' se solapan."
                     )
             seen_networks.append(net)
+
+    @classmethod
+    def _validate_red_azure(cls, red: Dict[str, Any]) -> None:
+        """Equivalente de `_validate_red_auto` para `cloud: azure`
+        (scripts/azure_network.py::AzureNetworkManager). Reutiliza la misma
+        validación de CIDR (vía `ipaddress`); difiere en las reglas propias de
+        Azure: sin 'per-az' (subredes no zonales) y sin S3 VPC Endpoint (no
+        aplica, Azure Storage no tiene ese concepto)."""
+        vpc_cidr_raw = red.get("vpc_cidr")
+        if not vpc_cidr_raw:
+            raise ConfigValidationError("Falta 'red_y_aislamiento.vpc_cidr' (requerido en modo 'auto').")
+        try:
+            ipaddress.ip_network(vpc_cidr_raw, strict=True)
+        except ValueError as exc:
+            raise ConfigValidationError(f"'red_y_aislamiento.vpc_cidr' inválido: {exc}") from exc
+
+        nat = red.get("nat_gateway") or {}
+        if not isinstance(nat, dict):
+            raise ConfigValidationError("'red_y_aislamiento.nat_gateway' debe ser un mapa.")
+        nat_modo = nat.get("modo", "single")
+        if nat_modo not in cls.ALLOWED_NAT_MODOS_AZURE:
+            raise ConfigValidationError(
+                f"'red_y_aislamiento.nat_gateway.modo' inválido para Azure: '{nat_modo}'. "
+                f"Permitidos: {cls.ALLOWED_NAT_MODOS_AZURE} ('per-az' no existe en Azure NAT Gateway, "
+                "que se asocia a nivel de subred)."
+            )
+
+        privada = red.get("workers_en_subred_privada", True)
+        if privada and nat_modo == "none":
+            raise ConfigValidationError(
+                "'workers_en_subred_privada: true' con 'nat_gateway.modo: none' en Azure deja a los "
+                "workers sin salida a internet para descargar el modelo (no hay equivalente a "
+                "'vpc_endpoints.s3' que lo compense en esta versión)."
+            )
+
+    @classmethod
+    def _validate_red_gcp(cls, red: Dict[str, Any]) -> None:
+        """Equivalente de `_validate_red_azure` para `cloud: gcp`
+        (scripts/gcp_network.py::GcpNetworkManager). ⚠️ Implementación
+        teórica, no probada contra un proyecto GCP real -ver el docstring de
+        gcp_network.py."""
+        vpc_cidr_raw = red.get("vpc_cidr")
+        if not vpc_cidr_raw:
+            raise ConfigValidationError("Falta 'red_y_aislamiento.vpc_cidr' (requerido en modo 'auto').")
+        try:
+            ipaddress.ip_network(vpc_cidr_raw, strict=True)
+        except ValueError as exc:
+            raise ConfigValidationError(f"'red_y_aislamiento.vpc_cidr' inválido: {exc}") from exc
+
+        azs = red.get("azs", 1)
+        if azs != 1:
+            raise ConfigValidationError(
+                f"'red_y_aislamiento.azs' = {azs} no soportado en GCP: las subredes son REGIONALES, "
+                "no zonales (SkyPilot elige la zona dentro de la región por su cuenta). Usa 'azs: 1'."
+            )
+
+        nat = red.get("nat_gateway") or {}
+        if not isinstance(nat, dict):
+            raise ConfigValidationError("'red_y_aislamiento.nat_gateway' debe ser un mapa.")
+        nat_modo = nat.get("modo", "single")
+        if nat_modo not in cls.ALLOWED_NAT_MODOS_GCP:
+            raise ConfigValidationError(
+                f"'red_y_aislamiento.nat_gateway.modo' inválido para GCP: '{nat_modo}'. "
+                f"Permitidos: {cls.ALLOWED_NAT_MODOS_GCP} ('per-az' no existe: Cloud NAT se asocia "
+                "a un Cloud Router regional, sin concepto de zona)."
+            )
+
+        privada = red.get("workers_en_subred_privada", True)
+        if privada and nat_modo == "none":
+            raise ConfigValidationError(
+                "'workers_en_subred_privada: true' con 'nat_gateway.modo: none' en GCP deja a los "
+                "workers sin salida a internet para descargar el modelo (Private Google Access solo "
+                "cubre las APIs de Google, no salida general a internet)."
+            )
+
+        if not red.get("gcp_project"):
+            raise ConfigValidationError(
+                "Falta 'red_y_aislamiento.gcp_project' (ID del proyecto GCP; requerido para 'cloud: gcp')."
+            )
 
     @classmethod
     def _validate_gateway(cls, config: Dict[str, Any]) -> None:
@@ -439,6 +569,19 @@ class ConfigValidator:
         if not dominio_cfg.get("habilitado", False):
             return
 
+        # Soportado en AWS y Azure (Public IP/Elastic IP dedicada y persistente
+        # + certbot/Let's Encrypt, ver azure_network.py::ensure_gateway_public_ip
+        # y aws_network.py::ensure_gateway_eip). GCP queda pendiente: sin una
+        # dirección externa estática ni el baile de reasignación de IP
+        # implementados todavía en gcp_network.py (Fase 7 del plan).
+        cloud = (config.get("red_y_aislamiento") or {}).get("cloud", "aws")
+        if cloud not in ("aws", "azure"):
+            raise ConfigValidationError(
+                f"'gateway.dominio.habilitado: true' no está implementado todavía para 'cloud: {cloud}' "
+                "(dominio propio + TLS real: AWS y Azure sí, GCP todavía no). Usa 'tls.modo: self-signed' "
+                "o deja 'gateway.dominio.habilitado: false'."
+            )
+
         disponibles = dominio_cfg.get("disponibles") or []
         if not isinstance(disponibles, list) or not disponibles:
             raise ConfigValidationError(
@@ -520,6 +663,20 @@ class ConfigValidator:
             )
 
         vistos = set()
+        # Colisión de nombre de clúster SkyPilot: TopologyBuilder.worker_cluster()
+        # normaliza el 'id' (minúsculas, '.'/'_' -> '-'), así que dos 'id'
+        # LITERALMENTE distintos (ej. "qwen3.5-llm" y "qwen3-5-llm") pueden
+        # producir el MISMO nombre de clúster -el segundo 'sky launch' pisaría
+        # al primero en silencio. La comprobación de 'wl_id in vistos' de
+        # arriba no lo detecta porque compara el 'id' crudo, no el normalizado.
+        clusters_vistos: Dict[str, str] = {}
+        # Colisión de 'nombre_publico': dos workloads (mismo modelo o no)
+        # publicando el mismo nombre se fusionan en un único model_name de
+        # LiteLLM -el router los trataría como intercambiables (ver
+        # render_litellm_config.py::build_model_list). No hay caso de uso
+        # legítimo para esto: si es el mismo modelo, la forma correcta de
+        # sumar capacidad es 'replicas', no un segundo workload.
+        nombres_publicos_vistos: Dict[str, str] = {}
         for idx, wl in enumerate(workloads):
             if not isinstance(wl, dict):
                 raise ConfigValidationError(
@@ -532,6 +689,44 @@ class ConfigValidator:
             if wl_id in vistos:
                 raise ConfigValidationError(f"'workloads[].id' duplicado: '{wl_id}'.")
             vistos.add(wl_id)
+
+            cluster_normalizado = str(wl_id).lower().replace("_", "-").replace(".", "-")
+            if cluster_normalizado in clusters_vistos:
+                raise ConfigValidationError(
+                    f"'workloads[].id' de '{wl_id}' y '{clusters_vistos[cluster_normalizado]}' "
+                    f"producen el MISMO nombre de clúster SkyPilot ('...-{cluster_normalizado}') "
+                    "una vez normalizados (minúsculas, '.'/'_' -> '-'). Usa IDs que no colisionen "
+                    "tras esa normalización."
+                )
+            clusters_vistos[cluster_normalizado] = wl_id
+
+            nombre_publico = wl.get("nombre_publico") or wl_id
+            if nombre_publico in nombres_publicos_vistos:
+                raise ConfigValidationError(
+                    f"'workloads[].nombre_publico' duplicado: '{nombre_publico}' (workloads "
+                    f"'{nombres_publicos_vistos[nombre_publico]}' y '{wl_id}'). Dos workloads con el "
+                    "mismo nombre público se fusionan en un único modelo de LiteLLM -si es el mismo "
+                    "modelo, usa 'replicas' en un solo workload en vez de duplicar la entrada."
+                )
+            nombres_publicos_vistos[nombre_publico] = wl_id
+
+            # 'peso_balanceo' solo lo honra LiteLLM con routing_strategy:
+            # simple-shuffle (round-robin ponderado); con cualquier otra
+            # estrategia (incluida la default, latency-based-routing) el
+            # valor se lee pero NUNCA se usa -antes esto era un no-op
+            # silencioso: un operador podía fijar peso_balanceo: 3 esperando
+            # un reparto 3:1 y no pasaba nada. Avisar, no bloquear: no es un
+            # config inválido, solo ineficaz con la estrategia elegida.
+            strategy = (config.get("gateway") or {}).get(
+                "load_balancing_strategy", "latency-based-routing"
+            )
+            if wl.get("peso_balanceo", 1) != 1 and strategy != "simple-shuffle":
+                print(
+                    f"[WARNING] Workload '{wl_id}': 'peso_balanceo' != 1 pero "
+                    f"'gateway.load_balancing_strategy' es '{strategy}', que lo ignora "
+                    "-LiteLLM solo honra 'weight' con 'simple-shuffle'. El valor no tendrá "
+                    "ningún efecto sobre el reparto de carga."
+                )
 
             if wl.get("tipo_tarea") not in cls.ALLOWED_TAREAS:
                 raise ConfigValidationError(
@@ -582,8 +777,57 @@ class ConfigValidator:
                         f"Workload '{wl_id}': 'capacidades.tool_calling: true' requiere "
                         "'capacidades.tool_call_parser' (ej. 'hermes', 'qwen')."
                     )
+                # Un runner de pooling (embeddings) no genera texto ni acepta
+                # herramientas -declarar estas capacidades ahí es siempre un
+                # error de configuración, nunca una intención real.
+                if wl.get("tipo_tarea") == "embeddings":
+                    if capacidades.get("vision"):
+                        raise ConfigValidationError(
+                            f"Workload '{wl_id}': 'tipo_tarea: embeddings' no puede declarar "
+                            "'capacidades.vision: true' -un runner de pooling no genera texto."
+                        )
+                    if capacidades.get("tool_calling"):
+                        raise ConfigValidationError(
+                            f"Workload '{wl_id}': 'tipo_tarea: embeddings' no puede declarar "
+                            "'capacidades.tool_calling: true' -un runner de pooling no acepta herramientas."
+                        )
 
             cls._validate_concurrencia(wl_id, wl)
+            cls._validate_runtime_vllm(wl_id, wl)
+
+    @classmethod
+    def _validate_runtime_vllm(cls, wl_id: str, wl: Dict[str, Any]) -> None:
+        """'runtime_vllm' (opcional): overrides de bajo nivel del entrypoint vLLM
+        -DTYPE/KV_CACHE_DTYPE/ENFORCE_EAGER/MAMBA_SSM_CACHE_DTYPE/
+        VLLM_ATTENTION_BACKEND (ver RUNTIME_VLLM_ENV_MAP y build_worker()).
+        Necesario para GPUs Turing (T4): no soportan bfloat16
+        ('runtime_vllm.dtype: half') ni FlashAttention-2
+        ('runtime_vllm.attention_backend' distinto de FLASH_ATTN)."""
+        runtime_vllm = wl.get("runtime_vllm")
+        if runtime_vllm is None:
+            return
+        if not isinstance(runtime_vllm, dict):
+            raise ConfigValidationError(
+                f"Workload '{wl_id}': 'runtime_vllm' debe ser un objeto."
+            )
+        campos_desconocidos = set(runtime_vllm) - set(RUNTIME_VLLM_ENV_MAP)
+        if campos_desconocidos:
+            raise ConfigValidationError(
+                f"Workload '{wl_id}': 'runtime_vllm' tiene campo(s) desconocido(s) "
+                f"{sorted(campos_desconocidos)}. Permitidos: {sorted(RUNTIME_VLLM_ENV_MAP)}."
+            )
+        if "enforce_eager" in runtime_vllm and not isinstance(
+            runtime_vllm["enforce_eager"], bool
+        ):
+            raise ConfigValidationError(
+                f"Workload '{wl_id}': 'runtime_vllm.enforce_eager' debe ser booleano."
+            )
+        for campo in ("dtype", "kv_cache_dtype", "mamba_ssm_cache_dtype", "attention_backend"):
+            valor = runtime_vllm.get(campo)
+            if valor is not None and not isinstance(valor, str):
+                raise ConfigValidationError(
+                    f"Workload '{wl_id}': 'runtime_vllm.{campo}' debe ser texto."
+                )
 
     @classmethod
     def _validate_concurrencia(cls, wl_id: str, wl: Dict[str, Any]) -> None:
@@ -774,7 +1018,9 @@ sudo nvidia-modprobe -u -c=0
 if ! command -v docker &> /dev/null; then
     curl -fsSL https://get.docker.com -o get-docker.sh
     sudo sh get-docker.sh
-    sudo usermod -aG docker ubuntu
+    # Usuario SSH remoto: varía por nube (ubuntu/azureuser/gcpuser), ver
+    # scripts/cloud_remote.py -antes hardcodeado a 'ubuntu', roto fuera de AWS.
+    sudo usermod -aG docker {remote_user}
 fi
 
 # D. NVIDIA Container Toolkit (expone la GPU a Docker)
@@ -802,6 +1048,11 @@ echo "===> [WORKER rank ${{SKYPILOT_NODE_RANK:-0}}] Desplegando vLLM ({wl_id})"
 cd {remote_root}/docker_images/{modelo}
 
 export MODEL_NAME="${{MODEL_NAME}}"
+# Puerto del worker (workloads[].puerto en el contrato). ANTES este valor
+# viajaba en un 'VLLM_PORT' que ningún entrypoint.sh leía -los tres leen
+# 'PORT'- así que el puerto real quedaba acoplado al default hardcodeado de
+# cada imagen (8007/8008/8009) en vez de al contrato. Ahora sí llega.
+export PORT="${{PORT}}"
 export GPU_MEMORY_UTILIZATION="${{GPU_MEMORY_UTILIZATION}}"
 export MAX_MODEL_LEN="${{MAX_MODEL_LEN}}"
 export ENABLE_VISION="${{ENABLE_VISION}}"
@@ -812,10 +1063,36 @@ export TOOL_CALL_PARSER="${{TOOL_CALL_PARSER}}"
 # max_num_seqs=2: dos peticiones concurrentes por worker).
 export MAX_NUM_SEQS="${{MAX_NUM_SEQS}}"
 export MAX_NUM_BATCHED_TOKENS="${{MAX_NUM_BATCHED_TOKENS}}"
+# GPUs por réplica (workloads[].cantidad_gpus). ANTES SkyPilot pedía la
+# instancia con N GPUs pero ningún compose exportaba TENSOR_PARALLEL_SIZE ni
+# reservaba más de 1 GPU -se pagaban N GPUs y vLLM usaba solo la primera.
+export TENSOR_PARALLEL_SIZE="${{TENSOR_PARALLEL_SIZE}}"
+# Overrides de bajo nivel de vLLM (workloads[].runtime_vllm en el contrato).
+# ANTES ninguno de estos llegaba al 'docker compose' pese a que los tres
+# composes ya los aceptan como ${{VAR:-default}} -sin esto no hay forma de
+# fijar DTYPE=half en una GPU Turing (T4), que no soporta bfloat16, ni de
+# apartarse de VLLM_ATTENTION_BACKEND=FLASH_ATTN (hardcodeado en dos de los
+# tres composes, y FlashAttention-2 exige SM80+). Vacío = el compose usa su
+# propio default; solo se exporta si SkyPilot lo inyectó (ver
+# TopologyBuilder.build_worker -no todos los workloads declaran runtime_vllm).
+export DTYPE="${{DTYPE:-}}"
+export KV_CACHE_DTYPE="${{KV_CACHE_DTYPE:-}}"
+export ENFORCE_EAGER="${{ENFORCE_EAGER:-}}"
+export MAMBA_SSM_CACHE_DTYPE="${{MAMBA_SSM_CACHE_DTYPE:-}}"
+export VLLM_ATTENTION_BACKEND="${{VLLM_ATTENTION_BACKEND:-}}"
+# Tarea de vLLM (workloads[].tipo_tarea: embeddings -> --task embed). Vacío
+# para el caso normal (llm-texto); el entrypoint decide su propio default.
+export VLLM_TASK="${{VLLM_TASK:-}}"
 
-sudo docker compose up -d
+# BUG CONFIRMADO en un despliegue real: 'sudo' resetea el entorno por
+# default (Defaults env_reset en sudoers) -TODOS los 'export' de arriba
+# (incluido VLLM_ATTENTION_BACKEND=TRITON_ATTN, crítico en T4) nunca
+# llegaban a 'docker compose', que caía en silencio a los defaults
+# hardcodeados del compose. Mismo fix que GATEWAY_RUN_SCRIPT ya usa
+# ('sudo -E docker compose ...'), que por eso nunca sufrió este bug.
+sudo -E docker compose up -d
 sudo docker compose ps
-echo "===> vLLM con max_num_seqs=${{MAX_NUM_SEQS}} max_num_batched_tokens=${{MAX_NUM_BATCHED_TOKENS}}"
+echo "===> vLLM con max_num_seqs=${{MAX_NUM_SEQS}} max_num_batched_tokens=${{MAX_NUM_BATCHED_TOKENS}} tensor_parallel_size=${{TENSOR_PARALLEL_SIZE}}"
 
 # El worker solo escucha en la red interna de la VPC; LiteLLM en el Gateway lo consume.
 SELF_IP=$(hostname -I | awk '{{print $1}}')
@@ -838,7 +1115,9 @@ apt_retry update && apt_retry install -y curl jq python3-pip postgresql-client
 if ! command -v docker &> /dev/null; then
     curl -fsSL https://get.docker.com -o get-docker.sh
     sudo sh get-docker.sh
-    sudo usermod -aG docker ubuntu
+    # Usuario SSH remoto: varía por nube (ubuntu/azureuser/gcpuser), ver
+    # scripts/cloud_remote.py -antes hardcodeado a 'ubuntu', roto fuera de AWS.
+    sudo usermod -aG docker {remote_user}
 fi
 sudo systemctl enable --now docker
 sudo chmod 666 /var/run/docker.sock
@@ -951,7 +1230,10 @@ sed -i '/^CLIENTE_ID=/d;/^ENTORNO=/d' .env
 #     defecto, ver .env.example). Mismo patrón sed+append que CLIENTE_ID/ENTORNO.
 # ---------------------------------------------------------------------------
 if [ "${{TLS_ENABLED}}" = "true" ] && [ -n "${{TLS_DOMAIN}}" ]; then
-    PUBLIC_IP_PRE="$(curl -s --max-time 5 ifconfig.me || true)"
+    # Preferir la IP RESERVADA (conocida de antemano, la misma a la que
+    # apunta/apuntará el DNS) sobre la efímera de 'ifconfig.me' -ver el
+    # comentario de GATEWAY_RESERVED_IP en TopologyBuilder.build_gateway().
+    PUBLIC_IP_PRE="${{GATEWAY_RESERVED_IP:-$(curl -s --max-time 5 ifconfig.me || true)}}"
     sed -i '/^ALLOWED_HOSTS=/d;/^CSRF_TRUSTED_ORIGINS=/d;/^HTTPS_ACTIVO=/d' .env
     {{
         echo "ALLOWED_HOSTS=${{TLS_DOMAIN}},${{PUBLIC_IP_PRE}},localhost"
@@ -1103,6 +1385,11 @@ class TopologyBuilder:
         self, worker_endpoints: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         gw = self.gateway
+        # Usuario y raíz remota que SkyPilot crea en el Gateway, según la
+        # nube -ver scripts/cloud_remote.py.
+        cloud = self.red.get("cloud")
+        remote_user = remote_user_for(cloud)
+        remote_root = remote_root_for(cloud)
         tls_cfg = gw.get("tls", {}) or {}
         tls_enabled = bool(tls_cfg.get("habilitado", False))
         expose_direct = bool(gw.get("exponer_puertos_directos", False))
@@ -1119,13 +1406,23 @@ class TopologyBuilder:
                     public_ports.append(port)
 
         resources: Dict[str, Any] = {
-            "cloud": "aws",
+            "cloud": self.red.get("cloud", "aws"),
             "region": self.red["region"],
             "instance_type": gw.get("tipo_instancia", "t4g.large"),
             "disk_size": gw.get("disk_size", 100),
             "ports": public_ports,
             "labels": {**self.red.get("tags_obligatorios", {}), "rol": "gateway"},
         }
+        # 'gateway.image_id' (NO 'red_y_aislamiento.image_id', que ya usan los
+        # workers para todas las nubes -incluido AWS en producción; reusarlo
+        # aquí forzaría esa misma AMI/imagen GPU-específica sobre el Gateway
+        # CPU-only y rompería AWS). Solo aplica si el operador lo declara
+        # explícito -confirmado en un despliegue real de Azure: la imagen
+        # propia de SkyPilot ('skypilot:custom-gpu-ubuntu-v2') seguía sin
+        # capacidad en una zona donde el operador SÍ pudo aprovisionar a mano
+        # la misma SKU con la oferta pública 'canonical:ubuntu-24_04-lts'.
+        if gw.get("image_id"):
+            resources["image_id"] = gw["image_id"]
 
         envs = {
             **self._base_envs(),
@@ -1149,16 +1446,30 @@ class TopologyBuilder:
             # CSRF_TRUSTED_ORIGINS en .env antes de levantar el stack.
             "TLS_ENABLED": str(tls_enabled).lower(),
             "TLS_DOMAIN": tls_cfg.get("dominio") or "",
+            # IP pública RESERVADA en la fase 'network' (Elastic IP/Public IP
+            # dedicada), conocida ANTES de 'sky launch' -a diferencia de la IP
+            # efímera de la instancia, que SÍ cambia cuando
+            # _associate_gateway_eip() la reemplaza justo DESPUÉS de este
+            # script. CORREGIDO: antes GATEWAY_RUN_SCRIPT descubría su propia
+            # IP con 'curl ifconfig.me' para calcular ALLOWED_HOSTS/
+            # CSRF_TRUSTED_ORIGINS -capturando la IP efímera VIEJA, que el
+            # registro DNS A nunca apunta. En el primer OneShot contra una BD
+            # vacía, el admin solo podía llegar por la IP reservada (el DNS
+            # apenas se está creando), que no estaba en ninguna de las dos
+            # listas: ni el panel ni el chat (detrás del mismo login) dejaban
+            # entrar a nadie. Vacío si 'gateway.dominio.habilitado: false'
+            # (sin IP reservada que preferir; el script cae a ifconfig.me).
+            "GATEWAY_RESERVED_IP": getattr(self._network_outputs, "gateway_eip_public_ip", None) or "",
         }
 
         file_mounts = {
-            f"{REMOTE_ROOT}/docker_images/gateway": "./docker_images/gateway",
-            f"{REMOTE_ROOT}/docker_images/openwebui": "./docker_images/openwebui",
-            f"{REMOTE_ROOT}/database": "./database",
-            f"{REMOTE_ROOT}/scripts": "./scripts",
-            f"{REMOTE_ROOT}/django_metrics": "./django_metrics",
-            f"{REMOTE_ROOT}/config_global.yaml": "./config_global.yaml",
-            f"{REMOTE_ROOT}/.env": "./.env",
+            f"{remote_root}/docker_images/gateway": "./docker_images/gateway",
+            f"{remote_root}/docker_images/openwebui": "./docker_images/openwebui",
+            f"{remote_root}/database": "./database",
+            f"{remote_root}/scripts": "./scripts",
+            f"{remote_root}/django_metrics": "./django_metrics",
+            f"{remote_root}/config_global.yaml": "./config_global.yaml",
+            f"{remote_root}/.env": "./.env",
         }
 
         # Clave SSH que SkyPilot genera LOCALMENTE (máquina del operador/CI que
@@ -1177,7 +1488,7 @@ class TopologyBuilder:
             / f"{self.gateway_cluster}.key"
         )
         if gateway_ssh_key.exists():
-            file_mounts[f"{REMOTE_ROOT}/.ssh_bastion_key"] = str(gateway_ssh_key)
+            file_mounts[f"{remote_root}/.ssh_bastion_key"] = str(gateway_ssh_key)
 
         schema_dir = self.db.get("schema_dir", "database")
 
@@ -1185,13 +1496,13 @@ class TopologyBuilder:
         tls_modo = tls_cfg.get("modo", "self-signed")
         if tls_enabled and tls_modo == "self-signed":
             tls_setup = TLS_SELF_SIGNED_SETUP.format(
-                remote_root=REMOTE_ROOT,
+                remote_root=remote_root,
                 tls_domain=tls_cfg.get("dominio") or "sooniverse.local",
             )
         elif tls_enabled and tls_modo == "letsencrypt":
             dominio_cfg = self.gateway.get("dominio") or {}
             tls_setup = TLS_LETSENCRYPT_SETUP.format(
-                remote_root=REMOTE_ROOT,
+                remote_root=remote_root,
                 tls_domain=tls_cfg["dominio"],
                 email_acme=tls_cfg["email_acme"],
                 staging_flag="--staging" if dominio_cfg.get("staging", False) else "",
@@ -1209,10 +1520,10 @@ class TopologyBuilder:
             "file_mounts": file_mounts,
             "envs": envs,
             "setup": GATEWAY_SETUP_SCRIPT.format(
-                remote_root=REMOTE_ROOT, tls_setup=tls_setup
+                remote_root=remote_root, remote_user=remote_user, tls_setup=tls_setup
             ).strip(),
             "run": GATEWAY_RUN_SCRIPT.format(
-                remote_root=REMOTE_ROOT, schema_dir=schema_dir
+                remote_root=remote_root, schema_dir=schema_dir
             ).strip(),
         }
 
@@ -1220,9 +1531,15 @@ class TopologyBuilder:
     def build_worker(self, wl: Dict[str, Any]) -> Dict[str, Any]:
         modelo = wl.get("modelo", wl["id"])
         frac = wl.get("asignacion_fraccional", {})
+        # Usuario y raíz remota del worker, según la nube -ver
+        # scripts/cloud_remote.py (antes 'ubuntu'/'/home/ubuntu' hardcodeado,
+        # roto fuera de AWS).
+        cloud = self.red.get("cloud")
+        remote_user = remote_user_for(cloud)
+        remote_root = remote_root_for(cloud)
 
         resources: Dict[str, Any] = {
-            "cloud": "aws",
+            "cloud": self.red.get("cloud", "aws"),
             "region": self.red["region"],
             "accelerators": f"{wl['accelerator']}:{wl['cantidad_gpus']}",
             "labels": {
@@ -1247,6 +1564,11 @@ class TopologyBuilder:
 
         capacidades = wl.get("capacidades", {})
         conc = wl.get("concurrencia", {}) or {}
+        # Overrides de bajo nivel de vLLM, opcionales (ver config_global.yaml).
+        # Vacío/ausente = el entrypoint/compose usa su propio default; solo se
+        # exportan al environment de SkyPilot los que el workload declara
+        # explícitamente, para no pisar el default de la imagen con "".
+        runtime_vllm = wl.get("runtime_vllm") or {}
         envs = {
             **self._base_envs(),
             "ROL_NODO": "worker",
@@ -1255,7 +1577,15 @@ class TopologyBuilder:
             "MODEL_PUBLIC_NAME": wl.get("nombre_publico", wl["id"]),
             "GPU_MEMORY_UTILIZATION": str(frac.get("gpu_memory_utilization", 0.95)),
             "MAX_MODEL_LEN": str(frac.get("max_model_len", 16384)),
-            "VLLM_PORT": str(wl["puerto"]),
+            # Puerto de la API del worker. ANTES viajaba como 'VLLM_PORT', que
+            # ningún entrypoint.sh leía (los tres leen 'PORT') -el puerto real
+            # quedaba acoplado al default hardcodeado de cada imagen en vez de
+            # a este campo del contrato.
+            "PORT": str(wl["puerto"]),
+            # GPUs por réplica -ANTES nunca llegaba a vLLM (ver
+            # WORKER_RUN_SCRIPT): se pedía la instancia con N GPUs pero vLLM
+            # arrancaba siempre con tensor-parallel-size=1.
+            "TENSOR_PARALLEL_SIZE": str(wl.get("cantidad_gpus", 1)),
             # Planificador de vLLM (ver 'concurrencia' en config_global.yaml).
             # Determina cuántas peticiones atiende el worker A LA VEZ; es el
             # parámetro que fija el techo de capacidad real de la infraestructura.
@@ -1266,27 +1596,45 @@ class TopologyBuilder:
             # Capacidades declaradas (ver config_global.yaml): el entrypoint solo
             # agrega --enable-auto-tool-choice/--limit-mm-per-prompt si aquí están
             # activas, para no anunciarle a un cliente (Open WebUI, LiteLLM) una
-            # función que este modelo no soporta de verdad.
-            "ENABLE_VISION": "1" if capacidades.get("vision", True) else "0",
+            # función que este modelo no soporta de verdad. El default es
+            # 'true' para no forzar a declarar 'capacidades' en un workload de
+            # texto -pero un runner de pooling (embeddings) nunca tiene torre
+            # de visión, así que ahí el default correcto es 'false' (el
+            # ConfigValidator ya rechaza declarar 'vision: true' explícito
+            # para 'tipo_tarea: embeddings', ver _validate_workloads).
+            "ENABLE_VISION": "1" if capacidades.get(
+                "vision", wl.get("tipo_tarea", "llm-texto") != "embeddings"
+            ) else "0",
             "ENABLE_TOOL_CALLING": "1"
             if capacidades.get("tool_calling", False)
             else "0",
             "TOOL_CALL_PARSER": capacidades.get("tool_call_parser") or "",
         }
+        # Tarea de vLLM (--task embed en vez del default --task generate).
+        # Vacío para 'llm-texto' (el entrypoint no exporta ningún --task,
+        # vLLM usa su propio default); solo se exporta para 'embeddings',
+        # que necesita un runner de pooling, no generativo.
+        if wl.get("tipo_tarea", "llm-texto") == "embeddings":
+            envs["VLLM_TASK"] = "embed"
+        # 'runtime_vllm.*' -> env var solo si el workload la declara (ver arriba).
+        for campo, env_var in RUNTIME_VLLM_ENV_MAP.items():
+            valor = runtime_vllm.get(campo)
+            if valor is not None and valor != "":
+                envs[env_var] = "1" if valor is True else ("0" if valor is False else str(valor))
 
         return {
             "name": self.worker_cluster(wl["id"]),
             "resources": resources,
             "num_nodes": wl.get("replicas", 1),
             "file_mounts": {
-                f"{REMOTE_ROOT}/docker_images/{modelo}": f"./docker_images/{modelo}",
+                f"{remote_root}/docker_images/{modelo}": f"./docker_images/{modelo}",
             },
             "envs": envs,
             "setup": GPU_SETUP_SCRIPT.format(
-                remote_root=REMOTE_ROOT, modelo=modelo
+                remote_root=remote_root, remote_user=remote_user, modelo=modelo
             ).strip(),
             "run": WORKER_RUN_SCRIPT.format(
-                remote_root=REMOTE_ROOT,
+                remote_root=remote_root,
                 modelo=modelo,
                 wl_id=wl["id"],
                 puerto=wl["puerto"],
@@ -1300,15 +1648,68 @@ class TopologyBuilder:
 
     def build_sky_gateway_config(self) -> Dict[str, Any]:
         """
-        Fuerza al Nodo Gateway a nacer en la misma VPC que los workers (con su
-        propio Security Group reservado), para que el túnel SSH bastion y las
-        rutas internas a la subred privada funcionen. Sin esto, SkyPilot puede
-        elegir la VPC por defecto de la cuenta, aislando al Gateway de los
+        Fuerza al Nodo Gateway a nacer en la misma VPC/VNet que los workers (con
+        su propio Security Group/NSG reservado), para que el túnel SSH bastion y
+        las rutas internas a la subred privada funcionen. Sin esto, SkyPilot puede
+        elegir la red por defecto de la cuenta, aislando al Gateway de los
         workers aunque ambos estén "arriba".
         """
-        aws_cfg: Dict[str, Any] = {}
         net = self._network_outputs
 
+        if self.red.get("cloud", "aws") == "azure":
+            # CORREGIDO: el esquema `azure` de SkyPilot (sky/utils/schemas.py,
+            # additionalProperties=False) NO acepta 'resource_group' ni
+            # 'security_group_name' -son 'resource_group_vm' y no existe
+            # ninguna clave para pinear NSG. Verificado contra el código
+            # instalado de SkyPilot 0.13.0 (antes esto llevaba una nota
+            # admitiendo que nunca se había confirmado contra una versión
+            # real). Con las claves viejas, CUALQUIER 'sky launch' en Azure
+            # fallaría de inmediato al validar este YAML.
+            #   - 'resource_group_vm': si no se fija, SkyPilot crea la VM en
+            #     SU PROPIO resource group por clúster (uno por Gateway, uno
+            #     por cada workload) -lo fijamos al nuestro para que todo
+            #     viva junto, igual que 'vpc_name' abajo.
+            #   - 'vpc_name' (no 'vnet_name'): el nombre de la VNet.
+            #   - Sin 'security_group_name': no hace falta -a diferencia de
+            #     AWS, nuestros NSG se asocian a nivel de SUBRED en
+            #     AzureNetworkManager._ensure_one_subnet() (Azure evalúa las
+            #     reglas del NSG de subred para CUALQUIER NIC que viva ahí,
+            #     sin necesidad de pinear un NSG por VM).
+            azure_cfg: Dict[str, Any] = {}
+            if net:
+                azure_cfg["resource_group_vm"] = net.resource_group_name
+                azure_cfg["vpc_name"] = net.vnet_name
+                # CORREGIDO: sin esto, SkyPilot crea SU PROPIA Managed
+                # Identity por cluster y le asigna el rol Contributor sobre
+                # el Resource Group (plantilla ARM embebida) -exige el
+                # permiso 'Microsoft.Authorization/roleAssignments/write',
+                # que el Service Principal de este despliegue no tiene.
+                # 'sky launch' fallaba con 'InvalidTemplateDeployment:
+                # Authorization failed ... roleAssignments', reportado por
+                # SkyPilot como el genérico "Failed to acquire resources in
+                # all zones" -confirmado en un despliegue real que NUNCA fue
+                # un problema de capacidad de GPU/VM. Pasar una identidad YA
+                # EXISTENTE (creada sin ningún rol por
+                # AzureNetworkManager.ensure_remote_identity(), ver su
+                # docstring) hace que SkyPilot omita esos recursos de la
+                # plantilla ARM por completo.
+                if getattr(net, "remote_identity_name", None):
+                    azure_cfg["remote_identity"] = net.remote_identity_name
+            return {"azure": azure_cfg} if azure_cfg else {}
+
+        if self.red.get("cloud", "aws") == "gcp":
+            # ⚠️ Teórico, no probado en ejecución (ver scripts/gcp_network.py).
+            # El esquema `gcp` de SkyPilot (additionalProperties=False) no
+            # tiene ningún equivalente a 'security_group_name' ni forma de
+            # pinear network tags a la VM -ver el docstring de gcp_network.py
+            # sobre por qué las reglas de firewall se acotan por sourceRanges
+            # en vez de por grupo/tag.
+            gcp_cfg: Dict[str, Any] = {}
+            if net:
+                gcp_cfg["vpc_name"] = net.vpc_name
+            return {"gcp": gcp_cfg} if gcp_cfg else {}
+
+        aws_cfg: Dict[str, Any] = {}
         vpc_name = net.vpc_name if net else self.red.get("vpc_name")
         sg_gateway = (
             net.sg_gateway_name if net else self.red.get("security_group_gateway")
@@ -1327,11 +1728,59 @@ class TopologyBuilder:
     ) -> Dict[str, Any]:
         """
         Genera la configuración de cliente de SkyPilot que fuerza a los workers a
-        vivir dentro de la VPC sin IP pública, tunelizando SSH por el Gateway.
+        vivir dentro de la VPC/VNet sin IP pública, tunelizando SSH por el Gateway.
         """
-        aws_cfg: Dict[str, Any] = {}
         net = self._network_outputs
 
+        if self.red.get("cloud", "aws") == "azure":
+            # Mismas claves verificadas que build_sky_gateway_config()
+            # (incluido 'remote_identity' -ver el comentario ahí).
+            azure_cfg: Dict[str, Any] = {}
+            if net:
+                azure_cfg["resource_group_vm"] = net.resource_group_name
+                azure_cfg["vpc_name"] = net.vnet_name
+                if getattr(net, "remote_identity_name", None):
+                    azure_cfg["remote_identity"] = net.remote_identity_name
+            if self.red.get("workers_en_subred_privada", True):
+                azure_cfg["use_internal_ips"] = True
+                if gateway_ip:
+                    gateway_ssh_key = (
+                        Path.home() / ".sky" / "generated" / "ssh-keys" / f"{self.gateway_cluster}.key"
+                    )
+                    if gateway_ssh_key.exists():
+                        os.chmod(gateway_ssh_key, 0o600)
+                    azure_cfg["ssh_proxy_command"] = (
+                        f"ssh -W %h:%p -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                        # CORREGIDO: el comentario original afirmaba que SkyPilot usa
+                        # 'ubuntu' "sin importar la nube" -verificado como FALSO contra
+                        # sky/templates/azure-ray.yml.j2:58 (ssh_user: azureuser). Ver
+                        # scripts/cloud_remote.py.
+                        f"-o ConnectTimeout=10 -i {gateway_ssh_key} {remote_user_for('azure')}@{gateway_ip}"
+                    )
+            return {"azure": azure_cfg} if azure_cfg else {}
+
+        if self.red.get("cloud", "aws") == "gcp":
+            # ⚠️ Teórico, no probado en ejecución. Mismas claves que
+            # build_sky_gateway_config(); sin 'security_group_name' (no existe
+            # en el esquema `gcp` de SkyPilot -ver gcp_network.py).
+            gcp_cfg: Dict[str, Any] = {}
+            if net:
+                gcp_cfg["vpc_name"] = net.vpc_name
+            if self.red.get("workers_en_subred_privada", True):
+                gcp_cfg["use_internal_ips"] = True
+                if gateway_ip:
+                    gateway_ssh_key = (
+                        Path.home() / ".sky" / "generated" / "ssh-keys" / f"{self.gateway_cluster}.key"
+                    )
+                    if gateway_ssh_key.exists():
+                        os.chmod(gateway_ssh_key, 0o600)
+                    gcp_cfg["ssh_proxy_command"] = (
+                        f"ssh -W %h:%p -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                        f"-o ConnectTimeout=10 -i {gateway_ssh_key} {remote_user_for('gcp')}@{gateway_ip}"
+                    )
+            return {"gcp": gcp_cfg} if gcp_cfg else {}
+
+        aws_cfg: Dict[str, Any] = {}
         vpc_name = net.vpc_name if net else self.red.get("vpc_name")
         if vpc_name:
             aws_cfg["vpc_name"] = vpc_name
@@ -1358,7 +1807,7 @@ class TopologyBuilder:
                     os.chmod(gateway_ssh_key, 0o600)
                 aws_cfg["ssh_proxy_command"] = (
                     f"ssh -W %h:%p -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-                    f"-o ConnectTimeout=10 -i {gateway_ssh_key} ubuntu@{gateway_ip}"
+                    f"-o ConnectTimeout=10 -i {gateway_ssh_key} {remote_user_for('aws')}@{gateway_ip}"
                 )
 
         return {"aws": aws_cfg} if aws_cfg else {}
@@ -1438,19 +1887,80 @@ def dump_yaml(data: Dict[str, Any], out_path: Path, header: bool = True) -> None
 
 def build_network_spec_from_config(config: Dict[str, Any]) -> "Any":
     """Traduce `red_y_aislamiento` + `gateway` + `workloads[].puerto` del contrato
-    a un `aws_network.NetworkSpec`. Solo tiene sentido en modo 'gestion_red: auto'."""
-    from aws_network import NetworkSpec  # import perezoso: boto3 solo hace falta aquí
-
+    a un `aws_network.NetworkSpec` (o `azure_network.AzureNetworkSpec` si
+    `red_y_aislamiento.cloud: azure`). Solo tiene sentido en modo 'gestion_red: auto'."""
     cliente = config["cliente"]
     red = config["red_y_aislamiento"]
     gw = config.get("gateway", {})
     nat = red.get("nat_gateway") or {}
-    endpoints = red.get("vpc_endpoints") or {}
     subredes = red.get("subredes") or {}
     tls = gw.get("tls") or {}
-    dominio = gw.get("dominio") or {}
 
     worker_ports = sorted({wl["puerto"] for wl in config["workloads"]})
+
+    if red.get("cloud", "aws") == "azure":
+        from azure_network import AzureNetworkSpec  # import perezoso: SDK de Azure solo hace falta aquí
+
+        dominio_azure = gw.get("dominio") or {}
+        return AzureNetworkSpec(
+            client_id=cliente["id"],
+            environment=cliente["entorno"],
+            region=red["region"],
+            vnet_cidr=red.get("vpc_cidr", "10.0.0.0/16"),
+            az_count=red.get("azs", 1),
+            public_subnet_cidrs=subredes.get("publicas"),
+            private_subnet_cidrs=subredes.get("privadas"),
+            nat_mode=nat.get("modo", "single"),
+            admin_cidrs=[red.get("cidr_admin_ssh", "0.0.0.0/0")],
+            public_cidrs=[red.get("cidr_permitido_gateway", "0.0.0.0/0")],
+            gateway_public_ports=gw.get("puertos_publicos", [80, 4000, 8000, 8080]),
+            worker_ports=worker_ports,
+            expose_direct_ports=bool(gw.get("exponer_puertos_directos", False)),
+            tls_enabled=bool(tls.get("habilitado", False)),
+            extra_tags=red.get("tags_obligatorios") or {},
+            # Dominio propio: reserva una Public IP dedicada y persistente
+            # (ver azure_network.py::ensure_gateway_public_ip). Antes esta
+            # rama no tenía forma de sobrevivir un destroy+redeploy con la
+            # misma IP, así que gateway.dominio.habilitado estaba prohibido
+            # para Azure -ver ConfigValidator._validate_dominio.
+            gateway_eip=bool(dominio_azure.get("habilitado", False)),
+            gateway_eip_persistent=bool(dominio_azure.get("eip_persistente", True)),
+            gateway_domain=dominio_azure.get("seleccionado")
+            if dominio_azure.get("habilitado")
+            else None,
+        )
+
+    if red.get("cloud", "aws") == "gcp":
+        from gcp_network import GcpNetworkSpec  # import perezoso: SDK de GCP solo hace falta aquí
+
+        # ⚠️ Teórico, no probado en ejecución (ver scripts/gcp_network.py).
+        # Sin gateway_eip/gateway_domain: dominio propio NO implementado para
+        # GCP en esta versión -ver ConfigValidator._validate_dominio, que
+        # sigue rechazando 'cloud: gcp' con 'gateway.dominio.habilitado: true'.
+        return GcpNetworkSpec(
+            client_id=cliente["id"],
+            environment=cliente["entorno"],
+            region=red["region"],
+            project_id=red.get("gcp_project", ""),
+            vnet_cidr=red.get("vpc_cidr", "10.0.0.0/16"),
+            az_count=red.get("azs", 1),
+            public_subnet_cidrs=subredes.get("publicas"),
+            private_subnet_cidrs=subredes.get("privadas"),
+            nat_mode=nat.get("modo", "single"),
+            admin_cidrs=[red.get("cidr_admin_ssh", "0.0.0.0/0")],
+            public_cidrs=[red.get("cidr_permitido_gateway", "0.0.0.0/0")],
+            gateway_public_ports=gw.get("puertos_publicos", [80, 4000, 8000, 8080]),
+            worker_ports=worker_ports,
+            expose_direct_ports=bool(gw.get("exponer_puertos_directos", False)),
+            tls_enabled=bool(tls.get("habilitado", False)),
+            extra_tags=red.get("tags_obligatorios") or {},
+            credentials_file=red.get("gcp_credentials_file"),
+        )
+
+    from aws_network import NetworkSpec  # import perezoso: boto3 solo hace falta aquí
+
+    endpoints = red.get("vpc_endpoints") or {}
+    dominio = gw.get("dominio") or {}
 
     return NetworkSpec(
         client_id=cliente["id"],
@@ -1494,10 +2004,9 @@ def load_network_outputs_from_state(
     entonces lanzaba el gateway en la VPC por defecto de la cuenta, no en la
     nuestra (bug real encontrado en una corrida de prueba real).
 
-    Devuelve None si el despliegue no tiene (todavía) VPC + ambos SGs registrados.
-    """
-    from aws_network import NetworkOutputs
-
+    Devuelve None si el despliegue no tiene (todavía) VPC + ambos SGs registrados
+    (o, en Azure, VNet + ambos NSG)."""
+    red = config.get("red_y_aislamiento", {})
     resources = state.list_resources(deployment_id)
     by_component: Dict[str, List[Dict[str, Any]]] = {}
     for res in resources:
@@ -1507,13 +2016,89 @@ def load_network_outputs_from_state(
         rows = by_component.get(component)
         return rows[0] if rows else None
 
+    cliente = config["cliente"]
+
+    if red.get("cloud", "aws") == "azure":
+        from azure_network import AzureNetworkOutputs
+
+        vnet_row = first("vnet")
+        nsg_gw_row = first("nsg-gateway")
+        nsg_wk_row = first("nsg-workers")
+        rg_row = first("resource-group")
+        subnet_pub_row = first("subnet-public")
+        subnet_priv_row = first("subnet-private")
+        if not vnet_row or not nsg_gw_row or not nsg_wk_row or not rg_row:
+            return None
+
+        def resolved_name_azure(row: Dict[str, Any], fallback_suffix: str) -> str:
+            attrs = row.get("attributes") or {}
+            return attrs.get("name") or f"sooniverse-{cliente['id']}-{cliente['entorno']}-{fallback_suffix}"
+
+        return AzureNetworkOutputs(
+            deployment_id=deployment_id,
+            resource_group_name=resolved_name_azure(rg_row, "rg"),
+            vnet_id=vnet_row["aws_id"],
+            vnet_name=resolved_name_azure(vnet_row, "vnet"),
+            public_subnet_id=(subnet_pub_row or {}).get("aws_id", ""),
+            private_subnet_id=(subnet_priv_row or {}).get("aws_id", ""),
+            nat_gateway_id=(first("natgw") or {}).get("aws_id"),
+            nsg_gateway_id=nsg_gw_row["aws_id"],
+            nsg_gateway_name=resolved_name_azure(nsg_gw_row, "gateway"),
+            nsg_workers_id=nsg_wk_row["aws_id"],
+            nsg_workers_name=resolved_name_azure(nsg_wk_row, "workers"),
+            managed_by_us=True,
+            gateway_eip_allocation_id=(first("pip-gateway") or {}).get("aws_id"),
+            gateway_eip_public_ip=((first("pip-gateway") or {}).get("attributes") or {}).get("public_ip"),
+            remote_identity_name=((first("remote-identity") or {}).get("attributes") or {}).get("name"),
+        )
+
+    if red.get("cloud", "aws") == "gcp":
+        from gcp_network import GcpNetworkOutputs
+
+        # ⚠️ Teórico, no probado en ejecución (ver scripts/gcp_network.py).
+        vpc_row = first("vpc")
+        subnet_pub_row = first("subnet-public")
+        subnet_priv_row = first("subnet-private")
+        if not vpc_row or not subnet_pub_row or not subnet_priv_row:
+            return None
+
+        def resolved_name_gcp(row: Dict[str, Any], fallback_suffix: str) -> str:
+            attrs = row.get("attributes") or {}
+            return attrs.get("name") or f"sooniverse-{cliente['id']}-{cliente['entorno']}-{fallback_suffix}"
+
+        router_row = first("router")
+        nat_row = first("nat")
+        firewall_rows = [
+            res for comp, rows in by_component.items() if comp.startswith("fw-") for res in rows
+        ]
+
+        return GcpNetworkOutputs(
+            deployment_id=deployment_id,
+            project_id=red.get("gcp_project", ""),
+            region=red["region"],
+            vpc_id=vpc_row["aws_id"],
+            vpc_name=resolved_name_gcp(vpc_row, "vpc"),
+            public_subnet_id=subnet_pub_row["aws_id"],
+            public_subnet_name=resolved_name_gcp(subnet_pub_row, "subnet-public"),
+            public_subnet_cidr=(subnet_pub_row.get("attributes") or {}).get("cidr", ""),
+            private_subnet_id=subnet_priv_row["aws_id"],
+            private_subnet_name=resolved_name_gcp(subnet_priv_row, "subnet-private"),
+            private_subnet_cidr=(subnet_priv_row.get("attributes") or {}).get("cidr", ""),
+            router_id=(router_row or {}).get("aws_id"),
+            router_name=((router_row or {}).get("attributes") or {}).get("name"),
+            nat_name=((nat_row or {}).get("attributes") or {}).get("name"),
+            firewall_ids=[res["aws_id"] for res in firewall_rows],
+            firewall_names=[(res.get("attributes") or {}).get("name", "") for res in firewall_rows],
+            managed_by_us=True,
+        )
+
+    from aws_network import NetworkOutputs
+
     vpc_row = first("vpc")
     sg_gw_row = first("sg-gateway")
     sg_wk_row = first("sg-workers")
     if not vpc_row or not sg_gw_row or not sg_wk_row:
         return None
-
-    cliente = config["cliente"]
 
     def resolved_name(row: Dict[str, Any], fallback_suffix: str) -> str:
         attrs = row.get("attributes") or {}
@@ -1665,6 +2250,14 @@ WORKLOAD_RECREATE_KEYS = {
     "modelo",
     "replicas",
     "concurrencia",
+    # CORREGIDO: ninguno de estos dos estaba en ninguna de las dos listas -un
+    # cambio de 'tipo_tarea' (ej. de 'llm-texto' a 'embeddings') o de
+    # 'runtime_vllm' (DTYPE/attention_backend/etc., necesarios para T4) se
+    # diagnosticaba como "sin cambios" y nunca relanzaba el worker, pese a
+    # que ambos son flags de ARRANQUE de vLLM -no se pueden aplicar sobre un
+    # proceso vivo, igual que 'concurrencia'.
+    "tipo_tarea",
+    "runtime_vllm",
 }
 # Campos que solo requieren re-renderizar litellm_config.yaml + reload (sin tocar SkyPilot).
 WORKLOAD_IN_PLACE_KEYS = {"nombre_publico", "peso_balanceo", "asignacion_fraccional"}
@@ -1986,7 +2579,7 @@ def _sky_down_bounded(
 
 
 def _preclean_stale_file_mounts(
-    cluster: str, aws_profile: Optional[str] = None
+    cluster: str, aws_profile: Optional[str] = None, cloud: Optional[str] = None
 ) -> None:
     """Antes de relanzar 'sky launch' sobre un clúster que pudo haber corrido
     antes (una '--run' completa repetida, o retomar tras un fallo a mitad de
@@ -1998,26 +2591,35 @@ def _preclean_stale_file_mounts(
     de tiempo para el SIGUIENTE 'sky launch' sobre el mismo clúster, que falla
     con 'Failed mounting because path exists' -confirmado en una corrida
     real. Best-effort y silencioso: si el clúster no existe todavía (primer
-    'sky launch' de siempre), el 'sky exec' simplemente falla rápido y no hay
-    nada que limpiar."""
+    'sky launch' de siempre), el 'sky exec' EN TEORÍA falla rápido y no hay
+    nada que limpiar -pero confirmado en un despliegue real que, contra un
+    clúster recién destruido (estado local de SkyPilot todavía
+    reconciliándose), 'sky exec' puede colgarse hasta el timeout en vez de
+    fallar rápido. Sin el try/except, ese cuelgue se propagaba sin capturar
+    hasta el manejador de nivel superior y tumbaba TODO el despliegue -este
+    paso es un best-effort de limpieza, nunca debería poder abortar la
+    corrida completa."""
     sky = _sky_binary()
     if not sky:
         return
-    subprocess.run(
-        [
-            sky,
-            "exec",
-            cluster,
-            "for f in .env config_global.yaml .ssh_bastion_key; do "
-            f"p={REMOTE_ROOT}/$f; "
-            '[ -f "$p" ] && [ ! -L "$p" ] && rm -f "$p"; '
-            "done; true",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=_sky_env(aws_profile),
-    )
+    try:
+        subprocess.run(
+            [
+                sky,
+                "exec",
+                cluster,
+                "for f in .env config_global.yaml .ssh_bastion_key; do "
+                f"p={remote_root_for(cloud)}/$f; "
+                '[ -f "$p" ] && [ ! -L "$p" ] && rm -f "$p"; '
+                "done; true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=_sky_env(aws_profile),
+        )
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        pass
 
 
 def _ensure_db_schema(config: Dict[str, Any], dry_run: bool = False) -> None:
@@ -2165,20 +2767,12 @@ class GatewayEipAssociationError(RuntimeError):
     """Fallo asociando la Elastic IP del Gateway a la instancia recién lanzada."""
 
 
-def _associate_gateway_eip(
+def _find_and_associate_aws_eip(
     cluster: str, allocation_id: str, region: str, aws_profile: Optional[str] = None
-) -> str:
-    """Asocia la Elastic IP reservada en la fase 'network' (gateway.dominio.
-    habilitado: true) a la instancia EC2 del Gateway recién lanzada, y reconcilia
-    el estado local de SkyPilot -asociar una EIP le cambia la IP pública de la
-    instancia, y SkyPilot sigue intentando conectarse por SSH con la IP vieja
-    hasta que se reconcilia, lo que 'sky status --refresh' NO logra por sí solo
-    (falla el chequeo de salud contra la IP vieja y deja el clúster en estado
-    'INIT' en vez de detectar la nueva IP -comprobado empíricamente). 'sky start'
-    sí reconoce y adopta la IP nueva del proveedor. Verifica con 'sky exec <gw>
-    true' antes de devolver, porque TODAS las fases siguientes (endpoints,
-    capabilities, capacidad, verify) dependen de 'sky exec' contra este mismo
-    Gateway."""
+) -> None:
+    """Encuentra la instancia EC2 del Gateway y le asocia la Elastic IP reservada
+    en la fase 'network'. Ver docstring de `_associate_gateway_eip` para el
+    porqué (reconciliación con SkyPilot) -esto solo hace el paso AWS-specific."""
     import boto3
 
     session = (
@@ -2216,6 +2810,136 @@ def _associate_gateway_eip(
         AllocationId=allocation_id, InstanceId=instance_id, AllowReassociation=True
     )
 
+
+def _find_and_associate_azure_public_ip(
+    cluster: str,
+    pip_id: str,
+    resource_group: Optional[str],
+    subscription_id: Optional[str] = None,
+) -> None:
+    """Equivalente Azure de `_find_and_associate_aws_eip`: encuentra la VM que
+    SkyPilot lanzó para `cluster` (filtrando por el mismo tag 'ray-cluster-name'
+    que usa el backend Azure de SkyPilot, sky/provision/azure/instance.py) y
+    reasigna la Public IP de su NIC a la reservada en la fase 'network'.
+
+    A diferencia de AWS (`ec2.associate_address`, un solo PUT atómico) o de
+    GCP (que exige un baile deleteAccessConfig/addAccessConfig en dos pasos),
+    Azure permite repuntar la Public IP de una NIC existente con un solo PUT
+    sobre su `ip_configuration` -no hace falta desasociar primero.
+
+    NOTA: la lógica está validada contra la documentación de
+    azure-mgmt-compute/azure-mgmt-network y contra el nombre de tag real que
+    usa SkyPilot (TAG_RAY_CLUSTER_NAME='ray-cluster-name',
+    sky/provision/constants.py), pero -igual que el resto de esta
+    implementación Azure- no se ha ejercitado todavía contra una suscripción
+    real (ver Fase 2 del plan). Primer punto a verificar en el primer
+    'sky launch' real."""
+    if not resource_group:
+        raise GatewayEipAssociationError(
+            "No se pudo determinar el Resource Group de Azure para asociar la Public IP "
+            f"del Gateway ({pip_id}): 'resource_group_name' no vino en NetworkOutputs."
+        )
+
+    from azure.mgmt.compute import ComputeManagementClient
+    from azure.mgmt.network import NetworkManagementClient
+    from azure.mgmt.network.models import PublicIPAddress
+
+    from azure_network import _default_credential  # noqa: PLC0415 - import perezoso
+
+    credential, sub_id = _default_credential(subscription_id)
+    compute_client = ComputeManagementClient(credential, sub_id)
+    network_client = NetworkManagementClient(credential, sub_id)
+
+    # BUG CONFIRMADO en un despliegue real (primera vez que este código se
+    # ejercitó -antes 'gateway.dominio.habilitado' estaba en false para todos
+    # los clientes Azure): 'ray-cluster-name'/'skypilot-cluster-name' en
+    # Azure llevan el nombre ABREVIADO/hasheado que SkyPilot genera
+    # internamente (p.ej. 'sooniverse-cliente-test-azure-7n-97e585e4'), NO el
+    # nombre lógico del clúster -mismo bug ya encontrado y arreglado en
+    # scripts/azure_worker_egress_ip.py. Se usa en su lugar el tag propio
+    # 'rol' ('gateway'/'worker', ver TopologyBuilder.build_gateway/
+    # build_worker), con el valor exacto que ya conocemos; se conserva el
+    # match por nombre de clúster como fallback por si una versión futura de
+    # SkyPilot sí usa el nombre literal.
+    vm = None
+    for candidate in compute_client.virtual_machines.list(resource_group):
+        tags = candidate.tags or {}
+        if tags.get("rol") == "gateway":
+            vm = candidate
+            break
+        for tag_key in ("ray-cluster-name", "skypilot-cluster-name"):
+            valor = tags.get(tag_key, "")
+            if valor == cluster or valor.startswith(f"{cluster}-"):
+                vm = candidate
+                break
+        if vm:
+            break
+
+    if vm is None:
+        raise GatewayEipAssociationError(
+            f"No se encontró la VM de Azure del clúster '{cluster}' en el Resource Group "
+            f"'{resource_group}' para asociar la Public IP del Gateway ({pip_id}). "
+            "El despliegue continuaría con una IP efímera."
+        )
+
+    nics = vm.network_profile.network_interfaces if vm.network_profile else []
+    if not nics:
+        raise GatewayEipAssociationError(
+            f"La VM '{vm.name}' del clúster '{cluster}' no tiene ninguna interfaz de red."
+        )
+    nic_id = nics[0].id
+    match = re.search(
+        r"/resourceGroups/([^/]+)/providers/Microsoft\.Network/networkInterfaces/([^/]+)",
+        nic_id,
+        re.IGNORECASE,
+    )
+    if not match:
+        raise GatewayEipAssociationError(f"No se pudo interpretar el ID de la NIC: {nic_id}")
+    nic_rg, nic_name = match.group(1), match.group(2)
+
+    nic = network_client.network_interfaces.get(nic_rg, nic_name)
+    if not nic.ip_configurations:
+        raise GatewayEipAssociationError(
+            f"La NIC '{nic_name}' de la VM '{vm.name}' no tiene ninguna ip_configuration."
+        )
+    # CORREGIDO: azure-mgmt-network >=33 (API 2026-01-01) rechaza dicts planos
+    # en estas llamadas -ver el mismo fix en azure_network.py, confirmado en
+    # un despliegue real (InvalidRequestContent: "ResourceDefinition").
+    nic.ip_configurations[0].public_ip_address = PublicIPAddress(id=pip_id)
+    network_client.network_interfaces.begin_create_or_update(nic_rg, nic_name, nic).result()
+
+
+def _associate_gateway_eip(
+    cluster: str,
+    allocation_id: str,
+    region: str,
+    aws_profile: Optional[str] = None,
+    cloud: str = "aws",
+    resource_group: Optional[str] = None,
+    subscription_id: Optional[str] = None,
+) -> str:
+    """Asocia la Elastic IP/Public IP reservada en la fase 'network' (gateway.
+    dominio.habilitado: true) a la instancia del Gateway recién lanzada, y
+    reconcilia el estado local de SkyPilot -asociar una IP le cambia la IP
+    pública de la instancia, y SkyPilot sigue intentando conectarse por SSH
+    con la IP vieja hasta que se reconcilia, lo que 'sky status --refresh' NO
+    logra por sí solo (falla el chequeo de salud contra la IP vieja y deja el
+    clúster en estado 'INIT' en vez de detectar la nueva IP -comprobado
+    empíricamente en AWS). 'sky start' sí reconoce y adopta la IP nueva del
+    proveedor. Verifica con 'sky exec <gw> true' antes de devolver, porque
+    TODAS las fases siguientes (endpoints, capabilities, capacidad, verify)
+    dependen de 'sky exec' contra este mismo Gateway.
+
+    Solo las ~30 líneas de "encontrar la instancia/VM y repuntar la IP" son
+    específicas de cada nube (`_find_and_associate_aws_eip`/
+    `_find_and_associate_azure_public_ip`); el resto -reconciliación con
+    SkyPilot, limpieza de file_mounts, preservación de .env remoto- es
+    compartido y NO se duplica."""
+    if cloud == "azure":
+        _find_and_associate_azure_public_ip(cluster, allocation_id, resource_group, subscription_id)
+    else:
+        _find_and_associate_aws_eip(cluster, allocation_id, region, aws_profile)
+
     sky_env = _sky_env(aws_profile)
     sky = _sky_binary()
     if sky:
@@ -2228,15 +2952,16 @@ def _associate_gateway_eip(
         )
         if restart.returncode != 0:
             raise GatewayEipAssociationError(
-                f"La Elastic IP se asoció a {instance_id}, pero 'sky start {cluster}' (para que "
-                f"SkyPilot reconozca la IP nueva) falló: {restart.stderr.strip() or restart.stdout.strip()}"
+                f"La IP se asoció al Gateway del clúster '{cluster}', pero 'sky start {cluster}' "
+                f"(para que SkyPilot reconozca la IP nueva) falló: "
+                f"{restart.stderr.strip() or restart.stdout.strip()}"
             )
 
     new_ip = _gateway_public_ip(cluster, aws_profile=aws_profile)
     if not new_ip:
         raise GatewayEipAssociationError(
-            f"La Elastic IP se asoció a {instance_id}, pero 'sky status --ip {cluster}' no devolvió "
-            "ninguna IP tras reconciliar con 'sky start'."
+            f"La IP se asoció al Gateway del clúster '{cluster}', pero 'sky status --ip {cluster}' "
+            "no devolvió ninguna IP tras reconciliar con 'sky start'."
         )
 
     if sky:
@@ -2253,7 +2978,7 @@ def _associate_gateway_eip(
                 "exec",
                 cluster,
                 "for f in config_global.yaml .ssh_bastion_key; do "
-                "p=/home/ubuntu/sooniverse_infra/$f; "
+                f"p={remote_root_for(cloud)}/$f; "
                 '[ -f "$p" ] && [ ! -L "$p" ] && rm -f "$p"; '
                 "done; true",
             ],
@@ -2270,19 +2995,33 @@ def _associate_gateway_eip(
         env_path = REPO_ROOT / ".env"
         if env_path.exists():
             payload = env_path.read_text(encoding="utf-8")
-            remote_env = "/home/ubuntu/sooniverse_infra/.env"
+            remote_env = f"{remote_root_for(cloud)}/.env"
 
             # PERO: GATEWAY_RUN_SCRIPT y ensure_openwebui_key.py (ambos ya
             # corrieron, EN ESTA MISMA fase, justo antes) le añadieron a ESE
             # .env remoto valores que solo existen ahí -PUBLIC_BASE_URL
-            # (calculado en caliente con la IP/dominio real) y
-            # OPENWEBUI_LITELLM_API_KEY (generado una vez, nunca en el .env
-            # local)-. Sobrescribir con el .env local a secas los borraría de
-            # inmediato -confirmado en un despliegue real: ambas variables
+            # (calculado en caliente con la IP/dominio real), OPENWEBUI_LITELLM_API_KEY
+            # (generado una vez, nunca en el .env local), y con dominio propio
+            # también ALLOWED_HOSTS/CSRF_TRUSTED_ORIGINS/HTTPS_ACTIVO/CHAT_URL/
+            # SOONIVERSE_PANEL_URL (calculados con la IP/dominio real, ver la
+            # sección 0.5 y 3 de GATEWAY_RUN_SCRIPT)-. Sobrescribir con el .env
+            # local a secas los borraría de inmediato -confirmado en un
+            # despliegue real: PUBLIC_BASE_URL/OPENWEBUI_LITELLM_API_KEY
             # desaparecían del .env remoto justo después de asociarse la
-            # Elastic IP-. Se preservan fusionándolos en el payload que se
-            # va a escribir.
-            preserve_keys = ("PUBLIC_BASE_URL", "OPENWEBUI_LITELLM_API_KEY")
+            # Elastic IP. Sin ALLOWED_HOSTS/CSRF_TRUSTED_ORIGINS en esta lista,
+            # el bug es más sutil pero igual de real: los contenedores YA
+            # arrancados sobreviven (ya leyeron el .env bueno al iniciar), pero
+            # cualquier cosa que los RECREE después -sync_openwebui_models.py,
+            # un reinicio de la VM, un '--only gateway' posterior- los relee del
+            # .env recién vaciado y cae a los defaults de render_gateway_stack.py
+            # ('ALLOWED_HOSTS=*', 'CSRF_TRUSTED_ORIGINS' vacío), que con HTTPS
+            # real rompe todo POST del panel -incluido el login. Se preservan
+            # fusionándolos en el payload que se va a escribir.
+            preserve_keys = (
+                "PUBLIC_BASE_URL", "OPENWEBUI_LITELLM_API_KEY",
+                "ALLOWED_HOSTS", "CSRF_TRUSTED_ORIGINS", "HTTPS_ACTIVO",
+                "CHAT_URL", "SOONIVERSE_PANEL_URL",
+            )
             remote_current = subprocess.run(
                 [sky, "exec", cluster, f"cat {remote_env} 2>/dev/null || true"],
                 capture_output=True,
@@ -2470,7 +3209,7 @@ def run_dominio_phase(
         "-v /opt/sooniverse/certbot-www:/var/www/certbot "
         "certbot/certbot certonly --webroot -w /var/www/certbot --non-interactive --agree-tos "
         f"--cert-name {dominio} -m {email} -d {dominio} --keep-until-expiring {staging_flag} "
-        f"&& cd {REMOTE_ROOT}/docker_images/gateway "
+        f"&& cd {remote_root_for(config['red_y_aislamiento'].get('cloud'))}/docker_images/gateway "
         "&& sudo docker compose exec -T proxy nginx -s reload"
     )
 
@@ -2709,18 +3448,64 @@ def deploy(
                 builder.apply_network_outputs(loaded_outputs)
 
     # --- FASE: network --------------------------------------------------------
+    cloud = red.get("cloud", "aws")
     if "network" in phases:
-        print("\n--- [RED] Red AWS (VPC/subredes/NAT/Security Groups) ---")
+        print(f"\n--- [RED] Red {cloud.upper()} (VPC-VNet/subredes/NAT/Security Groups-NSG) ---")
+        # Compara 'vpc_cidr' contra otros despliegues activos en la misma
+        # 'region' -es una simple comparación de strings/CIDR sobre
+        # config_snapshot, cloud-agnóstica: los slugs de región de AWS
+        # ("us-east-1") y Azure ("eastus") nunca coinciden entre sí, así que
+        # no hay riesgo de falsos positivos cruzando nubes.
         check_cidr_isolation(config)
         if red.get("gestion_red", "auto") == "auto" and dry_run and not deployment_id:
             # Sin despliegue previo: no hay nada que leer y, para no escribir en
-            # PostgreSQL durante un dry-run, no se instancia AwsNetworkManager
+            # PostgreSQL durante un dry-run, no se instancia el *NetworkManager
             # (su constructor abriría un deployment_id nuevo si no se le pasa uno).
-            print(
-                "[RED] --dry-run: no existe un despliegue previo para "
-                f"{config['cliente']['id']}/{config['cliente']['entorno']}/{red['region']}. "
-                "Se crearía una VPC, subredes, NAT, route tables y Security Groups nuevos."
-            )
+            print(f"[RED] --dry-run: no existe un despliegue previo para "
+                  f"{config['cliente']['id']}/{config['cliente']['entorno']}/{red['region']}. "
+                  f"Se crearía una red {cloud.upper()} nueva (VPC/VNet, subredes, NAT, Security Groups/NSG).")
+        elif red.get("gestion_red", "auto") == "auto" and cloud == "azure":
+            from azure_network import AzureNetworkManager
+
+            spec = build_network_spec_from_config(config)
+            mgr = AzureNetworkManager(spec, state=state, deployment_id=deployment_id)
+            if dry_run:
+                print("[RED] --dry-run: no se ejecuta ninguna llamada mutante a Azure.")
+                for item in mgr.plan_destroy():
+                    print(f"       (existente) {item.component} {item.azure_id}")
+            else:
+                t0 = time.monotonic()
+                network_outputs = mgr.provision()
+                print(f"[RED] ResourceGroup={network_outputs.resource_group_name} "
+                      f"VNet={network_outputs.vnet_id} ({network_outputs.vnet_name}) "
+                      f"NSG-gateway={network_outputs.nsg_gateway_id} NSG-workers={network_outputs.nsg_workers_id} "
+                      f"({time.monotonic() - t0:.1f}s)")
+                if network_outputs.gateway_eip_public_ip:
+                    print(
+                        f"[RED] Public IP del Gateway reservada: {network_outputs.gateway_eip_public_ip} "
+                        f"({network_outputs.gateway_eip_allocation_id}) -crea el registro DNS A con esta "
+                        "IP antes de continuar."
+                    )
+                builder.apply_network_outputs(network_outputs)
+                artefactos = generate_manifests(config, out_dir, builder=builder)
+        elif red.get("gestion_red", "auto") == "auto" and cloud == "gcp":
+            # ⚠️ Teórico, no probado en ejecución (ver scripts/gcp_network.py).
+            from gcp_network import GcpNetworkManager
+
+            spec = build_network_spec_from_config(config)
+            mgr = GcpNetworkManager(spec, state=state, deployment_id=deployment_id)
+            if dry_run:
+                print("[RED] --dry-run: no se ejecuta ninguna llamada mutante a GCP.")
+                for item in mgr.plan_destroy():
+                    print(f"       (existente) {item.component} {item.gcp_id}")
+            else:
+                t0 = time.monotonic()
+                network_outputs = mgr.provision()
+                print(f"[RED] VPC={network_outputs.vpc_id} ({network_outputs.vpc_name}) "
+                      f"Router={network_outputs.router_name} NAT={network_outputs.nat_name} "
+                      f"({time.monotonic() - t0:.1f}s)")
+                builder.apply_network_outputs(network_outputs)
+                artefactos = generate_manifests(config, out_dir, builder=builder)
         elif red.get("gestion_red", "auto") == "auto":
             from aws_network import AwsNetworkManager
 
@@ -2784,9 +3569,7 @@ def deploy(
                         "El botón 'Apagar'/'Arrancar' del panel quedará deshabilitado."
                     )
         else:
-            print(
-                "[SKIP] 'gestion_red: existente' -> se omite AwsNetworkManager (VPC/SGs manuales)."
-            )
+            print(f"[SKIP] 'gestion_red: existente' -> se omite *NetworkManager ({cloud}, VPC/VNet-SGs manuales).")
 
     # --- FASE: gateway ----------------------------------------------------------
     if "gateway" in phases and artefactos.get("gateway") and dry_run:
@@ -2845,7 +3628,9 @@ def deploy(
                     f"intento {attempt} (evita heredar estado a medio camino)..."
                 )
                 _sky_down_bounded(builder.gateway_cluster, red.get("aws_profile"))
-            _preclean_stale_file_mounts(builder.gateway_cluster, red.get("aws_profile"))
+            _preclean_stale_file_mounts(
+                builder.gateway_cluster, red.get("aws_profile"), red.get("cloud")
+            )
 
         t0 = time.monotonic()
         _run_sky_with_retry(
@@ -2873,8 +3658,12 @@ def deploy(
                     eip_alloc_id,
                     red["region"],
                     red.get("aws_profile"),
+                    cloud=cloud,
+                    resource_group=getattr(net_outputs, "resource_group_name", None),
+                    subscription_id=os.environ.get("AZURE_SUBSCRIPTION_ID"),
                 )
-                print(f"[GATEWAY] Elastic IP asociada: {associated_ip}")
+                ip_label = "Elastic IP" if cloud == "aws" else "Public IP"
+                print(f"[GATEWAY] {ip_label} asociada: {associated_ip}")
                 if state and deployment_id:
                     state.log_event(
                         deployment_id,
@@ -2899,6 +3688,38 @@ def deploy(
             builder.gateway_cluster, aws_profile=red.get("aws_profile")
         )
         print(f"[INFO] IP pública del Gateway: {gateway_ip or 'no disponible'}")
+
+    # --- Bootstrap TEMPRANO de Open WebUI (best-effort, nunca aborta) ----------
+    # CORREGIDO: el bootstrap de la cuenta técnica (bootstrap_models.py, vía
+    # sync_openwebui_models.py) solo corría al FINAL de la fase 'capabilities'
+    # -muchos minutos después de que el chat/panel ya fueran alcanzables desde
+    # la fase 'gateway' (docker compose up -d corre aquí mismo). Open WebUI
+    # asciende automáticamente al PRIMER usuario que se autentica a admin: si
+    # un humano abría el chat/panel antes de que el bootstrap corriera, se
+    # quedaba con ese ascenso y la cuenta técnica recibía 401 en cualquier
+    # llamada de administración para siempre (mitigado parcialmente por
+    # ensure_bootstrap_is_admin(), pero solo cuando el bootstrap SÍ llega a
+    # correr). Correrlo aquí -apenas el stack está arriba, sin esperar a que
+    # workers/endpoints/capabilities terminen- cierra esa ventana de minutos a
+    # segundos. Es idempotente y best-effort (igual que su invocación tardía
+    # en 'capabilities', que sigue ahí para sincronizar los modelos reales una
+    # vez los workers existen): sin workers todavía, esta corrida temprana no
+    # tiene modelos que sincronizar, pero SÍ reclama el primer-usuario y
+    # corrige el rol de la cuenta técnica antes de que nadie más pueda llegar.
+    if "gateway" in phases and artefactos.get("gateway") and not dry_run:
+        sync_owui_script = REPO_ROOT / "scripts" / "sync_openwebui_models.py"
+        if sync_owui_script.exists():
+            print("\n--- [GATEWAY] Bootstrap temprano de Open WebUI (cierra la carrera del primer usuario) ---")
+            early_cmd = [
+                sys.executable, str(sync_owui_script), "--config", str(config_path), "--apply",
+            ]
+            print(f"[EXEC] {' '.join(early_cmd)}")
+            early_result = subprocess.run(early_cmd)
+            if early_result.returncode != 0:
+                print(
+                    f"[WARNING] Bootstrap temprano de Open WebUI falló (código {early_result.returncode}); "
+                    "se reintentará al final de la fase 'capabilities'."
+                )
 
     # --- FASE: dominio (DNS + certbot; best-effort, nunca aborta) ---------------
     dominio_cfg_top = config.get("gateway", {}).get("dominio") or {}
@@ -2953,6 +3774,41 @@ def deploy(
                 "aws_profile"
             ]  # BYOC, ver comentario en fase [GATEWAY]
 
+        # Workaround confirmado con Azure Network Watcher (connectionStatus=
+        # Unreachable, 316/316 sondas, sin NSG/ruteo involucrados): el NAT
+        # Gateway Standard de esta suscripción/región no funciona en el plano
+        # de datos pese a 'Succeeded' en la API. Sin esto, el bootstrap de
+        # runtime de SkyPilot (miniconda/uv/ray, DENTRO del propio 'sky
+        # launch') nunca consigue salida a internet y el worker se queda
+        # colgado para siempre. 'azure_worker_egress_ip.py' corre en paralelo
+        # y adjunta una Public IP de SOLO SALIDA a la NIC del worker apenas
+        # aparece -'use_internal_ips'/el túnel por el Gateway siguen
+        # intactos, el NSG de workers sigue bloqueando toda entrada que no
+        # venga de la VNet (ver el docstring de ese script para el porqué).
+        # Se relanza en CADA intento (incluidos los reintentos): un retry
+        # destruye y recrea la VM con un nombre nuevo (ver
+        # `_before_worker_attempt` más abajo), y el watcher del intento
+        # anterior ya salió tras adjuntar la IP a la VM vieja.
+        rg_for_egress = None
+        if red.get("cloud") == "azure":
+            net_outputs_for_egress = getattr(builder, "_network_outputs", None)
+            rg_for_egress = getattr(net_outputs_for_egress, "resource_group_name", None)
+
+        def _spawn_egress_ip_watcher(_workload_id: str) -> Optional[subprocess.Popen]:
+            if not rg_for_egress:
+                return None
+            egress_script = REPO_ROOT / "scripts" / "azure_worker_egress_ip.py"
+            return subprocess.Popen(
+                [
+                    sys.executable,
+                    str(egress_script),
+                    "--resource-group", rg_for_egress,
+                    "--workload-id", _workload_id,
+                    "--region", red["region"],
+                    "--timeout", str(WORKER_LAUNCH_TIMEOUT_SECONDS),
+                ]
+            )
+
         for wl in config["workloads"]:
             cluster = builder.worker_cluster(wl["id"])
             manifest = artefactos["workers"][wl["id"]]
@@ -2975,11 +3831,34 @@ def deploy(
             # proceso a los WORKER_LAUNCH_TIMEOUT_SECONDS y lo cuenta como un
             # intento fallido más (máximo WORKER_LAUNCH_MAX_ATTEMPTS en total),
             # así que el peor caso queda acotado en vez de indefinido.
+            # BUG CONFIRMADO en un despliegue real (Azure): a diferencia del
+            # reintento del Gateway (`_before_gateway_attempt`), este no tenía
+            # `before_attempt` -un timeout que mataba el 'sky launch' local a
+            # mitad del runtime bootstrap dejaba la VM remota con el proceso
+            # de setup muerto (SSH directo al worker lo confirmó: sin Docker,
+            # sin ningún proceso de setup activo, uptime sano) y el segundo
+            # intento heredaba ese estado a medio camino en vez de arrancar
+            # limpio, fallando de la misma forma. Mismo fix que el Gateway:
+            # destruir y dejar que 'sky launch' recree desde cero en cada
+            # reintento (no en el primer intento).
+            def _before_worker_attempt(
+                attempt: int, _cluster: str = cluster, _workload_id: str = wl["id"]
+            ) -> None:
+                if attempt > 1:
+                    print(
+                        f"[WORKERS] Recreando '{_cluster}' antes del intento "
+                        f"{attempt} (evita heredar estado a medio camino)..."
+                    )
+                    _sky_down_bounded(_cluster, red.get("aws_profile"))
+                _preclean_stale_file_mounts(_cluster, red.get("aws_profile"), red.get("cloud"))
+                _spawn_egress_ip_watcher(_workload_id)
+
             _run_sky_with_retry(
                 ["launch", "-y", "--retry-until-up", "-c", cluster, str(manifest)],
                 env=worker_env,
                 max_attempts=WORKER_LAUNCH_MAX_ATTEMPTS,
                 timeout=WORKER_LAUNCH_TIMEOUT_SECONDS,
+                before_attempt=_before_worker_attempt,
             )
             if state and deployment_id:
                 state.log_event(
@@ -3310,17 +4189,12 @@ def main() -> int:
                 dry_run=args.dry_run,
             )
         else:
-            print("\n[INFO] Para aprovisionar la topología en AWS:")
+            cloud_label = config["red_y_aislamiento"].get("cloud", "aws").upper()
+            print(f"\n[INFO] Para aprovisionar la topología en {cloud_label}:")
             print("       python scripts/generate_infra.py --run")
-            print(
-                "       python scripts/generate_infra.py --run --dry-run          # plan, sin tocar AWS"
-            )
-            print(
-                "       python scripts/generate_infra.py --run --only network     # solo la capa de red"
-            )
-            print(
-                "       python scripts/generate_infra.py --run --only gateway     # solo el gateway"
-            )
+            print(f"       python scripts/generate_infra.py --run --dry-run          # plan, sin tocar {cloud_label}")
+            print("       python scripts/generate_infra.py --run --only network     # solo la capa de red")
+            print("       python scripts/generate_infra.py --run --only gateway     # solo el gateway")
 
     except ConfigValidationError as e:
         print(f"\n[ERROR DE CONFIGURACIÓN] {e}", file=sys.stderr)

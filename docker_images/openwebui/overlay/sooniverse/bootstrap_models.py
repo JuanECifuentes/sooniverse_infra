@@ -186,6 +186,58 @@ def authenticate() -> str:
     )
 
 
+def _promote_email_to_admin(email: str, etiqueta: str) -> Optional[bool]:
+    """Pone role='admin' en la fila `sooniverse."user"` de `email` si existe y
+    todavía no lo es. Devuelve True si promovió, False si no hizo falta (ya
+    era admin, o la fila no existe todavía -esta cuenta nunca inició sesión
+    vía SSO-), None si no se pudo ni siquiera intentar (sin psycopg2, sin
+    conexión). `etiqueta` es solo para los mensajes de log.
+
+    Compartido por ensure_bootstrap_is_admin() (cuenta técnica) y
+    ensure_django_admin_is_owui_admin() (admin humano del panel) -misma
+    lógica de conexión/search_path, distinto email objetivo."""
+    try:
+        import psycopg2
+    except ImportError:
+        return None
+
+    try:
+        conn = psycopg2.connect(
+            dbname=os.environ["DB_NAME"], user=os.environ["DB_USER"],
+            password=os.environ["DB_PASSWORD"], host=os.environ["DB_HOST"],
+            port=os.environ["DB_PORT"], connect_timeout=10,
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort, no debe tumbar el bootstrap
+        print(f"[WARNING] No se pudo conectar a PostgreSQL para verificar el rol de {etiqueta}: {exc}")
+        return None
+
+    # Open WebUI vive en el esquema DATABASE_SCHEMA (ver docker-compose.yml:
+    # 'sooniverse', no 'public') -confirmado en un despliegue real: sin fijar
+    # el search_path aquí, esta conexión psycopg2 (sin el 'options=-csearch_path'
+    # que sí lleva el DATABASE_URL de Open WebUI) mira 'public.user', que no
+    # existe, y la promoción falla siempre con 'relation "user" does not
+    # exist' -dejando a la cuenta sin admin para siempre si otra persona ganó
+    # la carrera del primer login (ver docstring de ensure_bootstrap_is_admin).
+    schema = os.environ.get("DATABASE_SCHEMA", "public")
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(f'SET search_path TO "{schema}", public')
+                cur.execute(
+                    'UPDATE "user" SET role = %s WHERE email = %s AND role <> %s',
+                    ("admin", email, "admin"),
+                )
+                promoted = cur.rowcount > 0
+        if promoted:
+            print(f"[bootstrap] {etiqueta} ('{email}') promovida a admin en Open WebUI.")
+        return promoted
+    except Exception as exc:  # noqa: BLE001 - p.ej. la tabla 'user' aún no existe
+        print(f"[WARNING] No se pudo verificar/corregir el rol de {etiqueta}: {exc}")
+        return None
+    finally:
+        conn.close()
+
+
 def ensure_bootstrap_is_admin() -> bool:
     """Autopromueve la cuenta técnica de bootstrap a admin en la tabla `user`
     de Open WebUI si quedó como 'user'.
@@ -204,46 +256,25 @@ def ensure_bootstrap_is_admin() -> bool:
 
     Devuelve True si promovió a alguien (quien llame debe re-autenticarse
     para obtener un token que refleje el rol nuevo)."""
-    try:
-        import psycopg2
-    except ImportError:
-        return False
+    return bool(_promote_email_to_admin(BOOTSTRAP_EMAIL, "la cuenta técnica de bootstrap"))
 
-    try:
-        conn = psycopg2.connect(
-            dbname=os.environ["DB_NAME"], user=os.environ["DB_USER"],
-            password=os.environ["DB_PASSWORD"], host=os.environ["DB_HOST"],
-            port=os.environ["DB_PORT"], connect_timeout=10,
-        )
-    except Exception as exc:  # noqa: BLE001 - best-effort, no debe tumbar el bootstrap
-        print(f"[WARNING] No se pudo conectar a PostgreSQL para verificar el rol de la cuenta técnica: {exc}")
-        return False
 
-    # Open WebUI vive en el esquema DATABASE_SCHEMA (ver docker-compose.yml:
-    # 'sooniverse', no 'public') -confirmado en un despliegue real: sin fijar
-    # el search_path aquí, esta conexión psycopg2 (sin el 'options=-csearch_path'
-    # que sí lleva el DATABASE_URL de Open WebUI) mira 'public.user', que no
-    # existe, y la promoción falla siempre con 'relation "user" does not
-    # exist' -dejando a la cuenta técnica sin admin para siempre si un humano
-    # ganó la carrera del primer login (ver docstring de la función).
-    schema = os.environ.get("DATABASE_SCHEMA", "public")
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(f'SET search_path TO "{schema}", public')
-                cur.execute(
-                    'UPDATE "user" SET role = %s WHERE email = %s AND role <> %s',
-                    ("admin", BOOTSTRAP_EMAIL, "admin"),
-                )
-                promoted = cur.rowcount > 0
-        if promoted:
-            print(f"[bootstrap] Cuenta técnica '{BOOTSTRAP_EMAIL}' promovida a admin (autocorrección de carrera).")
-        return promoted
-    except Exception as exc:  # noqa: BLE001 - p.ej. la tabla 'user' aún no existe
-        print(f"[WARNING] No se pudo verificar/corregir el rol de la cuenta técnica: {exc}")
-        return False
-    finally:
-        conn.close()
+def ensure_django_admin_is_owui_admin() -> None:
+    """El admin humano del panel (DJANGO_SUPERUSER_EMAIL) y el admin de Open
+    WebUI son DOS conceptos independientes -is_superuser de Django nunca se
+    propaga al role de sooniverse."user". Sin esto, el operador humano queda
+    como 'user' normal en el chat (sin panel de admin de Open WebUI, sin
+    poder gestionar modelos/usuarios ahí) aunque sea superusuario del panel.
+
+    Best-effort y no bloqueante: si DJANGO_SUPERUSER_EMAIL no está fijada, o
+    esa persona todavía no inició sesión ni una vez vía SSO (sin fila en
+    `user` que promover), no hace nada -se reintenta en cada corrida del
+    bootstrap (temprana y tardía, ver generate_infra.py), así que en cuanto
+    esa persona entre una vez, la siguiente corrida la asciende."""
+    email = os.environ.get("DJANGO_SUPERUSER_EMAIL", "").strip()
+    if not email:
+        return
+    _promote_email_to_admin(email, "el administrador del panel")
 
 
 def ensure_default_user_role_is_user(token: str) -> None:
@@ -287,6 +318,39 @@ def fetch_litellm_models() -> List[str]:
         raise BootstrapError(f"No se pudo leer {LITELLM_BASE_URL}/v1/models: {resp}")
     data = resp.get("json", {}).get("data", [])
     return sorted({m["id"] for m in data if "id" in m})
+
+
+LITELLM_CONFIG_PATH = os.environ.get("LITELLM_CONFIG_PATH", "/app/litellm_config.yaml")
+
+
+def fetch_embedding_model_names() -> set:
+    """`model_name`s con `model_info.mode: embedding` en litellm_config.yaml
+    -GET /v1/models de LiteLLM (formato OpenAI estándar) NO expone 'mode' en
+    su respuesta pública, así que se lee directo del YAML generado por
+    render_litellm_config.py (montado de solo lectura en este contenedor).
+
+    Parser de línea deliberadamente simple (sin depender de PyYAML, que no
+    está garantizado en la imagen base de Open WebUI) -el archivo es
+    enteramente GENERADO por nuestro propio código con una indentación fija
+    de 2 espacios por nivel (yaml.dump default_flow_style=False), así que
+    basta con rastrear en qué entrada de 'model_list' está cada línea."""
+    try:
+        with open(LITELLM_CONFIG_PATH, "r", encoding="utf-8") as f:
+            lineas = f.readlines()
+    except OSError as exc:
+        print(f"[WARNING] No se pudo leer {LITELLM_CONFIG_PATH} para detectar modelos de "
+              f"embeddings: {exc}. Se asume que ninguno lo es.")
+        return set()
+
+    embeddings: set = set()
+    model_name_actual: Optional[str] = None
+    for linea in lineas:
+        stripped = linea.strip()
+        if linea.startswith("- model_name:"):
+            model_name_actual = stripped.split(":", 1)[1].strip().strip("'\"")
+        elif model_name_actual and stripped == "mode: embedding":
+            embeddings.add(model_name_actual)
+    return embeddings
 
 
 def fetch_capabilities_by_model() -> Dict[str, Dict[str, Any]]:
@@ -410,11 +474,30 @@ def main() -> int:
             # las llamadas de administración de abajo (crear/actualizar
             # modelos, leer/escribir la config de admin) necesitan uno fresco.
             token = authenticate()
+        # No afecta a NUESTRO token (rol de la cuenta técnica, ya resuelto
+        # arriba): solo promueve la fila 'user' del admin humano del panel,
+        # si existe.
+        ensure_django_admin_is_owui_admin()
         ensure_default_user_role_is_user(token)
 
         litellm_models = fetch_litellm_models()
         if not litellm_models:
             print("[bootstrap] LiteLLM no reporta modelos todavía; nada que sincronizar.")
+            return 0
+
+        # Un modelo de embeddings no expone /v1/chat/completions -registrarlo
+        # como modelo de chat en Open WebUI (el comportamiento de antes,
+        # idéntico para cualquier id de LiteLLM) lo dejaba seleccionable en el
+        # selector del chat, donde cualquier mensaje le fallaría. Se excluye
+        # de la sincronización por completo (ni se crea ni se actualiza).
+        modelos_embeddings = fetch_embedding_model_names()
+        if modelos_embeddings:
+            omitidos = [m for m in litellm_models if m in modelos_embeddings]
+            if omitidos:
+                print(f"[bootstrap] Omitiendo del selector de chat (son de embeddings): {omitidos}")
+            litellm_models = [m for m in litellm_models if m not in modelos_embeddings]
+        if not litellm_models:
+            print("[bootstrap] Solo hay modelos de embeddings; nada que sincronizar en el chat.")
             return 0
 
         capabilities = fetch_capabilities_by_model()

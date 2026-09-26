@@ -1,0 +1,68 @@
+# Copia aislada de docker_images/qwen3.5/ para la primera prueba real de T4 en
+# Azure -por indicación explícita, no tocar la imagen original mientras esta
+# no esté confirmada en hardware real. Fusionar/eliminar esta carpeta una vez
+# quede demostrado que ambas imágenes son intercambiables en T4.
+services:
+  vllm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sooniverse/vllm-qwen3.5-t4:v1.0.0
+    container_name: vllm-qwen-t4
+    runtime: nvidia
+    environment:
+      - MODEL_NAME=${MODEL_NAME:-cyankiwi/Qwen3.5-2B-AWQ-4bit}
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
+      - MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-8192}
+      - GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.95}
+      # Peticiones concurrentes por worker. Con el default anterior (2) el tercer
+      # usuario simultáneo hacía cola aunque sobrara VRAM. Lo fija el contrato:
+      # workloads[].concurrencia.max_num_seqs en config_global.yaml.
+      - MAX_NUM_SEQS=${MAX_NUM_SEQS:-16}
+      - ENFORCE_EAGER=${ENFORCE_EAGER:-1}
+      - DTYPE=${DTYPE:-half}
+      - KV_CACHE_DTYPE=${KV_CACHE_DTYPE:-auto}
+      - TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-1}
+      - QUANTIZATION=${QUANTIZATION:-}
+      - ENABLE_VISION=${ENABLE_VISION:-1}
+      - ENABLE_TOOL_CALLING=${ENABLE_TOOL_CALLING:-0}
+      - TOOL_CALL_PARSER=${TOOL_CALL_PARSER:-}
+      - CUDA_MODULE_LOADING=LAZY
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      # CORREGIDO: antes era el literal 'FLASH_ATTN' (no '${VAR:-}'), así que
+      # WORKER_RUN_SCRIPT no podía sobreescribirlo. FlashAttention-2 exige
+      # SM80+ (Ampere o superior) -en una T4 (Turing, SM75) vLLM aborta al
+      # arrancar. 'runtime_vllm.attention_backend' en config_global.yaml (ver
+      # RUNTIME_VLLM_ENV_MAP en generate_infra.py) ahora sí llega hasta aquí;
+      # en T4 se fija a TRITON_ATTN ('XFORMERS' fue retirado del motor V1 de
+      # vLLM 0.24.0 -verificado en la prueba local, ver entrypoint.sh). Esta
+      # variable de entorno YA NO la lee vLLM directamente (0.24.0 solo la
+      # reconoce como CLI '--attention-backend'); entrypoint.sh la traduce.
+      - VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}
+      - VLLM_USE_FLASHINFER_SAMPLER=0
+      - VLLM_MM_INPUT_CACHE_GIB=8
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - VLLM_IMAGE_FETCH_TIMEOUT=30
+      - PYTHONUNBUFFERED=1
+      - HF_HOME=/root/.cache/huggingface
+    ports:
+      # CORREGIDO: puerto hardcodeado -no honraba workloads[].puerto del
+      # contrato si se cambiaba (dos réplicas del mismo modelo en el mismo
+      # host habrían colisionado). WORKER_RUN_SCRIPT ya exporta PORT.
+      - "${PORT:-8007}:${PORT:-8007}"
+    volumes:
+      - ./hf_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # CORREGIDO: fijo en 1 pese a que TENSOR_PARALLEL_SIZE puede
+              # pedir más de una GPU (workloads[].cantidad_gpus) -con esto
+              # fijo, vLLM fallaría al no ver las GPUs que su propio
+              # tensor-parallel-size le dice que use. 'count: all' reserva
+              # todas las GPUs visibles del host (que SkyPilot ya dimensionó
+              # según cantidad_gpus al elegir el tipo de instancia).
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped

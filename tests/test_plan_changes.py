@@ -212,3 +212,87 @@ def test_seccion_capacidad_no_afecta_al_plan_de_infraestructura():
     nuevo = clone(base)
     nuevo["capacidad"]["segundos_por_nivel"] = 5
     assert plan_changes(base, nuevo).is_no_op
+
+
+# -- multi-workload: plan_changes() ya es dict-based (sin [0] hardcodeado) --
+# Test de cobertura, no de fix: la lógica ya generaliza a N workloads.
+def test_agregar_un_segundo_workload_es_recreate_cluster_solo_para_el_nuevo():
+    base = load_base_config()
+    nuevo = clone(base)
+    segundo = clone(nuevo["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = "sooniverse-nemotron"
+    nuevo["workloads"].append(segundo)
+
+    plan = plan_changes(base, nuevo)
+
+    assert plan.requires_destroy is False
+    assert plan.clusters_to_recreate == ["nemotron-llm"]
+    assert not any(c.workload_id == base["workloads"][0]["id"] for c in plan.changes)
+
+
+def test_cambiar_uno_de_dos_workloads_no_toca_el_otro():
+    base = load_base_config()
+    segundo = clone(base["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = "sooniverse-nemotron"
+    base["workloads"].append(segundo)
+
+    nuevo = clone(base)
+    nuevo["workloads"][1]["concurrencia"]["max_num_seqs"] = 4  # solo el segundo
+
+    plan = plan_changes(base, nuevo)
+
+    assert plan.clusters_to_recreate == ["nemotron-llm"]
+    assert not any(c.workload_id == "qwen3-5-llm" for c in plan.changes)
+
+
+def test_quitar_uno_de_dos_workloads_solo_marca_el_quitado():
+    base = load_base_config()
+    segundo = clone(base["workloads"][0])
+    segundo["id"] = "nemotron-llm"
+    segundo["puerto"] = 8008
+    segundo["nombre_publico"] = "sooniverse-nemotron"
+    base["workloads"].append(segundo)
+
+    nuevo = clone(base)
+    nuevo["workloads"] = [nuevo["workloads"][0]]  # se queda solo qwen3.5
+
+    plan = plan_changes(base, nuevo)
+
+    assert plan.clusters_to_recreate == ["nemotron-llm"]
+
+
+# -- tipo_tarea/runtime_vllm exigen relanzar el worker (Fase 4/1) -----------
+def test_cambiar_tipo_tarea_exige_relanzar_el_worker():
+    """Bug real: 'tipo_tarea' no estaba en ninguna de las dos listas -un
+    cambio de 'llm-texto' a 'embeddings' (una invocación de vLLM
+    completamente distinta) se diagnosticaba como "sin cambios"."""
+    base = load_base_config()
+    nuevo = clone(base)
+    nuevo["workloads"][0]["tipo_tarea"] = "embeddings"
+    del nuevo["workloads"][0]["capacidades"]  # embeddings no puede declarar vision/tool_calling
+
+    plan = plan_changes(base, nuevo)
+
+    assert plan.requires_destroy is False
+    assert plan.clusters_to_recreate == [base["workloads"][0]["id"]]
+    assert any(c.classification == RECREATE_CLUSTER and c.field.endswith(".tipo_tarea")
+               for c in plan.changes)
+
+
+def test_cambiar_runtime_vllm_exige_relanzar_el_worker():
+    """Mismo caso para 'runtime_vllm' (DTYPE/attention_backend/...) -son
+    flags de arranque de vLLM, no se pueden aplicar sobre un proceso vivo."""
+    base = load_base_config()
+    nuevo = clone(base)
+    nuevo["workloads"][0]["runtime_vllm"] = {"dtype": "half"}
+
+    plan = plan_changes(base, nuevo)
+
+    assert plan.requires_destroy is False
+    assert plan.clusters_to_recreate == [base["workloads"][0]["id"]]
+    assert any(c.classification == RECREATE_CLUSTER and c.field.endswith(".runtime_vllm")
+               for c in plan.changes)

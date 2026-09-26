@@ -41,8 +41,9 @@ DEFAULT_ENV_PATH = REPO_ROOT / ".env"
 
 # Claves que jamás deben aparecer en `config_snapshot` (filtrado recursivo por
 # substring, insensible a mayúsculas: cubre DB_PASSWORD, LITELLM_MASTER_KEY,
-# LITELLM_SALT_KEY, AWS_SECRET_ACCESS_KEY, AWS_ACCESS_KEY_ID, SECRET_KEY,
-# DJANGO_SUPERUSER_PASSWORD y cualquier variante futura con estas palabras).
+# LITELLM_SALT_KEY, AWS_SECRET_ACCESS_KEY, AWS_ACCESS_KEY_ID, AZURE_CLIENT_SECRET,
+# SECRET_KEY, DJANGO_SUPERUSER_PASSWORD y cualquier variante futura con estas
+# palabras). "secret" ya cubre "client_secret", se deja el substring genérico.
 SECRET_KEY_MARKERS = ("password", "secret", "master_key", "salt_key", "access_key", "master-key")
 
 
@@ -56,9 +57,12 @@ class InfraStateStore(Protocol):
         region: str,
         config_hash: Optional[str] = None,
         config_snapshot: Optional[Dict[str, Any]] = None,
+        cloud: str = "aws",
     ) -> str:
         """Abre (o recupera) el despliegue activo para (cliente, entorno, región) y
-        devuelve su `deployment_id` (UUID v4 en string)."""
+        devuelve su `deployment_id` (UUID v4 en string). `cloud` identifica qué
+        *NetworkManager (aws_network.AwsNetworkManager | azure_network.AzureNetworkManager)
+        es dueño de este despliegue -columna `sooniverse.infra_deployment.cloud`."""
         ...
 
     def get_active_deployment(
@@ -123,6 +127,7 @@ class _Deployment:
     config_hash: Optional[str] = None
     config_snapshot: Optional[Dict[str, Any]] = None
     last_error: Optional[str] = None
+    cloud: str = "aws"
 
 
 @dataclass
@@ -161,6 +166,7 @@ class InMemoryInfraStateStore:
         region: str,
         config_hash: Optional[str] = None,
         config_snapshot: Optional[Dict[str, Any]] = None,
+        cloud: str = "aws",
     ) -> str:
         existing = self.get_active_deployment(client_id, environment, region)
         if existing:
@@ -175,6 +181,7 @@ class InMemoryInfraStateStore:
             status="creating",
             config_hash=config_hash,
             config_snapshot=config_snapshot,
+            cloud=cloud,
         )
         self._resources[deployment_id] = {}
         return deployment_id
@@ -319,6 +326,7 @@ class PostgresInfraStateStore:
         region: str,
         config_hash: Optional[str] = None,
         config_snapshot: Optional[Dict[str, Any]] = None,
+        cloud: str = "aws",
     ) -> str:
         from psycopg2.extras import Json
 
@@ -336,10 +344,10 @@ class PostgresInfraStateStore:
                 cur.execute(
                     """
                     INSERT INTO sooniverse.infra_deployment
-                        (deployment_id, client_id, environment, region, status, config_hash, config_snapshot)
-                    VALUES (%s, %s, %s, %s, 'creating', %s, %s)
+                        (deployment_id, client_id, environment, region, cloud, status, config_hash, config_snapshot)
+                    VALUES (%s, %s, %s, %s, %s, 'creating', %s, %s)
                     """,
-                    (deployment_id, client_id, environment, region, config_hash,
+                    (deployment_id, client_id, environment, region, cloud, config_hash,
                      Json(snapshot) if snapshot is not None else None),
                 )
                 cur.execute(
