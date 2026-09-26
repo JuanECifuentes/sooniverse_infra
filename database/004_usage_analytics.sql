@@ -606,12 +606,30 @@ $$ LANGUAGE plpgsql;
 -- percentil sobre una ventana cualquiera hay que volver a los eventos crudos:
 -- ésta es la única vía soportada para hacerlo.
 -- -----------------------------------------------------------------------------
+-- DROP explícito: añadir 'p_incluir_embeddings' cambia la firma de la
+-- función -CREATE OR REPLACE FUNCTION NO reemplaza una función existente
+-- cuando cambia la LISTA de parámetros, crea una sobrecarga nueva. Sin este
+-- DROP, quedaban dos versiones (5 y 6 argumentos) coexistiendo, y cualquier
+-- llamada posicional sin especificar todos los argumentos fallaba con
+-- "function ... is not unique" (comprobado al reaplicar este archivo).
+DROP FUNCTION IF EXISTS sooniverse.latency_percentiles(TIMESTAMPTZ, TIMESTAMPTZ, BIGINT[], TEXT[], BOOLEAN);
+
+-- p_incluir_embeddings=FALSE (default) excluye 'call_type' de embeddings de
+-- los percentiles de CHAT: una llamada de embeddings tiene una forma de
+-- tráfico completamente distinta (sin streaming, normalmente mucho más
+-- rápida) -mezclarla con /v1/chat/completions sesga el p95/p99 que el panel
+-- reporta como "latencia del chat". call_type lo puebla LiteLLM mismo
+-- (Prisma, LiteLLM_SpendLogs.call_type); 'aembedding' es el valor real bajo
+-- el proxy async, 'embedding' el equivalente síncrono -se cubren ambos con
+-- LIKE en vez de una lista cerrada, por si una versión futura de LiteLLM usa
+-- otra variante del mismo prefijo.
 CREATE OR REPLACE FUNCTION sooniverse.latency_percentiles(
-    p_from          TIMESTAMPTZ,
-    p_to            TIMESTAMPTZ,
-    p_api_key_ids   BIGINT[] DEFAULT NULL,
-    p_models        TEXT[]   DEFAULT NULL,
-    p_incluir_cache BOOLEAN  DEFAULT FALSE
+    p_from               TIMESTAMPTZ,
+    p_to                 TIMESTAMPTZ,
+    p_api_key_ids        BIGINT[] DEFAULT NULL,
+    p_models             TEXT[]   DEFAULT NULL,
+    p_incluir_cache      BOOLEAN  DEFAULT FALSE,
+    p_incluir_embeddings BOOLEAN  DEFAULT FALSE
 )
 RETURNS TABLE (
     muestras    BIGINT,
@@ -632,7 +650,8 @@ RETURNS TABLE (
     WHERE event_ts >= p_from AND event_ts < p_to
       AND (p_api_key_ids IS NULL OR api_key_id = ANY(p_api_key_ids))
       AND (p_models      IS NULL OR model_name = ANY(p_models))
-      AND (p_incluir_cache OR cache_hit IS NOT TRUE);
+      AND (p_incluir_cache OR cache_hit IS NOT TRUE)
+      AND (p_incluir_embeddings OR call_type IS NULL OR call_type NOT LIKE '%embedding%');
 $$ LANGUAGE sql STABLE;
 
 -- -----------------------------------------------------------------------------

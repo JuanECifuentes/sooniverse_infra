@@ -83,6 +83,14 @@ def build_model_list(endpoints: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         capacidades = ep.get("capacidades", {}) or {}
         max_model_len = ep.get("max_model_len")
+        # CORREGIDO: sin 'mode', LiteLLM sondea /health de CUALQUIER deployment
+        # con una llamada de chat completion -contra un endpoint de embeddings
+        # (runner de pooling, sin /v1/chat/completions) eso falla siempre, y
+        # check_litellm_pool_health() lo reportaba como "no sano" para
+        # siempre. 'embedding' es el único valor de 'tipo_tarea' que necesita
+        # esta traducción; 'llm-texto' es el default implícito de LiteLLM
+        # (omitir 'mode' equivale a 'chat').
+        es_embedding = ep.get("tipo_tarea") == "embeddings"
         model_info: Dict[str, Any] = {
             "id": f"{ep.get('workload_id', 'wl')}-{ip.replace('.', '-')}-{port}",
             "sooniverse_worker_ip": ip,
@@ -95,9 +103,14 @@ def build_model_list(endpoints: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "supports_vision": bool(capacidades.get("vision")),
             "supports_function_calling": bool(capacidades.get("tool_calling")),
         }
+        if es_embedding:
+            model_info["mode"] = "embedding"
         if max_model_len:
             model_info["max_input_tokens"] = max_model_len
-            model_info["max_output_tokens"] = min(4096, max_model_len // 4)
+            # 'max_output_tokens' no tiene sentido para un runner de pooling
+            # (no genera tokens de salida) -solo se fija para modelos de texto.
+            if not es_embedding:
+                model_info["max_output_tokens"] = min(4096, max_model_len // 4)
 
         model_list.append({
             "model_name": ep.get("model_public_name") or ep.get("workload_id") or "sooniverse-llm",

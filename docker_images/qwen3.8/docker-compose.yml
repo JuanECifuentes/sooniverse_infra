@@ -43,7 +43,11 @@ services:
       - TOOL_CALL_PARSER=${TOOL_CALL_PARSER:-}
       - CUDA_MODULE_LOADING=LAZY
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-      - VLLM_ATTENTION_BACKEND=FLASH_ATTN
+      # CORREGIDO: mismo bug que qwen3.5 -literal, no '${VAR:-}'. No cambia
+      # el veredicto de este modelo en T4 (Marlin/Machete, los únicos kernels
+      # de vLLM para W4A16 compressed-tensors, exigen SM80+; ver cabecera),
+      # pero mantiene el compose consistente con el resto de imágenes.
+      - VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}
       - VLLM_USE_FLASHINFER_SAMPLER=0
       - VLLM_MM_INPUT_CACHE_GIB=8
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
@@ -51,7 +55,7 @@ services:
       - PYTHONUNBUFFERED=1
       - HF_HOME=/root/.cache/huggingface
     ports:
-      - "8009:8009"
+      - "${PORT:-8009}:${PORT:-8009}"
     volumes:
       - ./hf_cache:/root/.cache/huggingface
     deploy:
@@ -59,6 +63,6 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              count: all
               capabilities: [gpu]
     restart: unless-stopped

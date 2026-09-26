@@ -1,0 +1,49 @@
+# Worker vLLM "solo embeddings" (--task embed) para
+# Alibaba-NLP/gte-Qwen2-1.5B-instruct. Puertos asignados: qwen3.5 = 8007,
+# nemotron = 8008, qwen3.8 = 8009, gte-qwen2-embed = 8010,
+# qwen2.5-7b-instruct-awq = 8011 (solo red interna en AWS/Azure/GCP).
+#
+# ~3 GB en fp16 -holgado incluso en una T4 de 16 GB; sirve además como
+# workload de menor VRAM para completar la prueba multi-modelo (Paso E del
+# plan: qwen3.5 + segundo generativo + este, 3x Standard_NC4as_T4_v3 = 12 vCPU).
+services:
+  vllm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sooniverse/vllm-gte-qwen2-1.5b-embed:v1.0.0
+    container_name: vllm-gte-qwen2-embed
+    runtime: nvidia
+    environment:
+      - MODEL_NAME=${MODEL_NAME:-Alibaba-NLP/gte-Qwen2-1.5B-instruct}
+      - PORT=${PORT:-8010}
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
+      - GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.90}
+      - MAX_NUM_SEQS=${MAX_NUM_SEQS:-16}
+      - ENFORCE_EAGER=${ENFORCE_EAGER:-1}
+      - DTYPE=${DTYPE:-half}
+      - TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-1}
+      - TRUST_REMOTE_CODE=${TRUST_REMOTE_CODE:-1}
+      - VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-}
+      # Ver el mismo comentario en docker_images/qwen2.5-7b-instruct-awq/
+      # docker-compose.yml: sin esto, el sampler de FlashInfer intenta un
+      # JIT con nvcc (ausente en la imagen 'runtime') y revienta. Un runner
+      # de solo-embeddings ni siquiera samplea texto, pero vLLM inicializa
+      # el sampler igual al arrancar el motor -por eso hace falta aquí también.
+      - VLLM_USE_FLASHINFER_SAMPLER=0
+      - CUDA_MODULE_LOADING=LAZY
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - PYTHONUNBUFFERED=1
+      - HF_HOME=/root/.cache/huggingface
+    ports:
+      - "${PORT:-8010}:${PORT:-8010}"
+    volumes:
+      - ./hf_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped

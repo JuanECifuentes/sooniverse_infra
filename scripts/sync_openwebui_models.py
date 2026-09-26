@@ -43,8 +43,10 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+from cloud_remote import remote_root_for, remote_user_for  # noqa: E402
+
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config_global.yaml"
-REMOTE_ROOT = "/home/ubuntu/sooniverse_infra"
+# REMOTE_ROOT: ver scripts/cloud_remote.py (remote_root_for(cloud)); varía por nube.
 
 GATEWAY_COMPOSE = REPO_ROOT / "docker_images" / "gateway" / "docker-compose.yml"
 
@@ -79,14 +81,17 @@ def _gateway_ssh_target(gateway_cluster: str) -> Optional[Dict[str, str]]:
     return {"ip": ip, "key": str(key_path)}
 
 
-def _scp_push(local_path: Path, remote_path: str, target: Dict[str, str], recursive: bool = False) -> bool:
+def _scp_push(
+    local_path: Path, remote_path: str, target: Dict[str, str],
+    recursive: bool = False, cloud: Optional[str] = None,
+) -> bool:
     cmd = [
         "scp", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
         "-i", target["key"],
     ]
     if recursive:
         cmd.append("-r")
-    cmd += [str(local_path), f"ubuntu@{target['ip']}:{remote_path}"]
+    cmd += [str(local_path), f"{remote_user_for(cloud)}@{target['ip']}:{remote_path}"]
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
         return True
@@ -115,19 +120,19 @@ def gateway_cluster_for(config) -> str:
     return f"sooniverse-{cliente['id']}-{cliente['entorno']}-gw"
 
 
-def push_compose(gateway_cluster: str) -> bool:
+def push_compose(gateway_cluster: str, cloud: Optional[str] = None) -> bool:
     """Empuja docker-compose.yml regenerado (los ENABLE_* de open-webui)."""
     sky = sky_bin()
     if not sky:
         print("[WARNING] 'sky' no está en el PATH; no se puede empujar el compose al Gateway.")
         return False
 
-    remote_path = f"{REMOTE_ROOT}/docker_images/gateway/docker-compose.yml"
+    remote_path = f"{remote_root_for(cloud)}/docker_images/gateway/docker-compose.yml"
 
     target = _gateway_ssh_target(gateway_cluster)
     if target:
         print(f"[EXEC] scp {GATEWAY_COMPOSE.name} -> {gateway_cluster}:{remote_path}")
-        if _scp_push(GATEWAY_COMPOSE, remote_path, target):
+        if _scp_push(GATEWAY_COMPOSE, remote_path, target, cloud=cloud):
             return True
 
     print("[INFO] scp no disponible; usando 'sky exec' + heredoc como transporte.")
@@ -141,12 +146,13 @@ def push_compose(gateway_cluster: str) -> bool:
         return False
 
 
-def push_openwebui_image_dir(gateway_cluster: str) -> None:
+def push_openwebui_image_dir(gateway_cluster: str, cloud: Optional[str] = None) -> None:
     """Sincroniza docker_images/openwebui/ (Dockerfile, overlay, patches) por si
     cambió desde el último 'sky launch'. Best-effort vía scp -r con la clave
     SSH que SkyPilot ya generó para el clúster (ver _gateway_ssh_target);
     'sky rsync' no existe en todas las versiones de SkyPilot."""
-    remote_dir = f"{REMOTE_ROOT}/docker_images/openwebui"
+    remote_root = remote_root_for(cloud)
+    remote_dir = f"{remote_root}/docker_images/openwebui"
     local_dir = REPO_ROOT / "docker_images" / "openwebui"
 
     target = _gateway_ssh_target(gateway_cluster)
@@ -155,27 +161,28 @@ def push_openwebui_image_dir(gateway_cluster: str) -> None:
         return
 
     print(f"[EXEC] scp -r {local_dir} -> {gateway_cluster}:{remote_dir}")
-    if not _scp_push(local_dir, f"{REMOTE_ROOT}/docker_images/", target, recursive=True):
+    if not _scp_push(local_dir, f"{remote_root}/docker_images/", target, recursive=True, cloud=cloud):
         print("[INFO] No se pudo sincronizar docker_images/openwebui/; se usa la copia ya presente en el Gateway.")
 
 
-def recreate_and_bootstrap(gateway_cluster: str) -> bool:
+def recreate_and_bootstrap(gateway_cluster: str, cloud: Optional[str] = None) -> bool:
     sky = sky_bin()
     if not sky:
         print("[WARNING] 'sky' no está en el PATH; no se puede operar el Gateway.")
         return False
 
+    remote_root = remote_root_for(cloud)
     attempts = OPENWEBUI_READY_TIMEOUT_SECONDS // OPENWEBUI_READY_POLL_INTERVAL_SECONDS
     remote_cmd = (
-        f"cd {REMOTE_ROOT}/docker_images/gateway && "
-        f"sudo docker compose --env-file {REMOTE_ROOT}/.env up -d --build open-webui && "
+        f"cd {remote_root}/docker_images/gateway && "
+        f"sudo docker compose --env-file {remote_root}/.env up -d --build open-webui && "
         f"for i in $(seq 1 {attempts}); do "
         f"status=$(sudo docker inspect --format '{{{{.State.Health.Status}}}}' sooniverse-webui 2>/dev/null); "
         f"if [ \"$status\" = healthy ]; then echo SOONIVERSE_WEBUI_READY; break; fi; "
         f"echo \"[ESPERA] open-webui aun no responde ($i/{attempts}, estado=$status)\"; "
         f"sleep {OPENWEBUI_READY_POLL_INTERVAL_SECONDS}; "
         f"done && "
-        f"sudo docker compose --env-file {REMOTE_ROOT}/.env --profile bootstrap "
+        f"sudo docker compose --env-file {remote_root}/.env --profile bootstrap "
         f"run --rm openwebui-bootstrap"
     )
     print("[EXEC] Recreando open-webui (nuevos ENABLE_*) y corriendo el bootstrap de modelos...")
@@ -226,10 +233,11 @@ def main() -> int:
         return 0
 
     gateway_cluster = gateway_cluster_for(config)
-    if not push_compose(gateway_cluster):
+    cloud = config["red_y_aislamiento"].get("cloud")
+    if not push_compose(gateway_cluster, cloud):
         return 1
-    push_openwebui_image_dir(gateway_cluster)
-    return 0 if recreate_and_bootstrap(gateway_cluster) else 1
+    push_openwebui_image_dir(gateway_cluster, cloud)
+    return 0 if recreate_and_bootstrap(gateway_cluster, cloud) else 1
 
 
 if __name__ == "__main__":

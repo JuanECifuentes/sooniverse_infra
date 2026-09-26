@@ -163,3 +163,30 @@ def test_ningun_archivo_crea_objetos_en_el_esquema_litellm():
             r"CREATE (?:TABLE|VIEW|INDEX|FUNCTION)[^;]*?\blitellm\.", sql, re.IGNORECASE
         )
         assert not prohibido, f"{path.name} crea objetos dentro del esquema 'litellm'"
+
+
+def test_drop_function_antes_de_redefinir_latency_percentiles():
+    """Mismo caso que refresh_usage_rollups: añadir 'p_incluir_embeddings'
+    (Fase 4, separar embeddings de los percentiles de chat) crea una
+    SOBRECARGA de latency_percentiles en vez de reemplazarla -confirmado
+    reaplicando este archivo dos veces contra una BD real: la llamada
+    posicional de 5 argumentos que ya usa django_metrics/metrics/analytics.py
+    pasaba a fallar con 'function ... is not unique'. El DROP va ANTES."""
+    sql = leer(SQL_DIR / "004_usage_analytics.sql")
+    drop = sql.find(
+        "DROP FUNCTION IF EXISTS sooniverse.latency_percentiles(TIMESTAMPTZ, TIMESTAMPTZ, BIGINT[], TEXT[], BOOLEAN)"
+    )
+    crea = sql.find("CREATE OR REPLACE FUNCTION sooniverse.latency_percentiles(")
+    assert drop != -1, "falta el DROP FUNCTION de la firma antigua (5 argumentos)"
+    assert crea != -1, "falta el CREATE OR REPLACE de latency_percentiles"
+    assert drop < crea, "el DROP FUNCTION debe preceder al CREATE OR REPLACE"
+
+
+def test_latency_percentiles_incluir_embeddings_por_defecto_false():
+    """El default debe seguir siendo excluir embeddings -de lo contrario, la
+    llamada posicional de 5 argumentos que ya usa analytics.py (sin
+    especificar el 6º) empezaría a INCLUIR embeddings en vez de excluirlos."""
+    sql = leer(SQL_DIR / "004_usage_analytics.sql")
+    assert re.search(
+        r"p_incluir_embeddings\s+BOOLEAN\s+DEFAULT\s+FALSE", sql, re.IGNORECASE
+    ), "p_incluir_embeddings debe defaultear a FALSE"

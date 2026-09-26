@@ -147,3 +147,45 @@ def test_healthy_endpoint_marks_estado_operativo_sano():
     register_in_db([endpoint], names, config)
     row = _fetch(TEST_CLUSTER_A, "10.0.0.10")
     assert row == (False, "unhealthy", "degradado")
+
+
+def _fetch_rank(cluster_name: str, ip: str) -> int:
+    conn = connect(resolve_db_config(ENV_PATH))
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT node_rank FROM sooniverse.worker_node "
+                "WHERE cluster_name = %s AND private_ip = %s",
+                (cluster_name, ip),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def test_node_rank_es_por_cluster_no_global():
+    """Bug real: 'rank' se calculaba con enumerate() sobre la lista COMPLETA
+    de endpoints (todos los workloads concatenados) -con 2 workloads de 2
+    réplicas cada uno, los node_rank salían 0,1,2,3 en vez de 0,1 / 0,1."""
+    config = make_config()
+    names = {"__gateway__": "gw", "worker-a": TEST_CLUSTER_A, "worker-b": TEST_CLUSTER_B}
+
+    endpoints = [
+        {"cluster": TEST_CLUSTER_A, "model_public_name": "modelo-a", "accelerator": "L4",
+         "ip": "10.0.0.10", "port": 8007, "healthy": True},
+        {"cluster": TEST_CLUSTER_A, "model_public_name": "modelo-a", "accelerator": "L4",
+         "ip": "10.0.0.11", "port": 8007, "healthy": True},
+        {"cluster": TEST_CLUSTER_B, "model_public_name": "modelo-b", "accelerator": "L4",
+         "ip": "10.0.0.20", "port": 8007, "healthy": True},
+        {"cluster": TEST_CLUSTER_B, "model_public_name": "modelo-b", "accelerator": "L4",
+         "ip": "10.0.0.21", "port": 8007, "healthy": True},
+    ]
+    register_in_db(endpoints, names, config)
+
+    assert _fetch_rank(TEST_CLUSTER_A, "10.0.0.10") == 0
+    assert _fetch_rank(TEST_CLUSTER_A, "10.0.0.11") == 1
+    # Antes del fix, estos dos salían 2 y 3 (índice global) en vez de 0 y 1
+    # (índice dentro de SU PROPIO clúster).
+    assert _fetch_rank(TEST_CLUSTER_B, "10.0.0.20") == 0
+    assert _fetch_rank(TEST_CLUSTER_B, "10.0.0.21") == 1

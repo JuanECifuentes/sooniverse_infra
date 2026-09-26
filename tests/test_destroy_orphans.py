@@ -84,3 +84,76 @@ def test_scan_orphans_ignores_nat_gateway_already_deleted(monkeypatch):
 
     orphan_ids = {o["aws_id"] for o in orphans}
     assert nat["NatGatewayId"] not in orphan_ids
+
+
+# -- purge_orphans_azure / --purge-orphans para Azure (antes no implementado) -
+import types
+from unittest.mock import MagicMock
+
+
+def test_azure_delete_order_leaf_resources_first():
+    from destroy_infra import _azure_delete_order
+
+    vnet = {"type": "Microsoft.Network/virtualNetworks"}
+    nsg = {"type": "Microsoft.Network/networkSecurityGroups"}
+    natgw = {"type": "Microsoft.Network/natGateways"}
+    assert _azure_delete_order(natgw) < _azure_delete_order(nsg) < _azure_delete_order(vnet)
+
+
+def test_azure_delete_order_unknown_type_goes_last():
+    from destroy_infra import _azure_delete_order
+
+    assert _azure_delete_order({"type": "Microsoft.Weird/thing"}) == 999
+
+
+def test_purge_orphans_azure_borra_por_resource_id_con_api_version_resuelto(monkeypatch):
+    from destroy_infra import purge_orphans_azure
+
+    fake_resource_client = MagicMock()
+    fake_provider = MagicMock()
+    fake_resource_type = MagicMock(resource_type="virtualNetworks", api_versions=["2024-01-01", "2023-01-01"])
+    fake_provider.resource_types = [fake_resource_type]
+    fake_resource_client.providers.get.return_value = fake_provider
+
+    fake_credential_module = types.SimpleNamespace(
+        _default_credential=lambda *a, **k: (MagicMock(), "sub-fake")
+    )
+    monkeypatch.setitem(sys.modules, "azure_network", fake_credential_module)
+    monkeypatch.setattr(
+        "azure.mgmt.resource.resources.ResourceManagementClient",
+        lambda *a, **k: fake_resource_client,
+    )
+
+    orphans = [
+        {"azure_id": "/subscriptions/x/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet-1",
+         "type": "Microsoft.Network/virtualNetworks"},
+    ]
+    purge_orphans_azure(orphans)
+
+    fake_resource_client.resources.begin_delete_by_id.assert_called_once_with(
+        orphans[0]["azure_id"], "2024-01-01"
+    )
+
+
+def test_purge_orphans_azure_reporta_error_sin_bloquear_el_resto(monkeypatch):
+    from destroy_infra import purge_orphans_azure
+
+    fake_resource_client = MagicMock()
+    fake_resource_client.providers.get.side_effect = Exception("provider no encontrado")
+
+    fake_credential_module = types.SimpleNamespace(
+        _default_credential=lambda *a, **k: (MagicMock(), "sub-fake")
+    )
+    monkeypatch.setitem(sys.modules, "azure_network", fake_credential_module)
+    monkeypatch.setattr(
+        "azure.mgmt.resource.resources.ResourceManagementClient",
+        lambda *a, **k: fake_resource_client,
+    )
+
+    orphans = [
+        {"azure_id": "/subscriptions/x/.../publicIPAddresses/pip-huerfana",
+         "type": "Microsoft.Network/publicIPAddresses"},
+    ]
+    # No debe lanzar -el error se reporta por recurso (ver el print interno).
+    purge_orphans_azure(orphans)
+    fake_resource_client.resources.begin_delete_by_id.assert_not_called()

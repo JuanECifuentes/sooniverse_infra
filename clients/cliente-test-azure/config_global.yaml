@@ -1,0 +1,247 @@
+# ==============================================================================
+# CLIENTE DE PRUEBA -- AZURE, modo "hosted" (cuenta propia de Sooniverse)
+# ==============================================================================
+# Contraparte Azure de clients/cliente-test/ (AWS, byoc) -mismo propósito:
+# despliegue real de prueba, no una plantilla ("_ejemplo*").
+#
+# Región = westus3 (NO southcentralus, usado en un primer intento fallido):
+# la cuota real (12 vCPU, "Standard NCASv3_T4 Family") está aprobada en
+# westus3. southcentralus/westus2/eastus tienen el SKU disponible pero SIN
+# cuota (0). Se creyó -incorrectamente- que westus3 no tenía el SKU
+# disponible para esta suscripción por un bug de comparación de mayúsculas/
+# minúsculas en scripts/azure_check_gpu_quota.py (ya corregido): 'westus3'
+# SÍ está en la lista de regiones "orderable" para Standard_NC4as_T4_v3.
+#
+# Multi-modelo (3x Standard_NC4as_T4_v3 = 12 vCPU, el techo exacto de la
+# cuota): qwen3.5 (llm-texto, con visión) + qwen2.5-7b-instruct-awq
+# (llm-texto, reemplazo de nemotron -su checkpoint AWQ no cargó en NINGUNA
+# GPU en la prueba local, ver docker_images/nemotron-nano-9b-v2/docker-
+# compose.yml) + gte-qwen2-1.5b-embed (embeddings). Verifica: los dos
+# generativos coexisten y son seleccionables en chat/panel, el de embeddings
+# NO aparece como modelo de chat, y el pool completo queda sano.
+#
+# Dominio: 'gateway.dominio.habilitado' queda en false a propósito. El generador
+# lo bloquea explícitamente en Azure (ConfigValidator._validate_dominio) porque
+# el dominio propio + Let's Encrypt + IP pública persistente todavía no está
+# implementado para esta nube (solo AWS) -ver scripts/azure_network.py. El
+# bloque completo se deja aquí, con la estructura correcta y un ejemplo
+# comentado, listo para activarlo el día que se implemente esa pieza.
+#
+# Comandos (idénticos a AWS, la nube se decide por 'red_y_aislamiento.cloud'):
+#   python scripts/generate_infra.py --config clients/cliente-test-azure/config_global.yaml
+#   python scripts/generate_infra.py --config clients/cliente-test-azure/config_global.yaml --run --dry-run
+# ==============================================================================
+
+# 1. Datos del Cliente y Entorno
+cliente:
+  id: "cliente-test-azure"     # ÚNICO por cliente: minúsculas, [a-z0-9-], máx 20 caracteres.
+  entorno: "dev"                 # prod | dev
+  modo: "hosted"                 # Azure BYOC no implementado todavía -ver docs/05_MULTICLIENTE.md (AWS)
+
+# 2. Variables de Red y Aislamiento
+red_y_aislamiento:
+  cloud: "azure"                  # NUEVO: aws (default) | azure
+  region: "westus3"                # slug de Azure -región real de la cuota T4 aprobada (ver encabezado)
+  aws_profile: null                 # sin efecto con cloud: azure (ver .env.example AZURE_*)
+  # CORREGIDO: la imagen propia de SkyPilot Y esta oferta (Ubuntu 22.04
+  # Jammy) seguían sin capacidad en westus3 pese a tener cuota T4 aprobada.
+  # El operador SÍ pudo aprovisionar Standard_NC4as_T4_v3 a mano en West US 3
+  # Zone 1 con la oferta pública 'canonical:ubuntu-24_04-lts:server:latest'
+  # (Ubuntu 24.04, Trusted Launch) -confirmado con el JSON real de esa VM.
+  image_id: "canonical:ubuntu-24_04-lts:server:latest"
+  gestion_red: "auto"                # único modo soportado en Azure por ahora
+  vpc_name: null
+  vpc_id: null
+  subnet_id: null
+  vpc_cidr: "10.30.0.0/16"           # distinto al de otros clientes activos (root=10.0.0.0/16, cliente-test=10.10.0.0/16, _ejemplo_azure=10.20.0.0/16)
+  azs: 1                              # Azure no tiene subredes zonales; >1 se ignora con un WARNING
+  subredes:
+    publicas: null
+    privadas: null
+  nat_gateway:
+    modo: "single"                   # single | none (Azure no tiene "per-az")
+    timeout_segundos: 300
+  vpc_endpoints:
+    s3: true                         # sin efecto en Azure (no hay VPC Endpoint tipo S3)
+    ecr: false
+  workers_en_subred_privada: true
+  cidr_permitido_gateway: "0.0.0.0/0"
+  cidr_admin_ssh: "0.0.0.0/0"         # Restringe a la IP/VPN del operador en producción real.
+  security_group_workers: null
+  security_group_gateway: null
+  tags_obligatorios:
+    cliente_id: "cliente-test-azure"
+    modo: "hosted"
+    entorno: "dev"
+    gestionado_por: "sooniverse"
+
+# 3. Nodo Gateway
+gateway:
+  habilitado: true
+  # CORREGIDO: el Gateway NO necesita GPU (nginx/LiteLLM/Redis/Django/Open
+  # WebUI, todo CPU). El primer intento usó la familia T4 aquí porque
+  # Standard_D2as_v5/D2s_v5/B2ms parecían bloqueados -pero esa conclusión
+  # solo comparó 2-3 familias modernas puntuales. Verificado de forma
+  # exhaustiva contra las 400+ familias reales de la suscripción
+  # (ComputeManagementClient.usage.list + resource_skus.list('westus3')):
+  # las SKU "clásicas" (B1s/B2ms, D2_v2, A2_v2) SÍ tienen cuota de familia
+  # pero están bloqueadas para esta suscripción con
+  # 'NotAvailableForSubscription'; las SKU modernas (Dsv5/Bsv2) NO están
+  # bloqueadas pero su familia tiene cuota=0. La intersección real -familia
+  # con cuota Y SKU sin bloqueo de suscripción- SÍ existe: 'Standard_D2s_v6'
+  # cumplía esa intersección en Azure, pero el CATÁLOGO INTERNO de SkyPilot
+  # (azure/vms.csv) todavía no conoce la generación v6/v7 -'sky launch' abortó
+  # con "No instance type Standard_D2s_v6 found" antes de siquiera tocar
+  # Azure. Se cruzó la MISMA intersección (cuota>0 + sin restricción) contra
+  # las SKU que SkyPilot sí reconoce para westus3: 'Standard_E2bs_v5' (familia
+  # 'standardEBSv5Family', límite=10 vCPU, 0 en uso) es la más chica viable.
+  # Los 3x Standard_NC4as_T4_v3 completos quedan libres para workloads.
+  tipo_instancia: "Standard_E2bs_v5"   # SKU de Azure, CPU-only -sin GPU
+  # Misma oferta pública Ubuntu 24.04 que los workers -genérica, sin
+  # dependencia de la SKU (a diferencia de 'red_y_aislamiento.image_id',
+  # ese sí confirmado específicamente para Standard_NC4as_T4_v3 en Zone 1).
+  image_id: "canonical:ubuntu-24_04-lts:server:latest"
+  disk_size: 100
+  exponer_puertos_directos: false
+  puertos_publicos:
+    - 4000
+    - 8080
+    - 8000
+  load_balancing_strategy: "latency-based-routing"
+  # Dominio propio + TLS real -confirmado de extremo a extremo contra una
+  # suscripción real (IP pública persistente + certbot vía
+  # azure_network.py::ensure_gateway_public_ip): DNS resuelto, certificado
+  # STAGING emitido y verificado con openssl. 'staging: false' para el
+  # certificado de producción real, ya con el flujo probado.
+  dominio:
+    habilitado: true
+    seleccionado: "az.sooniverse.co"
+    disponibles:
+      - nombre: "az.sooniverse.co"
+        email_acme: "contacto@sooniverse.co"
+    staging: false
+    redirigir_http: true
+    eip_persistente: true
+    esperar_dns_segundos: 300
+  tls:
+    habilitado: false                 # derivado automáticamente a true/letsencrypt por load_config() cuando dominio.habilitado=true
+    modo: "self-signed"
+    dominio: null
+  litellm:
+    master_key_env: "LITELLM_MASTER_KEY"
+    num_retries: 2
+    request_timeout: 600
+    cooldown_time: 30
+    allowed_fails: 2
+  open_webui:
+    habilitado: true
+    signup_habilitado: false
+    tareas_automaticas: "segun_capacidades"
+    code_interpreter: "segun_capacidades"
+  django_metrics:
+    habilitado: true
+    puerto: 8000
+    metrics_refresh_interval: 300
+
+# 4. Automatización de Base de Datos
+base_de_datos:
+  AUTO_INIT_DB: true
+  auto_refresh_metrics: true
+  schema_dir: "database"
+
+# 5. Perfil de Cargas de Trabajo -- multi-modelo en T4 (3x Standard_NC4as_T4_v3
+#    = 12 vCPU exactos, el techo de la cuota aprobada en westus3).
+workloads:
+  - id: "qwen3-5-llm"
+    # 'qwen3.5-t4' (docker_images/qwen3.5-t4/) es una copia aislada de
+    # 'qwen3.5' para esta primera prueba real en hardware T4 -por indicación
+    # explícita, no se toca la carpeta original hasta confirmar en real que
+    # es compatible. Volver a 'qwen3.5' una vez validado.
+    modelo: "qwen3.5-t4"
+    hf_repo: "cyankiwi/Qwen3.5-2B-AWQ-4bit"
+    tipo_tarea: "llm-texto"
+    accelerator: "T4"                       # SKU de Azure real (no hay L4/L40S -ver README §7.1.1)
+    cantidad_gpus: 1
+    replicas: 1
+    tipo_instancia: "Standard_NC4as_T4_v3"   # 4 vCPU, 1x T4 -tamaño más chico de esta familia
+    puerto: 8007
+    nombre_publico: "sooniverse-qwen3.5"
+    peso_balanceo: 1
+    asignacion_fraccional:
+      habilitado: true
+      gpu_memory_utilization: 0.95
+      max_model_len: 16384
+    # T4 = Turing (SM75): sin FlashAttention-2 (exige SM80+, era el default
+    # hardcodeado del compose -ver docker_images/qwen3.5/docker-compose.yml)
+    # ni bfloat16. TRITON_ATTN es el backend de atención que vLLM 0.24.0 sí
+    # soporta en Turing ('XFORMERS' fue retirado del motor V1 -verificado
+    # contra el registro real de backends en la prueba local de Fase 3).
+    # DTYPE=half ya es el default del compose, se deja explícito aquí por
+    # autodocumentación.
+    runtime_vllm:
+      attention_backend: "TRITON_ATTN"
+      dtype: "half"
+    # '--attention-backend' solo controla la atención del LM: la prueba local
+    # mostró que la torre de visión (ViT) de este checkpoint sigue forzando
+    # FLASH_ATTN por su cuenta ("Using backend AttentionBackendEnum.FLASH_ATTN
+    # for vit attention" / mm_encoder_attention.py) sin importar este flag.
+    # En T4 eso reventaría igual que el LM sin el fix. Vision no hace falta
+    # para la prueba de balanceador multi-modelo -se desactiva para no
+    # heredar ese riesgo sin verificar.
+    capacidades:
+      vision: false
+
+  # Segundo modelo generativo -reemplazo de nemotron-nano-9b-v2: su
+  # checkpoint AWQ-4bit (cyankiwi) NO cargó en NINGUNA GPU en la prueba local
+  # (vLLM lo detecta como compressed-tensors WNA16 y ningún kernel disponible
+  # puede implementar sus capas, ver docker_images/nemotron-nano-9b-v2/
+  # docker-compose.yml). Qwen2.5-7B-Instruct-AWQ es AWQ real (no
+  # compressed-tensors): vLLM sí tiene kernels AWQ para SM75, confirmado en
+  # la prueba local (auto_awq.py eligió MarlinLinearKernel en SM120; en T4
+  # cae al kernel AWQ puro, sin Marlin -ambos casos cubiertos por el mismo
+  # QUANTIZATION vacío, autodetectado).
+  - id: "qwen25-7b-awq-llm"
+    modelo: "qwen2.5-7b-instruct-awq"
+    hf_repo: "Qwen/Qwen2.5-7B-Instruct-AWQ"
+    tipo_tarea: "llm-texto"
+    accelerator: "T4"
+    cantidad_gpus: 1
+    replicas: 1
+    tipo_instancia: "Standard_NC4as_T4_v3"
+    puerto: 8011
+    nombre_publico: "sooniverse-qwen2.5-7b"
+    peso_balanceo: 1
+    asignacion_fraccional:
+      habilitado: true
+      gpu_memory_utilization: 0.90
+      max_model_len: 16384
+    runtime_vllm:
+      attention_backend: "TRITON_ATTN"
+      dtype: "half"
+    capacidades:
+      vision: false
+
+  # Workload de embeddings -Fase 4 (wiring de extremo a extremo), FUERA de
+  # esta pasada por alcance, no por cuota: el Gateway ya no ocupa una T4
+  # (ver gateway.tipo_instancia -pasó a 'Standard_D2s_v6', CPU-only), así que
+  # los 3x Standard_NC4as_T4_v3 completos están libres. Se prioriza primero
+  # confirmar en real el balanceador multi-modelo generativo; agregar este
+  # bloque cuando toque probar embeddings de punta a punta:
+  # - id: "gte-qwen2-embed"
+  #   modelo: "gte-qwen2-1.5b-embed"
+  #   hf_repo: "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
+  #   tipo_tarea: "embeddings"
+  #   accelerator: "T4"
+  #   cantidad_gpus: 1
+  #   replicas: 1
+  #   tipo_instancia: "Standard_NC4as_T4_v3"
+  #   puerto: 8010
+  #   nombre_publico: "sooniverse-embed-gte-qwen2"
+  #   peso_balanceo: 1
+  #   asignacion_fraccional:
+  #     habilitado: true
+  #     gpu_memory_utilization: 0.90
+  #     max_model_len: 8192
+  #   runtime_vllm:
+  #     attention_backend: "TRITON_ATTN"
+  #     dtype: "half"

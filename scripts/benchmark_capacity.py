@@ -64,9 +64,11 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+from cloud_remote import remote_root_for, remote_user_for  # noqa: E402
+
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config_global.yaml"
 DEFAULT_ENV_PATH = REPO_ROOT / ".env"
-REMOTE_ROOT = "/home/ubuntu/sooniverse_infra"
+# REMOTE_ROOT: ver scripts/cloud_remote.py (remote_root_for(cloud)); varía por nube.
 IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -597,16 +599,18 @@ def _gateway_ssh_target(gateway_cluster: str) -> Optional[Dict[str, str]]:
     return {"ip": ip, "key": str(key_path)}
 
 
-def _push_self(gateway_cluster: str) -> bool:
+def _push_self(gateway_cluster: str, cloud: Optional[str] = None) -> bool:
     """Sincroniza ESTE archivo al Gateway. Es necesario: scripts/ solo se copia
     en el 'sky launch' del Gateway (file_mounts), así que un
     `generate_infra.py --run --only capacidad` en frío encontraría allí una
     copia vieja del script -o ninguna, la primera vez-."""
-    destino = f"{REMOTE_ROOT}/scripts/benchmark_capacity.py"
+    remote_root = remote_root_for(cloud)
+    destino = f"{remote_root}/scripts/benchmark_capacity.py"
     target = _gateway_ssh_target(gateway_cluster)
     if target:
+        remote_user = remote_user_for(cloud)
         cmd = ["scp", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-               "-i", target["key"], str(Path(__file__).resolve()), f"ubuntu@{target['ip']}:{destino}"]
+               "-i", target["key"], str(Path(__file__).resolve()), f"{remote_user}@{target['ip']}:{destino}"]
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
             return True
@@ -629,7 +633,9 @@ def _push_self(gateway_cluster: str) -> bool:
         return False
 
 
-def run_remote(gateway_cluster: str, wl_id: str, cap: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def run_remote(
+    gateway_cluster: str, wl_id: str, cap: Dict[str, Any], cloud: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     """Ejecuta este mismo script en el Gateway con --local y recoge su JSON.
 
     Los parámetros efectivos viajan por línea de comandos, NO se leen del
@@ -640,12 +646,12 @@ def run_remote(gateway_cluster: str, wl_id: str, cap: Dict[str, Any]) -> Optiona
     if not sky:
         print("[WARNING] 'sky' no está en el PATH; no se puede ejecutar el benchmark remoto.")
         return None
-    if not _push_self(gateway_cluster):
+    if not _push_self(gateway_cluster, cloud):
         return None
 
     niveles = ",".join(str(n) for n in cap["niveles_concurrencia"])
     remoto = (
-        f"cd {REMOTE_ROOT} && python3 scripts/benchmark_capacity.py --local "
+        f"cd {remote_root_for(cloud)} && python3 scripts/benchmark_capacity.py --local "
         f"--config config_global.yaml --gateway-url http://127.0.0.1 "
         f"--workload {wl_id} --niveles {niveles} "
         f"--segundos-por-nivel {cap['segundos_por_nivel']} "
@@ -903,7 +909,7 @@ def main() -> int:
                   f"'{cliente['id']}-{cliente['entorno']}'; se omite el benchmark.")
             return 0
         for wl in workloads:
-            r = run_remote(cluster, wl["id"], cap)
+            r = run_remote(cluster, wl["id"], cap, config["red_y_aislamiento"].get("cloud"))
             if r:
                 resultados.append(r)
 

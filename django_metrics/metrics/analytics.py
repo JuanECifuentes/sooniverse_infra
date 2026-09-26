@@ -220,6 +220,12 @@ def _where_eventos(f: ft.FiltrosTemporales) -> Tuple[str, List[Any]]:
     # Un acierto de caché con latency_ms=3 hundiría el p95 y haría creer que la
     # infraestructura es más rápida de lo que es.
     partes.append("e.cache_hit IS NOT TRUE")
+    # Mismo criterio que sooniverse.latency_percentiles() (ver
+    # database/004_usage_analytics.sql): una llamada de embeddings tiene una
+    # forma de tráfico completamente distinta a un chat completion -sin esto,
+    # el mapa de calor de p95 mezclaría ambas y reportaría una "latencia del
+    # chat" que en realidad es un promedio de dos cosas distintas.
+    partes.append("(e.call_type IS NULL OR e.call_type NOT LIKE '%embedding%')")
     return " AND ".join(partes), params
 
 
