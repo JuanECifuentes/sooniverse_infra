@@ -79,10 +79,16 @@ ENDPOINTS_HEALTH_TIMEOUT_SECONDS = 480
 ENDPOINTS_HEALTH_POLL_INTERVAL_SECONDS = 20
 # `sky launch --retry-until-up` (fase 'workers') no tiene límite propio: sin
 # esto, capacidad GPU que nunca aparece deja el despliegue colgado para
-# siempre. 25 min cubre instancia + descarga de pesos por NAT con margen; con
-# WORKER_LAUNCH_MAX_ATTEMPTS=2 el peor caso total queda acotado en ~50 min +
-# backoff antes de fallar con un error explícito.
-WORKER_LAUNCH_TIMEOUT_SECONDS = 1500
+# siempre. Confirmado en un despliegue real en Azure: una imagen pública
+# 'canonical:...' sin conda/uv/Docker preinstalados (a diferencia de la AMI
+# usada en AWS) necesita >25 min solo para el runtime bootstrap de SkyPilot
+# (miniconda + uv + ray + rueda de skypilot, todo por red, ANTES de que
+# 'setup:' llegue siquiera a instalar Docker) -verificado por SSH directo al
+# worker mientras estaba en INIT: sin locks de apt, sin errores, cloud-init ya
+# terminado, solo un 'uv pip install' aún corriendo. 40 min da margen real sin
+# ocultar un cuelgue genuino (WORKER_LAUNCH_MAX_ATTEMPTS sigue acotando el
+# peor caso).
+WORKER_LAUNCH_TIMEOUT_SECONDS = 2400
 WORKER_LAUNCH_MAX_ATTEMPTS = 2
 # Mismo problema que WORKER_LAUNCH_TIMEOUT_SECONDS pero en la fase 'gateway':
 # `GATEWAY_SETUP_SCRIPT` corre `apt-get update`/`apt-get install` e imágenes
@@ -1078,7 +1084,13 @@ export VLLM_ATTENTION_BACKEND="${{VLLM_ATTENTION_BACKEND:-}}"
 # para el caso normal (llm-texto); el entrypoint decide su propio default.
 export VLLM_TASK="${{VLLM_TASK:-}}"
 
-sudo docker compose up -d
+# BUG CONFIRMADO en un despliegue real: 'sudo' resetea el entorno por
+# default (Defaults env_reset en sudoers) -TODOS los 'export' de arriba
+# (incluido VLLM_ATTENTION_BACKEND=TRITON_ATTN, crítico en T4) nunca
+# llegaban a 'docker compose', que caía en silencio a los defaults
+# hardcodeados del compose. Mismo fix que GATEWAY_RUN_SCRIPT ya usa
+# ('sudo -E docker compose ...'), que por eso nunca sufrió este bug.
+sudo -E docker compose up -d
 sudo docker compose ps
 echo "===> vLLM con max_num_seqs=${{MAX_NUM_SEQS}} max_num_batched_tokens=${{MAX_NUM_BATCHED_TOKENS}} tensor_parallel_size=${{TENSOR_PARALLEL_SIZE}}"
 
@@ -2579,26 +2591,35 @@ def _preclean_stale_file_mounts(
     de tiempo para el SIGUIENTE 'sky launch' sobre el mismo clúster, que falla
     con 'Failed mounting because path exists' -confirmado en una corrida
     real. Best-effort y silencioso: si el clúster no existe todavía (primer
-    'sky launch' de siempre), el 'sky exec' simplemente falla rápido y no hay
-    nada que limpiar."""
+    'sky launch' de siempre), el 'sky exec' EN TEORÍA falla rápido y no hay
+    nada que limpiar -pero confirmado en un despliegue real que, contra un
+    clúster recién destruido (estado local de SkyPilot todavía
+    reconciliándose), 'sky exec' puede colgarse hasta el timeout en vez de
+    fallar rápido. Sin el try/except, ese cuelgue se propagaba sin capturar
+    hasta el manejador de nivel superior y tumbaba TODO el despliegue -este
+    paso es un best-effort de limpieza, nunca debería poder abortar la
+    corrida completa."""
     sky = _sky_binary()
     if not sky:
         return
-    subprocess.run(
-        [
-            sky,
-            "exec",
-            cluster,
-            "for f in .env config_global.yaml .ssh_bastion_key; do "
-            f"p={remote_root_for(cloud)}/$f; "
-            '[ -f "$p" ] && [ ! -L "$p" ] && rm -f "$p"; '
-            "done; true",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=_sky_env(aws_profile),
-    )
+    try:
+        subprocess.run(
+            [
+                sky,
+                "exec",
+                cluster,
+                "for f in .env config_global.yaml .ssh_bastion_key; do "
+                f"p={remote_root_for(cloud)}/$f; "
+                '[ -f "$p" ] && [ ! -L "$p" ] && rm -f "$p"; '
+                "done; true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=_sky_env(aws_profile),
+        )
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        pass
 
 
 def _ensure_db_schema(config: Dict[str, Any], dry_run: bool = False) -> None:
@@ -2829,9 +2850,23 @@ def _find_and_associate_azure_public_ip(
     compute_client = ComputeManagementClient(credential, sub_id)
     network_client = NetworkManagementClient(credential, sub_id)
 
+    # BUG CONFIRMADO en un despliegue real (primera vez que este código se
+    # ejercitó -antes 'gateway.dominio.habilitado' estaba en false para todos
+    # los clientes Azure): 'ray-cluster-name'/'skypilot-cluster-name' en
+    # Azure llevan el nombre ABREVIADO/hasheado que SkyPilot genera
+    # internamente (p.ej. 'sooniverse-cliente-test-azure-7n-97e585e4'), NO el
+    # nombre lógico del clúster -mismo bug ya encontrado y arreglado en
+    # scripts/azure_worker_egress_ip.py. Se usa en su lugar el tag propio
+    # 'rol' ('gateway'/'worker', ver TopologyBuilder.build_gateway/
+    # build_worker), con el valor exacto que ya conocemos; se conserva el
+    # match por nombre de clúster como fallback por si una versión futura de
+    # SkyPilot sí usa el nombre literal.
     vm = None
     for candidate in compute_client.virtual_machines.list(resource_group):
         tags = candidate.tags or {}
+        if tags.get("rol") == "gateway":
+            vm = candidate
+            break
         for tag_key in ("ray-cluster-name", "skypilot-cluster-name"):
             valor = tags.get(tag_key, "")
             if valor == cluster or valor.startswith(f"{cluster}-"):
@@ -3739,6 +3774,41 @@ def deploy(
                 "aws_profile"
             ]  # BYOC, ver comentario en fase [GATEWAY]
 
+        # Workaround confirmado con Azure Network Watcher (connectionStatus=
+        # Unreachable, 316/316 sondas, sin NSG/ruteo involucrados): el NAT
+        # Gateway Standard de esta suscripción/región no funciona en el plano
+        # de datos pese a 'Succeeded' en la API. Sin esto, el bootstrap de
+        # runtime de SkyPilot (miniconda/uv/ray, DENTRO del propio 'sky
+        # launch') nunca consigue salida a internet y el worker se queda
+        # colgado para siempre. 'azure_worker_egress_ip.py' corre en paralelo
+        # y adjunta una Public IP de SOLO SALIDA a la NIC del worker apenas
+        # aparece -'use_internal_ips'/el túnel por el Gateway siguen
+        # intactos, el NSG de workers sigue bloqueando toda entrada que no
+        # venga de la VNet (ver el docstring de ese script para el porqué).
+        # Se relanza en CADA intento (incluidos los reintentos): un retry
+        # destruye y recrea la VM con un nombre nuevo (ver
+        # `_before_worker_attempt` más abajo), y el watcher del intento
+        # anterior ya salió tras adjuntar la IP a la VM vieja.
+        rg_for_egress = None
+        if red.get("cloud") == "azure":
+            net_outputs_for_egress = getattr(builder, "_network_outputs", None)
+            rg_for_egress = getattr(net_outputs_for_egress, "resource_group_name", None)
+
+        def _spawn_egress_ip_watcher(_workload_id: str) -> Optional[subprocess.Popen]:
+            if not rg_for_egress:
+                return None
+            egress_script = REPO_ROOT / "scripts" / "azure_worker_egress_ip.py"
+            return subprocess.Popen(
+                [
+                    sys.executable,
+                    str(egress_script),
+                    "--resource-group", rg_for_egress,
+                    "--workload-id", _workload_id,
+                    "--region", red["region"],
+                    "--timeout", str(WORKER_LAUNCH_TIMEOUT_SECONDS),
+                ]
+            )
+
         for wl in config["workloads"]:
             cluster = builder.worker_cluster(wl["id"])
             manifest = artefactos["workers"][wl["id"]]
@@ -3761,11 +3831,34 @@ def deploy(
             # proceso a los WORKER_LAUNCH_TIMEOUT_SECONDS y lo cuenta como un
             # intento fallido más (máximo WORKER_LAUNCH_MAX_ATTEMPTS en total),
             # así que el peor caso queda acotado en vez de indefinido.
+            # BUG CONFIRMADO en un despliegue real (Azure): a diferencia del
+            # reintento del Gateway (`_before_gateway_attempt`), este no tenía
+            # `before_attempt` -un timeout que mataba el 'sky launch' local a
+            # mitad del runtime bootstrap dejaba la VM remota con el proceso
+            # de setup muerto (SSH directo al worker lo confirmó: sin Docker,
+            # sin ningún proceso de setup activo, uptime sano) y el segundo
+            # intento heredaba ese estado a medio camino en vez de arrancar
+            # limpio, fallando de la misma forma. Mismo fix que el Gateway:
+            # destruir y dejar que 'sky launch' recree desde cero en cada
+            # reintento (no en el primer intento).
+            def _before_worker_attempt(
+                attempt: int, _cluster: str = cluster, _workload_id: str = wl["id"]
+            ) -> None:
+                if attempt > 1:
+                    print(
+                        f"[WORKERS] Recreando '{_cluster}' antes del intento "
+                        f"{attempt} (evita heredar estado a medio camino)..."
+                    )
+                    _sky_down_bounded(_cluster, red.get("aws_profile"))
+                _preclean_stale_file_mounts(_cluster, red.get("aws_profile"), red.get("cloud"))
+                _spawn_egress_ip_watcher(_workload_id)
+
             _run_sky_with_retry(
                 ["launch", "-y", "--retry-until-up", "-c", cluster, str(manifest)],
                 env=worker_env,
                 max_attempts=WORKER_LAUNCH_MAX_ATTEMPTS,
                 timeout=WORKER_LAUNCH_TIMEOUT_SECONDS,
+                before_attempt=_before_worker_attempt,
             )
             if state and deployment_id:
                 state.log_event(

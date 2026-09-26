@@ -87,7 +87,7 @@ try:
         VirtualNetwork,
     )
     from azure.mgmt.resource.resources import ResourceManagementClient
-    from azure.mgmt.resource.resources.models import ResourceGroup
+    from azure.mgmt.resource.resources.models import ResourceGroup, Tags, TagsPatchResource
     from azure.mgmt.msi import ManagedServiceIdentityClient
     from azure.mgmt.msi.models import Identity
 except ImportError as exc:  # pragma: no cover
@@ -437,7 +437,43 @@ class AzureNetworkManager:
             component, name, self.deployment_id,
         )
         self._record(component, component, azure_id, attributes={"name": name})
+        # BUG CONFIRMADO en un despliegue real: _record() solo actualiza el
+        # ESTADO (Postgres) -el tag real 'sooniverse:deployment-id' del
+        # recurso en Azure se queda con el deployment_id VIEJO. destroy()
+        # decide qué borrar leyendo el tag real (_tags_match_deployment), no
+        # el estado, así que sin este re-etiquetado un recurso legítimamente
+        # nuestro (sobrevivió a varias corridas de 'ensure_*' bajo distintos
+        # deployment_id) se reportaba "Omitido: los tags no coinciden" y
+        # quedaba huérfano para siempre tras cada destroy.
+        self._retag_for_current_deployment(azure_id)
         return {"aws_id": azure_id, "component": component, "attributes": {"name": name}}
+
+    def _retag_for_current_deployment(self, azure_id: str) -> None:
+        """Actualiza (merge, sin tocar el resto) los tags 'sooniverse:deployment-id'
+        Y 'sooniverse:managed' del recurso Azure real -ver el comentario en el
+        único llamador, _find_existing(). API genérica de tags de Azure
+        Resource Manager: funciona por resource ID sin importar el tipo de
+        recurso, así que no hace falta lógica por tipo (VNet/NSG/NAT/PIP/MSI/
+        Resource Group).
+
+        BUG CONFIRMADO en un despliegue real: la primera versión de este
+        método solo actualizaba TAG_DEPLOYMENT -_tags_match_deployment()
+        exige TAMBIÉN TAG_MANAGED=='true', así que un recurso cuyo tag
+        'managed' se hubiera perdido en algún momento (p.ej. un PUT externo
+        sin ese tag) seguía reportando "no coinciden" en destroy() aunque
+        deployment-id ya coincidiera -confirmado leyendo los tags reales del
+        VNet: {'sooniverse:deployment-id': '<id-actual>'} SIN
+        'sooniverse:managed' en absoluto."""
+        try:
+            self.resource_client.tags.begin_update_at_scope(
+                azure_id,
+                TagsPatchResource(
+                    operation="Merge",
+                    properties=Tags(tags={TAG_DEPLOYMENT: self.deployment_id, TAG_MANAGED: "true"}),
+                ),
+            ).result()
+        except Exception:  # noqa: BLE001 - best-effort, no debe romper el 'ensure_*' que lo llama
+            logger.warning("[RED-AZURE] No se pudo re-etiquetar %s con el deployment_id actual.", azure_id)
 
     def _lookup_live(
         self,

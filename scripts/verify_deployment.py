@@ -242,6 +242,40 @@ def check_private_route_to_nat(ctx: VerificationContext) -> CheckResult:
             return CheckResult(name, "FAIL", f"{subnet_name}: {exc}")
         if subnet.nat_gateway and subnet.nat_gateway.id:
             return CheckResult(name, "OK", f"Subred '{subnet_name}' asociada a {subnet.nat_gateway.id}")
+        # BUG CONFIRMADO en un despliegue real: el NAT Gateway Standard de
+        # esta suscripción/región no funciona en el plano de datos (ver el
+        # docstring de AzureNetworkManager.ensure_nat_gateway() y
+        # scripts/azure_worker_egress_ip.py) -el workaround adjunta una
+        # Public IP de SOLO SALIDA directamente a la NIC de cada worker en
+        # vez de depender del NAT Gateway del subnet. Sin este chequeo
+        # alternativo, este check reportaba FAIL con un despliegue
+        # completamente sano (confirmado: 'El worker tiene salida a
+        # Internet' pasaba en la misma corrida).
+        try:
+            _, compute_client = _azure_clients(ctx)
+            workers_con_ip_salida = 0
+            workers_totales = 0
+            for vm in compute_client.virtual_machines.list(rg_name):
+                if (vm.tags or {}).get("rol") != "worker":
+                    continue
+                workers_totales += 1
+                nics = vm.network_profile.network_interfaces if vm.network_profile else []
+                for nic_ref in nics:
+                    nic_name = nic_ref.id.rsplit("/", 1)[-1]
+                    nic = network_client.network_interfaces.get(rg_name, nic_name)
+                    if nic.ip_configurations and nic.ip_configurations[0].public_ip_address:
+                        workers_con_ip_salida += 1
+                        break
+            if workers_totales and workers_con_ip_salida == workers_totales:
+                return CheckResult(
+                    name, "OK",
+                    f"Sin NAT Gateway, pero {workers_con_ip_salida}/{workers_totales} worker(s) "
+                    "tienen Public IP propia de salida (workaround del NAT Gateway roto)",
+                )
+            if workers_totales == 0:
+                return CheckResult(name, "N/A", "No hay VMs worker todavía", critical=False)
+        except Exception:  # noqa: BLE001 - best-effort, cae al FAIL original si esto también falla
+            pass
         return CheckResult(name, "FAIL", f"Subred '{subnet_name}' no tiene NAT Gateway asociado")
     if ctx.config["red_y_aislamiento"].get("cloud", "aws") != "aws":
         return CheckResult(name, "N/A", "Chequeo específico de AWS/Azure; no aplica a esta nube", critical=False)

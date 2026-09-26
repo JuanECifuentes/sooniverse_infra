@@ -91,11 +91,25 @@ DESTROY_MAX_WAIT_SECONDS = 1200
 DESTROY_RETRY_INTERVAL_SECONDS = 60
 
 
-def _instances_pending(clusters: List[str], region: str, aws_profile: Optional[str] = None) -> List[str]:
+def _instances_pending(
+    clusters: List[str], region: str, aws_profile: Optional[str] = None, cloud: str = "aws"
+) -> List[str]:
     """IDs de instancia de estos clústeres SkyPilot que NO llegaron todavía a
     'terminated' (incluye 'shutting-down', 'stopping', 'pending', 'running':
     cualquier estado donde el ENI sigue potencialmente 'in-use', que es lo
-    que de verdad bloquea la capa de red con DependencyViolation)."""
+    que de verdad bloquea la capa de red con DependencyViolation).
+
+    BUG CONFIRMADO en un despliegue real: esta función llamaba a la API de
+    EC2 SIN IMPORTAR LA NUBE, usando la región de Azure/GCP como si fuera una
+    región AWS ("Could not connect to the endpoint URL:
+    https://ec2.westus3.amazonaws.com/"), abortando la destrucción completa
+    antes de llegar siquiera a la capa de red. Azure no tiene el mismo
+    patrón de terminación asíncrona de EC2 (el 'begin_delete().result()' de
+    SkyPilot ya espera a que la VM desaparezca de verdad), así que para
+    cualquier nube que no sea AWS basta con confiar en que 'sky down'
+    terminó con éxito -sin este chequeo AWS-específico, que no aplica."""
+    if cloud != "aws":
+        return []
     try:
         import boto3
     except ImportError:
@@ -119,6 +133,7 @@ def _instances_pending(clusters: List[str], region: str, aws_profile: Optional[s
 
 def _teardown_clusters_with_budget(
     clusters: List[str], region: str, deadline: float, aws_profile: Optional[str] = None,
+    cloud: str = "aws",
 ) -> bool:
     """`sky down` de cada clúster de la lista (en orden) y reintenta hasta que
     TODAS sus instancias EC2 confirmen 'terminated', a razón de un intento por
@@ -133,7 +148,7 @@ def _teardown_clusters_with_budget(
         for cluster in clusters:
             _sky_down(cluster, aws_profile=aws_profile)
 
-        pendientes = _instances_pending(clusters, region, aws_profile=aws_profile)
+        pendientes = _instances_pending(clusters, region, aws_profile=aws_profile, cloud=cloud)
         if not pendientes:
             if attempt > 1:
                 print(f"[OK] {', '.join(clusters)}: instancia(s) terminada(s) tras {attempt} intento(s).")
@@ -479,6 +494,7 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
         return 1
 
     only = args.only
+    cloud = red.get("cloud", "aws")
 
     if only in ("all",) and not args.dry_run:
         worker_clusters = [builder.worker_cluster(wl["id"]) for wl in config["workloads"]]
@@ -494,7 +510,7 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
         workers_ok = True
         if worker_clusters:
             workers_ok = _teardown_clusters_with_budget(
-                worker_clusters, red["region"], deadline, aws_profile=aws_profile,
+                worker_clusters, red["region"], deadline, aws_profile=aws_profile, cloud=cloud,
             )
 
         if not workers_ok:
@@ -504,7 +520,7 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
 
         print("\n--- [2/3] Nodo Gateway (sky down, mismo presupuesto) ---")
         gateway_ok = _teardown_clusters_with_budget(
-            [builder.gateway_cluster], red["region"], deadline, aws_profile=aws_profile,
+            [builder.gateway_cluster], red["region"], deadline, aws_profile=aws_profile, cloud=cloud,
         )
         if not gateway_ok:
             print("\n[ABORTADO] La capa de red no se toca con el Gateway todavía activo.")
@@ -519,7 +535,6 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
         print("\n[SKIP] 'gestion_red: existente' -> la VPC/SGs no los gestiona este sistema; nada que destruir.")
         return 0
 
-    cloud = red.get("cloud", "aws")
     print(f"\n--- [3/3] Capa de red {cloud.upper()} ---")
     from infra_state import PostgresInfraStateStore
 
@@ -580,17 +595,21 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
     # ver generate_infra.py fase 'network'): best-effort, nunca bloquea el
     # resto de la destrucción. Si nunca se creó (credenciales del despliegue
     # sin permiso IAM), esto simplemente no encuentra nada que borrar.
-    try:
-        from aws_iam_worker_control import delete_worker_control_user
+    # Concepto EXCLUSIVO de AWS (IAM) -confirmado en un despliegue real: para
+    # Azure 'mgr' es un AzureNetworkManager sin atributo 'session', así que
+    # esto emitía un WARNING falso en cada destroy que no era AWS.
+    if cloud == "aws":
+        try:
+            from aws_iam_worker_control import delete_worker_control_user
 
-        tags_ob = red.get("tags_obligatorios", {}) or {}
-        delete_worker_control_user(
-            mgr.session,
-            cliente_id=tags_ob.get("cliente_id", cliente["id"]),
-            entorno=tags_ob.get("entorno", cliente["entorno"]),
-        )
-    except Exception as exc:  # noqa: BLE001 - best-effort
-        print(f"[WARNING] No se pudo limpiar el usuario IAM de control de workers: {exc}")
+            tags_ob = red.get("tags_obligatorios", {}) or {}
+            delete_worker_control_user(
+                mgr.session,
+                cliente_id=tags_ob.get("cliente_id", cliente["id"]),
+                entorno=tags_ob.get("entorno", cliente["entorno"]),
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            print(f"[WARNING] No se pudo limpiar el usuario IAM de control de workers: {exc}")
 
     return 0 if report.ok else 2
 
