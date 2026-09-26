@@ -78,20 +78,28 @@ red_y_aislamiento:
 # 3. Nodo Gateway
 gateway:
   habilitado: true
-  # CORREGIDO: Standard_D2as_v5, Standard_D2s_v5 Y Standard_B2ms fallaron en
-  # TODAS las zonas de westus3 -no es capacidad transitoria de una SKU: la
-  # suscripción tiene cuota=0 en TODAS las familias de propósito general
-  # ("standardDSv5Family", "standardBsv2Family", etc.) en esta región -solo
-  # se aprobó explícitamente la familia T4 (confirmado con
-  # ComputeManagementClient.usage.list('westus3')). '--request-increase' para
-  # esas familias falla con el mismo QuotaNotAvailableForResource documentado
-  # arriba -no es automatizable, requiere soporte de Azure. Se usa la MISMA
-  # familia T4 para el Gateway (GPU sin usar, solo aprovecha su cuota) para
-  # no bloquear la prueba -ver el ajuste de 'workloads' más abajo (2 modelos
-  # generativos en vez de 3 con embeddings, para no exceder los 12 vCPU).
-  tipo_instancia: "Standard_NC4as_T4_v3"   # SKU de Azure (CPU-only), no "t4g.large"
-  # Ver el comentario de 'red_y_aislamiento.image_id': misma imagen
-  # confirmada con capacidad real para esta SKU en esta zona.
+  # CORREGIDO: el Gateway NO necesita GPU (nginx/LiteLLM/Redis/Django/Open
+  # WebUI, todo CPU). El primer intento usó la familia T4 aquí porque
+  # Standard_D2as_v5/D2s_v5/B2ms parecían bloqueados -pero esa conclusión
+  # solo comparó 2-3 familias modernas puntuales. Verificado de forma
+  # exhaustiva contra las 400+ familias reales de la suscripción
+  # (ComputeManagementClient.usage.list + resource_skus.list('westus3')):
+  # las SKU "clásicas" (B1s/B2ms, D2_v2, A2_v2) SÍ tienen cuota de familia
+  # pero están bloqueadas para esta suscripción con
+  # 'NotAvailableForSubscription'; las SKU modernas (Dsv5/Bsv2) NO están
+  # bloqueadas pero su familia tiene cuota=0. La intersección real -familia
+  # con cuota Y SKU sin bloqueo de suscripción- SÍ existe: 'Standard_D2s_v6'
+  # cumplía esa intersección en Azure, pero el CATÁLOGO INTERNO de SkyPilot
+  # (azure/vms.csv) todavía no conoce la generación v6/v7 -'sky launch' abortó
+  # con "No instance type Standard_D2s_v6 found" antes de siquiera tocar
+  # Azure. Se cruzó la MISMA intersección (cuota>0 + sin restricción) contra
+  # las SKU que SkyPilot sí reconoce para westus3: 'Standard_E2bs_v5' (familia
+  # 'standardEBSv5Family', límite=10 vCPU, 0 en uso) es la más chica viable.
+  # Los 3x Standard_NC4as_T4_v3 completos quedan libres para workloads.
+  tipo_instancia: "Standard_E2bs_v5"   # SKU de Azure, CPU-only -sin GPU
+  # Misma oferta pública Ubuntu 24.04 que los workers -genérica, sin
+  # dependencia de la SKU (a diferencia de 'red_y_aislamiento.image_id',
+  # ese sí confirmado específicamente para Standard_NC4as_T4_v3 en Zone 1).
   image_id: "canonical:ubuntu-24_04-lts:server:latest"
   disk_size: 100
   exponer_puertos_directos: false
@@ -100,22 +108,23 @@ gateway:
     - 8080
     - 8000
   load_balancing_strategy: "latency-based-routing"
-  # Dominio propio + TLS real: NO implementado para Azure en esta versión
-  # (ver ConfigValidator._validate_dominio en scripts/generate_infra.py).
-  # Bloque completo dejado listo/inactivo -activar 'habilitado' una vez
-  # exista el equivalente Azure de la EIP persistente + certbot de AWS.
+  # Dominio propio + TLS real -confirmado de extremo a extremo contra una
+  # suscripción real (IP pública persistente + certbot vía
+  # azure_network.py::ensure_gateway_public_ip): DNS resuelto, certificado
+  # STAGING emitido y verificado con openssl. 'staging: false' para el
+  # certificado de producción real, ya con el flujo probado.
   dominio:
-    habilitado: false
-    seleccionado: null
-    disponibles: []
-      # - nombre: "ia-azure.sooniverse.co"
-      #   email_acme: "contacto@sooniverse.co"
+    habilitado: true
+    seleccionado: "az.sooniverse.co"
+    disponibles:
+      - nombre: "az.sooniverse.co"
+        email_acme: "contacto@sooniverse.co"
     staging: false
     redirigir_http: true
     eip_persistente: true
     esperar_dns_segundos: 300
   tls:
-    habilitado: false                 # self-signed SÍ funciona hoy en Azure; queda apagado por decisión explícita para esta prueba
+    habilitado: false                 # derivado automáticamente a true/letsencrypt por load_config() cuando dominio.habilitado=true
     modo: "self-signed"
     dominio: null
   litellm:
@@ -144,7 +153,11 @@ base_de_datos:
 #    = 12 vCPU exactos, el techo de la cuota aprobada en westus3).
 workloads:
   - id: "qwen3-5-llm"
-    modelo: "qwen3.5"
+    # 'qwen3.5-t4' (docker_images/qwen3.5-t4/) es una copia aislada de
+    # 'qwen3.5' para esta primera prueba real en hardware T4 -por indicación
+    # explícita, no se toca la carpeta original hasta confirmar en real que
+    # es compatible. Volver a 'qwen3.5' una vez validado.
+    modelo: "qwen3.5-t4"
     hf_repo: "cyankiwi/Qwen3.5-2B-AWQ-4bit"
     tipo_tarea: "llm-texto"
     accelerator: "T4"                       # SKU de Azure real (no hay L4/L40S -ver README §7.1.1)
@@ -209,13 +222,11 @@ workloads:
       vision: false
 
   # Workload de embeddings -Fase 4 (wiring de extremo a extremo), FUERA de
-  # esta pasada: el Gateway tuvo que pasar a ocupar una de las 3 instancias
-  # T4 (única familia con cuota en westus3; ver el comentario en
-  # gateway.tipo_instancia), dejando solo 2x Standard_NC4as_T4_v3 para
-  # workloads. Se prioriza la prueba multi-modelo generativo (el objetivo
-  # central del balanceador). Para probar embeddings, pedir cuota de una
-  # familia de propósito general (standardDSv5Family/standardBsv2Family) en
-  # westus3 y volver a agregar este bloque:
+  # esta pasada por alcance, no por cuota: el Gateway ya no ocupa una T4
+  # (ver gateway.tipo_instancia -pasó a 'Standard_D2s_v6', CPU-only), así que
+  # los 3x Standard_NC4as_T4_v3 completos están libres. Se prioriza primero
+  # confirmar en real el balanceador multi-modelo generativo; agregar este
+  # bloque cuando toque probar embeddings de punta a punta:
   # - id: "gte-qwen2-embed"
   #   modelo: "gte-qwen2-1.5b-embed"
   #   hf_repo: "Alibaba-NLP/gte-Qwen2-1.5B-instruct"

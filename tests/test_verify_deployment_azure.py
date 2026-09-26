@@ -59,7 +59,11 @@ def test_private_route_to_nat_ok_cuando_subred_tiene_nat_gateway(monkeypatch):
     assert result.status == "OK"
 
 
-def test_private_route_to_nat_fail_sin_nat_gateway_asociado(monkeypatch):
+def test_private_route_to_nat_na_sin_nat_ni_vms_worker(monkeypatch):
+    """Sin NAT Gateway asociado NI ninguna VM worker todavía (despliegue a
+    medio camino): N/A, no FAIL -no hay suficiente información para saber si
+    el workaround de IP de salida por worker (ver azure_worker_egress_ip.py)
+    va a aplicar o no."""
     ctx = vd.VerificationContext(
         config=_base_config(),
         resources=[
@@ -68,12 +72,66 @@ def test_private_route_to_nat_fail_sin_nat_gateway_asociado(monkeypatch):
             _res("subnet-private", "subnet-priv-1", {"name": "subred-private"}),
         ],
     )
-    network_client, _ = _patch_clients(monkeypatch)
+    network_client, compute_client = _patch_clients(monkeypatch)
     network_client.subnets.get.return_value = MagicMock(nat_gateway=None)
+    compute_client.virtual_machines.list.return_value = []
+
+    result = vd.check_private_route_to_nat(ctx)
+
+    assert result.status == "N/A"
+    assert result.critical is False
+
+
+def test_private_route_to_nat_fail_sin_nat_y_workers_sin_ip_salida(monkeypatch):
+    """Sin NAT Gateway asociado Y las VMs worker existentes tampoco tienen
+    Public IP propia: ningún mecanismo de salida a internet -FAIL real."""
+    ctx = vd.VerificationContext(
+        config=_base_config(),
+        resources=[
+            _res("resource-group", "rg-1", {"name": "sooniverse-acme-prod-rg"}),
+            _res("vnet", "vnet-1", {"name": "sooniverse-acme-prod-vnet"}),
+            _res("subnet-private", "subnet-priv-1", {"name": "subred-private"}),
+        ],
+    )
+    network_client, compute_client = _patch_clients(monkeypatch)
+    network_client.subnets.get.return_value = MagicMock(nat_gateway=None)
+    nic_id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/networkInterfaces/nic-1"
+    vm = MagicMock(network_profile=MagicMock(network_interfaces=[MagicMock(id=nic_id)]))
+    vm.tags = {"rol": "worker"}
+    compute_client.virtual_machines.list.return_value = [vm]
+    network_client.network_interfaces.get.return_value = MagicMock(
+        ip_configurations=[MagicMock(public_ip_address=None)]
+    )
 
     result = vd.check_private_route_to_nat(ctx)
 
     assert result.status == "FAIL"
+
+
+def test_private_route_to_nat_ok_via_egress_ip_por_worker(monkeypatch):
+    """Sin NAT Gateway asociado, pero CADA VM worker tiene su propia Public
+    IP de salida (el workaround real, ver azure_worker_egress_ip.py): OK."""
+    ctx = vd.VerificationContext(
+        config=_base_config(),
+        resources=[
+            _res("resource-group", "rg-1", {"name": "sooniverse-acme-prod-rg"}),
+            _res("vnet", "vnet-1", {"name": "sooniverse-acme-prod-vnet"}),
+            _res("subnet-private", "subnet-priv-1", {"name": "subred-private"}),
+        ],
+    )
+    network_client, compute_client = _patch_clients(monkeypatch)
+    network_client.subnets.get.return_value = MagicMock(nat_gateway=None)
+    nic_id = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/networkInterfaces/nic-1"
+    vm = MagicMock(network_profile=MagicMock(network_interfaces=[MagicMock(id=nic_id)]))
+    vm.tags = {"rol": "worker"}
+    compute_client.virtual_machines.list.return_value = [vm]
+    network_client.network_interfaces.get.return_value = MagicMock(
+        ip_configurations=[MagicMock(public_ip_address=MagicMock(id="pip-egress"))]
+    )
+
+    result = vd.check_private_route_to_nat(ctx)
+
+    assert result.status == "OK"
 
 
 def test_private_route_to_nat_na_sin_subred_registrada(monkeypatch):
