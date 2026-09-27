@@ -102,7 +102,11 @@ cambia de credenciales por cliente (a diferencia de AWS, donde cada cliente BYOC
 perfil/rol distinto); lo único que cambia por cliente es **la suscripción** sobre la que
 operan esas mismas credenciales.
 
-**Flujo real:**
+**Flujo real (probado end-to-end contra dos cuentas Azure reales: una con la cuota T4 haciendo
+de cliente, otra recién creada y sin créditos haciendo de Sooniverse -Lighthouse no necesita
+suscripción del lado del operador. 12/12 comprobaciones, certificado Let's Encrypt de
+producción válido, y el Activity Log de la suscripción del cliente confirmando que todas las
+operaciones las hizo la identidad delegada, nunca el cliente):**
 
 1. El cliente aplica el módulo de Terraform en `onboarding/azure-byoc-terraform/` en **su
    propia suscripción** de Azure, como Owner — nunca comparte credenciales con Sooniverse.
