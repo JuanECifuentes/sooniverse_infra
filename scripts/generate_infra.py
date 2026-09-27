@@ -200,6 +200,10 @@ class ConfigValidator:
     # FQDN simple, sin wildcard: usado tanto por 'gateway.dominio.disponibles[].nombre'
     # como (indirectamente) por 'gateway.tls.dominio' una vez derivado.
     _FQDN_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$", re.IGNORECASE)
+    # GUID de suscripción Azure (formato estándar de Azure Resource Manager).
+    _AZURE_GUID_RE = re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+    )
 
     @classmethod
     def validate(cls, config: Dict[str, Any]) -> None:
@@ -298,7 +302,8 @@ class ConfigValidator:
 
         # gestion_red == "auto": *NetworkManager crea la red; validar el resto del contrato.
         if cloud == "azure":
-            cls._validate_red_azure(red)
+            modo = config.get("cliente", {}).get("modo")
+            cls._validate_red_azure(red, modo=modo)
         elif cloud == "gcp":
             cls._validate_red_gcp(red)
         else:
@@ -382,12 +387,39 @@ class ConfigValidator:
             seen_networks.append(net)
 
     @classmethod
-    def _validate_red_azure(cls, red: Dict[str, Any]) -> None:
+    def _validate_red_azure(cls, red: Dict[str, Any], modo: Optional[str] = None) -> None:
         """Equivalente de `_validate_red_auto` para `cloud: azure`
         (scripts/azure_network.py::AzureNetworkManager). Reutiliza la misma
         validación de CIDR (vía `ipaddress`); difiere en las reglas propias de
         Azure: sin 'per-az' (subredes no zonales) y sin S3 VPC Endpoint (no
         aplica, Azure Storage no tiene ese concepto)."""
+        # BYOC en Azure (Lighthouse, ver onboarding/azure-byoc-terraform/) se
+        # identifica por 'azure_subscription_id', no por credenciales propias:
+        # la identidad (Service Principal) sigue siendo la de Sooniverse, solo
+        # cambia LA SUSCRIPCIÓN sobre la que opera (delegada por el cliente).
+        # Sin este campo, 'modo: byoc' desplegaría en silencio sobre la
+        # suscripción de '.env' -que en BYOC ni siquiera es del cliente.
+        if modo == "byoc":
+            subscription_id = red.get("azure_subscription_id")
+            if not subscription_id or not isinstance(subscription_id, str):
+                raise ConfigValidationError(
+                    "'cliente.modo: byoc' con 'red_y_aislamiento.cloud: azure' requiere "
+                    "'red_y_aislamiento.azure_subscription_id' (la suscripción del cliente, "
+                    "delegada por Azure Lighthouse -ver onboarding/azure-byoc-terraform/)."
+                )
+            if not cls._AZURE_GUID_RE.match(subscription_id):
+                raise ConfigValidationError(
+                    f"'red_y_aislamiento.azure_subscription_id' inválido: '{subscription_id}'. "
+                    "Debe ser un GUID (formato de suscripción de Azure)."
+                )
+        elif red.get("azure_subscription_id") is not None:
+            subscription_id = red["azure_subscription_id"]
+            if not isinstance(subscription_id, str) or not cls._AZURE_GUID_RE.match(subscription_id):
+                raise ConfigValidationError(
+                    f"'red_y_aislamiento.azure_subscription_id' inválido: '{subscription_id}'. "
+                    "Debe ser un GUID (formato de suscripción de Azure)."
+                )
+
         vpc_cidr_raw = red.get("vpc_cidr")
         if not vpc_cidr_raw:
             raise ConfigValidationError("Falta 'red_y_aislamiento.vpc_cidr' (requerido en modo 'auto').")
@@ -1928,6 +1960,14 @@ def build_network_spec_from_config(config: Dict[str, Any]) -> "Any":
             gateway_domain=dominio_azure.get("seleccionado")
             if dominio_azure.get("habilitado")
             else None,
+            # BYOC (Lighthouse): None => AzureNetworkManager cae a
+            # AZURE_SUBSCRIPTION_ID de '.env' (modo 'hosted', comportamiento
+            # histórico intacto). La IDENTIDAD (Service Principal) sigue
+            # siendo la de Sooniverse en ambos modos -lo único que cambia en
+            # BYOC es la suscripción, delegada por el cliente vía
+            # onboarding/azure-byoc-terraform/ (ver ConfigValidator._validate_red_azure,
+            # que exige este campo cuando 'cliente.modo: byoc').
+            subscription_id=red.get("azure_subscription_id"),
         )
 
     if red.get("cloud", "aws") == "gcp":
@@ -2477,6 +2517,38 @@ def _sky_binary() -> Optional[str]:
     return shutil.which("sky")
 
 
+def _check_skypilot_azure_patch() -> None:
+    """Solo para 'cloud: azure': el worker con GPU necesita el parche local
+    sobre 'sky/provision/azure/instance.py' (Secure Boot deshabilitado, ver
+    patches/skypilot/ y scripts/apply_skypilot_patches.sh). Sin él, el setup
+    remoto del driver NVIDIA (apt/DKMS) se queda esperando para siempre una
+    contraseña MOK que nunca llega -confirmado en un despliegue real, sin
+    ESTE preflight eso se descubre recién a los ~30-40 min de un 'sky launch'
+    ya en curso, con la red y el Gateway ya arriba (y facturando). Se
+    detecta ANTES de lanzar nada, siempre (incluido --dry-run: es una simple
+    lectura de archivo, no muta nada)."""
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec("sky.provision.azure.instance")
+    except ImportError:
+        return  # sin 'sky' instalado: 'sky check azure' más abajo ya lo reporta
+    if spec is None or not spec.origin:
+        return
+    try:
+        content = Path(spec.origin).read_text(encoding="utf-8")
+    except OSError:
+        return
+    if "secure_boot_enabled=False" in content:
+        return
+    raise RuntimeError(
+        "El parche local de SkyPilot para Azure no está aplicado "
+        f"({spec.origin}). Sin él, los workers con GPU se cuelgan indefinidamente "
+        "instalando el driver NVIDIA (prompt interactivo MOK de Secure Boot que "
+        "nunca llega). Corre primero: scripts/apply_skypilot_patches.sh"
+    )
+
+
 def _run_sky(
     args: List[str],
     env: Optional[Dict[str, str]] = None,
@@ -2725,6 +2797,14 @@ def _sky_env(aws_profile: Optional[str] = None) -> Optional[Dict[str, str]]:
     """Entorno para subprocess.run([sky, ...]) que fuerza AWS_PROFILE cuando el
     cliente es BYOC (ver comentario en la fase [GATEWAY] de generate_infra)."""
     return {**os.environ, "AWS_PROFILE": aws_profile} if aws_profile else None
+
+
+def _ensure_azure_cli_subscription(subscription_id: Optional[str]) -> None:
+    """Ver docstring de azure_network.ensure_azure_cli_subscription (import
+    perezoso: el SDK de Azure solo hace falta cuando 'cloud: azure')."""
+    from azure_network import ensure_azure_cli_subscription
+
+    ensure_azure_cli_subscription(subscription_id)
 
 
 def _gateway_public_ip(
@@ -3449,6 +3529,13 @@ def deploy(
 
     # --- FASE: network --------------------------------------------------------
     cloud = red.get("cloud", "aws")
+    if cloud == "azure":
+        _check_skypilot_azure_patch()
+        if not dry_run:
+            # BYOC: hay que hacerlo ANTES de la primera llamada a 'sky' (fases
+            # gateway/workers más abajo), sin importar qué '--only' se haya
+            # pedido -ver docstring de _ensure_azure_cli_subscription().
+            _ensure_azure_cli_subscription(red.get("azure_subscription_id"))
     if "network" in phases:
         print(f"\n--- [RED] Red {cloud.upper()} (VPC-VNet/subredes/NAT/Security Groups-NSG) ---")
         # Compara 'vpc_cidr' contra otros despliegues activos en la misma
@@ -3798,16 +3885,22 @@ def deploy(
             if not rg_for_egress:
                 return None
             egress_script = REPO_ROOT / "scripts" / "azure_worker_egress_ip.py"
-            return subprocess.Popen(
-                [
-                    sys.executable,
-                    str(egress_script),
-                    "--resource-group", rg_for_egress,
-                    "--workload-id", _workload_id,
-                    "--region", red["region"],
-                    "--timeout", str(WORKER_LAUNCH_TIMEOUT_SECONDS),
-                ]
-            )
+            cmd = [
+                sys.executable,
+                str(egress_script),
+                "--resource-group", rg_for_egress,
+                "--workload-id", _workload_id,
+                "--region", red["region"],
+                "--timeout", str(WORKER_LAUNCH_TIMEOUT_SECONDS),
+            ]
+            # BYOC: el watcher corre en un proceso aparte, así que no hereda
+            # el subscription_id ya resuelto en este proceso -se le pasa
+            # explícito (None en modo 'hosted': cae a AZURE_SUBSCRIPTION_ID
+            # de '.env', igual que siempre).
+            azure_subscription_id = red.get("azure_subscription_id")
+            if azure_subscription_id:
+                cmd.extend(["--subscription-id", azure_subscription_id])
+            return subprocess.Popen(cmd)
 
         for wl in config["workloads"]:
             cluster = builder.worker_cluster(wl["id"])

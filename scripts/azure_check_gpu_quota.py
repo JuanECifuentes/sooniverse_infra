@@ -70,11 +70,19 @@ def _load_env(env_path: Path) -> None:
             os.environ[key] = value.strip().strip('"').strip("'")
 
 
-def _credential_and_subscription() -> tuple[ClientSecretCredential, str]:
+def _credential_and_subscription(
+    subscription_id: str | None = None,
+) -> tuple[ClientSecretCredential, str]:
+    """'subscription_id': override explícito (BYOC, ver
+    scripts/azure_worker_egress_ip.py --subscription-id). None => se resuelve
+    de AZURE_SUBSCRIPTION_ID en el entorno/.env (modo 'hosted', comportamiento
+    histórico intacto). La IDENTIDAD (Service Principal) es siempre la misma:
+    BYOC en Azure delega la SUSCRIPCIÓN, no cambia de credenciales -ver
+    docstring de scripts/azure_network.py."""
     tenant_id = os.environ.get("AZURE_TENANT_ID")
     client_id = os.environ.get("AZURE_CLIENT_ID")
     client_secret = os.environ.get("AZURE_CLIENT_SECRET")
-    subscription_id = os.environ.get("AZURE_SUBSCRIPTION_ID")
+    subscription_id = subscription_id or os.environ.get("AZURE_SUBSCRIPTION_ID")
     if not (tenant_id and client_id and client_secret and subscription_id):
         print(
             "[ERROR] Faltan AZURE_TENANT_ID/AZURE_CLIENT_ID/AZURE_CLIENT_SECRET/AZURE_SUBSCRIPTION_ID "

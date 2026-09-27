@@ -423,7 +423,7 @@ def _azure_delete_order(orphan: Dict[str, Any]) -> int:
     return _AZURE_ORPHAN_DELETE_ORDER.get((orphan.get("type") or "").lower(), 999)
 
 
-def purge_orphans_azure(orphans: List[Dict[str, Any]]) -> None:
+def purge_orphans_azure(orphans: List[Dict[str, Any]], subscription_id: Optional[str] = None) -> None:
     """Borra los recursos huérfanos reportados por scan_orphans_azure(), por
     su resourceId completo. A diferencia de AWS (una llamada boto3 tipada por
     cada tipo de recurso, ver purge_orphans()), Azure ofrece un único método
@@ -436,7 +436,7 @@ def purge_orphans_azure(orphans: List[Dict[str, Any]]) -> None:
     from azure_network import _default_credential
     from azure.mgmt.resource.resources import ResourceManagementClient
 
-    credential, sub_id = _default_credential()
+    credential, sub_id = _default_credential(subscription_id)
     resource_client = ResourceManagementClient(credential, sub_id)
 
     api_version_cache: Dict[str, Optional[str]] = {}
@@ -495,6 +495,13 @@ def destroy(config: Dict[str, Any], args: argparse.Namespace) -> int:
 
     only = args.only
     cloud = red.get("cloud", "aws")
+
+    if cloud == "azure" and not args.dry_run:
+        # BYOC: antes de cualquier 'sky down' -ver docstring de
+        # azure_network.ensure_azure_cli_subscription.
+        from azure_network import ensure_azure_cli_subscription
+
+        ensure_azure_cli_subscription(red.get("azure_subscription_id"))
 
     if only in ("all",) and not args.dry_run:
         worker_clusters = [builder.worker_cluster(wl["id"]) for wl in config["workloads"]]
@@ -643,7 +650,7 @@ def main() -> int:
                 if not args.yes:
                     print("[ABORTADO] --purge-orphans requiere --yes.")
                     return 1
-                purge_orphans_azure(orphans)
+                purge_orphans_azure(orphans, subscription_id=config["red_y_aislamiento"].get("azure_subscription_id"))
             return 0
 
         if cloud == "gcp":
