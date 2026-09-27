@@ -35,6 +35,17 @@ sky exec sooniverse-<cliente>-<entorno>-<workload> "nvidia-smi && sudo docker co
 | Cuota de AWS | `InsufficientInstanceCapacity` | Otra región/AZ, o pedir aumento de cuota de GPU |
 | SG mal formado | El worker arranca pero nunca aparece en `describe_instances` con el tag esperado | Revisar que `AwsNetworkManager.provision()` haya terminado sin errores (`infra_event` de esa fase) |
 
+## (Azure) Un worker con GPU se cuelga instalando el driver NVIDIA, sin avanzar
+
+- **Síntoma:** `sky launch`/`sky exec ... nvidia-smi` nunca termina; `sky logs` muestra el `setup` detenido justo después de instalar `dkms`/paquetes `linux-headers-*`, sin ningún error explícito -parece congelado, no falla.
+- **Causa:** el parche local de SkyPilot (`patches/skypilot/`, ver `docs/08_AGENTES_IA.md` §2.3) no está aplicado en este `venv` -típico tras `pip install --force-reinstall`, un venv nuevo, o actualizar `skypilot`. Sin él, la VM se crea con Secure Boot activo y el instalador del driver NVIDIA (apt/DKMS) queda esperando una contraseña MOK interactiva que nunca llega en un setup remoto no interactivo.
+- **Diagnóstico:** esto debería haberse detectado ANTES de lanzar nada (`generate_infra.py::_check_skypilot_azure_patch()` aborta con el mensaje exacto). Si de todos modos llegaste hasta acá, confirma con:
+  ```bash
+  grep secure_boot_enabled venv/lib/python3.10/site-packages/sky/provision/azure/instance.py
+  ```
+  Si no imprime nada, el parche no está.
+- **Solución:** `Ctrl-C` para matar el `sky launch` colgado, `scripts/apply_skypilot_patches.sh`, y relanzar. La VM ya creada con Secure Boot no se puede "reparar" en caliente -tiene que recrearse.
+
 ## El worker no tiene salida a Internet (NAT)
 
 - **Síntoma:** `check_worker_has_internet_egress` en `verify_deployment.py` falla, o el worker se queda colgado descargando el modelo.

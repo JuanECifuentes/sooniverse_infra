@@ -575,7 +575,7 @@ Para no re-descargar pesos de varios GB en cada reinicio:
 | 8 | Pruebas (moto + PostgreSQL real + smoke de nginx) y documentación completa (`docs/`) | ✅ Completa |
 | 9 | Modo BYOC en AWS (IAM AssumeRole + External ID, `onboarding/aws-byoc-terraform/`) | ✅ Completa |
 | 10 | Segundo proveedor de nube: Azure, modo `hosted` (`scripts/azure_network.py`) | ✅ Completa (primer corte) |
-| 10.1 | Azure modo BYOC (Azure Lighthouse, `onboarding/azure-byoc-terraform/`) | ✅ Completa (pendiente de probar en ejecución con cuentas reales) |
+| 10.1 | Azure modo BYOC (Azure Lighthouse, `onboarding/azure-byoc-terraform/`) | ✅ Completa y **verificada en ejecución real** (12/12, cuenta cliente + delegación separada de Sooniverse) |
 | 10.2 | Tercer proveedor de nube: GCP, modo `hosted` (`scripts/gcp_network.py`) | ⚠️ Teórico, no probado en ejecución (sin cuota de GPU disponible) |
 | 11 | Kubernetes (EKS/GKE + GPU Operator + Karpenter + KubeAI) | Pendiente |
 | 12 | TLS `letsencrypt`/`acm` (hoy solo `self-signed`) | Pendiente |

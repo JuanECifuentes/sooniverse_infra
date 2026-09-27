@@ -8,11 +8,12 @@
 # flujo completo (delegación Lighthouse del lado del cliente + preparación
 # del Service Principal del lado Sooniverse).
 #
-# 'azure_subscription_id' de abajo es un PLACEHOLDER (GUID inválido a
-# propósito para uso real, formato válido para que ConfigValidator no lo
-# rechace por sintaxis): reemplázalo por el 'subscription_id' que devuelve
-# 'terraform apply' en onboarding/azure-byoc-terraform/ (Sección 5 de
-# MANUAL_ONBOARDING_CLIENTE_AZURE.md) antes de desplegar.
+# 'azure_subscription_id' de abajo YA es el real: la suscripción del cliente
+# de prueba, delegada vía Lighthouse (onboarding/azure-byoc-terraform/,
+# 'terraform apply' ejecutado por el cliente) al Service Principal
+# 'sooniverse-operator' cuyas credenciales están ahora en .env. Confirmado
+# con 'az account show' (servicePrincipal, subscription visible como
+# delegada) y 'sky check azure -v' antes del primer despliegue.
 #
 # 'cliente.id' distinto de 'cliente-test-azure' y 'vpc_cidr' sin solape con
 # ningún otro cliente activo (root=10.0.0.0/16, cliente-test=10.10.0.0/16,
@@ -42,7 +43,7 @@ red_y_aislamiento:
   # BYOC: la suscripción DELEGADA por el cliente (Azure Lighthouse), no la
   # de '.env' -ver ConfigValidator._validate_red_azure, que exige este campo
   # cuando 'cliente.modo: byoc'. Reemplazar con el valor real (ver cabecera).
-  azure_subscription_id: "00000000-0000-0000-0000-000000000000"
+  azure_subscription_id: "80c25d63-561c-4dfd-9096-eb2181ef9641"
   image_id: "canonical:ubuntu-24_04-lts:server:latest"
   gestion_red: "auto"
   vpc_name: null
