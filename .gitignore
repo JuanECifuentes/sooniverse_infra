@@ -40,6 +40,7 @@ htmlcov/
 .env
 .env.local
 .env.production
+.env.backup-client-tenant
 
 # IDE
 .idea/
