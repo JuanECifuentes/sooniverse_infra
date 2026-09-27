@@ -45,12 +45,25 @@ reforzar con ASG una vez validado contra una suscripción real.
 
 Autenticación: Service Principal (`ClientSecretCredential`) leído de las
 variables de entorno estándar de Azure (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
-`AZURE_CLIENT_SECRET`, `AZURE_SUBSCRIPTION_ID`) -ver `.env.example`. A
-diferencia de AWS no existe hoy un "azure_profile" nombrado (aws_profile es
-Fase 6 de aislamiento multi-cliente); para modo 'hosted' con una sola
-suscripción de Sooniverse esto basta. Diseño diferido a cuando se implemente
-BYOC en Azure: un Service Principal/tenant por cliente, análogo a
-`red_y_aislamiento.aws_profile`.
+`AZURE_CLIENT_SECRET`) -ver `.env.example`. A diferencia de AWS (donde BYOC
+es un perfil/rol *distinto* por cliente, `aws_profile` + AssumeRole) el BYOC
+de Azure NO cambia de identidad: usa **Azure Lighthouse**. El cliente delega
+su suscripción (rol Contributor) al mismo Service Principal de Sooniverse
+-ver `onboarding/azure-byoc-terraform/`- y lo único que cambia por cliente es
+LA SUSCRIPCIÓN sobre la que operan las mismas credenciales, vía
+`red_y_aislamiento.azure_subscription_id` (`AzureNetworkSpec.subscription_id`,
+ver `_default_credential`). Ausente => `AZURE_SUBSCRIPTION_ID` de `.env`
+(modo 'hosted', comportamiento histórico). `ConfigValidator._validate_red_azure`
+exige el campo cuando `cliente.modo: byoc`.
+
+Limitación conocida: el servidor local de la API de SkyPilot resuelve la
+suscripción desde el perfil por defecto de `az` CLI (`az account show`), no
+desde estas variables de entorno -por eso `generate_infra.py`,
+`verify_deployment.py` y `destroy_infra.py` invocan
+`ensure_azure_cli_subscription()` (definida en este módulo) antes de
+cualquier `sky launch/exec/down/status` en Azure, y los despliegues BYOC de
+clientes distintos van en serie, no en paralelo (cambiar de suscripción
+reinicia ese servidor).
 
 Mecanismo de propiedad: idéntico al de AWS (ver PROMPT_CLAUDE_CODE_sooniverse_red.md
 y `aws_network.py`) -un recurso solo se borra si (a) está registrado en
@@ -63,6 +76,8 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import shutil
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -318,6 +333,67 @@ def _default_credential(subscription_id: Optional[str] = None) -> Tuple["ClientS
             "AZURE_CLIENT_SECRET y AZURE_SUBSCRIPTION_ID en .env (ver .env.example)."
         )
     return ClientSecretCredential(tenant_id=tenant_id, client_id=client_id, client_secret=client_secret), sub_id
+
+
+def ensure_azure_cli_subscription(subscription_id: Optional[str]) -> None:
+    """Azure BYOC (Lighthouse): antes de CUALQUIER 'sky launch/exec/down/
+    status', el perfil por defecto del CLI 'az' debe apuntar a la suscripción
+    del cliente -SkyPilot resuelve su suscripción efectiva SOLO desde ahí
+    (sky/adaptors/azure.py::get_subscription_id ->
+    credentials.get_cli_profile().get_subscription_id()), nunca desde las
+    variables de entorno AZURE_* (eso sí basta para `AzureNetworkManager`,
+    que usa el SDK directamente vía `_default_credential`, pero no para 'sky').
+
+    Llamada compartida por generate_infra.py, verify_deployment.py y
+    destroy_infra.py -los tres invocan 'sky' contra clústeres Azure.
+
+    'subscription_id' None => modo 'hosted' sin override: no se toca el
+    perfil de 'az' vigente (comportamiento histórico intacto).
+
+    Ese resultado además queda cacheado con 'lru_cache(scope="global")' DENTRO
+    del servidor local persistente de la API de SkyPilot (sky.server.server),
+    que sigue vivo entre invocaciones de 'sky' -si el servidor ya arrancó con
+    la suscripción anterior, cambiar el perfil de 'az' no alcanza: hay que
+    'sky api stop' para que el próximo comando lo relance y lo relea. Esto
+    implica que despliegues BYOC de clientes Azure distintos deben ir en
+    SERIE, nunca en paralelo, mientras exista un único servidor local.
+    """
+    if not subscription_id:
+        return
+    if shutil.which("az") is None:
+        raise RuntimeError(
+            "Se requiere 'red_y_aislamiento.azure_subscription_id' (BYOC) pero el CLI 'az' "
+            "no está en PATH -SkyPilot lo necesita para resolver la suscripción activa "
+            "(ver README 7.1)."
+        )
+    current = subprocess.run(
+        ["az", "account", "show", "--query", "id", "-o", "tsv"],
+        capture_output=True,
+        text=True,
+    )
+    current_id = current.stdout.strip() if current.returncode == 0 else None
+    if current_id == subscription_id:
+        return
+
+    print(f"[AZURE-CLI] Activando la suscripción {subscription_id} en 'az' (perfil por defecto)...")
+    result = subprocess.run(
+        ["az", "account", "set", "--subscription", subscription_id],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"No se pudo activar la suscripción '{subscription_id}' en 'az' "
+            f"(¿la delegación de Azure Lighthouse sigue vigente? revisa "
+            f"'az account list --refresh' y el portal -> Proveedores de servicios). "
+            f"Detalle: {result.stderr.strip()}"
+        )
+
+    sky = shutil.which("sky")
+    if sky:
+        print("[AZURE-CLI] Reiniciando el servidor local de la API de SkyPilot "
+              "(cambió la suscripción activa)...")
+        subprocess.run([sky, "api", "stop"], capture_output=True, text=True)
 
 
 class AzureNetworkManager:

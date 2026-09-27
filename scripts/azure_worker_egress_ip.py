@@ -60,9 +60,13 @@ def main() -> int:
     parser.add_argument("--region", required=True)
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--poll-interval", type=int, default=5)
+    # BYOC (Lighthouse): la suscripción del cliente, cuando difiere de la de
+    # '.env' -ver generate_infra.py::_spawn_egress_ip_watcher, que la propaga
+    # desde 'red_y_aislamiento.azure_subscription_id'.
+    parser.add_argument("--subscription-id", default=None)
     args = parser.parse_args()
 
-    credential, subscription_id = _credential_and_subscription()
+    credential, subscription_id = _credential_and_subscription(args.subscription_id)
     compute = ComputeManagementClient(credential, subscription_id)
     net = NetworkManagementClient(credential, subscription_id)
 

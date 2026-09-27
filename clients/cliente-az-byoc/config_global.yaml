@@ -1,0 +1,165 @@
+# ==============================================================================
+# CLIENTE DE PRUEBA -- AZURE, modo "byoc" (Azure Lighthouse)
+# ==============================================================================
+# Contraparte BYOC de clients/cliente-test-azure/ (mismo "hosted", misma
+# región/SKUs/workloads T4 ya verificadas 12/12) -la única diferencia real de
+# contrato es 'cliente.modo: byoc' + 'red_y_aislamiento.azure_subscription_id'.
+# Ver docs/05_MULTICLIENTE.md §6 y onboarding/azure-byoc-terraform/ para el
+# flujo completo (delegación Lighthouse del lado del cliente + preparación
+# del Service Principal del lado Sooniverse).
+#
+# 'azure_subscription_id' de abajo YA es el real: la suscripción del cliente
+# de prueba, delegada vía Lighthouse (onboarding/azure-byoc-terraform/,
+# 'terraform apply' ejecutado por el cliente) al Service Principal
+# 'sooniverse-operator' cuyas credenciales están ahora en .env. Confirmado
+# con 'az account show' (servicePrincipal, subscription visible como
+# delegada) y 'sky check azure -v' antes del primer despliegue.
+#
+# 'cliente.id' distinto de 'cliente-test-azure' y 'vpc_cidr' sin solape con
+# ningún otro cliente activo (root=10.0.0.0/16, cliente-test=10.10.0.0/16,
+# _ejemplo_azure=10.20.0.0/16, cliente-test-azure=10.30.0.0/16,
+# cliente-test-aws=10.40.0.0/16) -aunque en la práctica no coexisten (se
+# prueba uno a la vez, ver Fase de pruebas del plan de BYOC Azure), mantener
+# el mismo patrón de aislamiento que el resto de clients/.
+#
+# Comandos:
+#   python scripts/generate_infra.py --config clients/cliente-az-byoc/config_global.yaml --run --only network
+#   # -> apunta 'az.sooniverse.co' a la IP que imprime, luego:
+#   python scripts/generate_infra.py --config clients/cliente-az-byoc/config_global.yaml --run
+#   python scripts/verify_deployment.py --config clients/cliente-az-byoc/config_global.yaml
+# ==============================================================================
+
+# 1. Datos del Cliente y Entorno
+cliente:
+  id: "cliente-az-byoc"
+  entorno: "dev"
+  modo: "byoc"                    # <- única diferencia de fondo frente a cliente-test-azure
+
+# 2. Variables de Red y Aislamiento
+red_y_aislamiento:
+  cloud: "azure"
+  region: "westus3"                # misma región de la cuota T4 real (ver clients/cliente-test-azure/)
+  aws_profile: null                 # sin efecto con cloud: azure
+  # BYOC: la suscripción DELEGADA por el cliente (Azure Lighthouse), no la
+  # de '.env' -ver ConfigValidator._validate_red_azure, que exige este campo
+  # cuando 'cliente.modo: byoc'. Reemplazar con el valor real (ver cabecera).
+  azure_subscription_id: "80c25d63-561c-4dfd-9096-eb2181ef9641"
+  image_id: "canonical:ubuntu-24_04-lts:server:latest"
+  gestion_red: "auto"
+  vpc_name: null
+  vpc_id: null
+  subnet_id: null
+  vpc_cidr: "10.31.0.0/16"
+  azs: 1
+  subredes:
+    publicas: null
+    privadas: null
+  nat_gateway:
+    modo: "single"
+    timeout_segundos: 300
+  vpc_endpoints:
+    s3: true
+    ecr: false
+  workers_en_subred_privada: true
+  cidr_permitido_gateway: "0.0.0.0/0"
+  cidr_admin_ssh: "0.0.0.0/0"
+  security_group_workers: null
+  security_group_gateway: null
+  tags_obligatorios:
+    cliente_id: "cliente-az-byoc"
+    modo: "byoc"
+    entorno: "dev"
+    gestionado_por: "sooniverse"
+
+# 3. Nodo Gateway
+gateway:
+  habilitado: true
+  tipo_instancia: "Standard_E2bs_v5"   # CPU-only, sin GPU (ver clients/cliente-test-azure/ para el porqué)
+  image_id: "canonical:ubuntu-24_04-lts:server:latest"
+  disk_size: 100
+  exponer_puertos_directos: false
+  puertos_publicos:
+    - 4000
+    - 8080
+    - 8000
+  load_balancing_strategy: "latency-based-routing"
+  dominio:
+    habilitado: true
+    seleccionado: "az.sooniverse.co"
+    disponibles:
+      - nombre: "az.sooniverse.co"
+        email_acme: "contacto@sooniverse.co"
+    staging: false
+    redirigir_http: true
+    eip_persistente: true
+    esperar_dns_segundos: 300
+  tls:
+    habilitado: false
+    modo: "self-signed"
+    dominio: null
+  litellm:
+    master_key_env: "LITELLM_MASTER_KEY"
+    num_retries: 2
+    request_timeout: 600
+    cooldown_time: 30
+    allowed_fails: 2
+  open_webui:
+    habilitado: true
+    signup_habilitado: false
+    tareas_automaticas: "segun_capacidades"
+    code_interpreter: "segun_capacidades"
+  django_metrics:
+    habilitado: true
+    puerto: 8000
+    metrics_refresh_interval: 300
+
+# 4. Automatización de Base de Datos
+base_de_datos:
+  AUTO_INIT_DB: true
+  auto_refresh_metrics: true
+  schema_dir: "database"
+
+# 5. Perfil de Cargas de Trabajo -- mismo par multi-modelo ya verificado en
+#    cliente-test-azure/ (2x Standard_NC4as_T4_v3 = 8 vCPU de los 12 de cuota).
+workloads:
+  - id: "qwen3-5-llm"
+    modelo: "qwen3.5-t4"
+    hf_repo: "cyankiwi/Qwen3.5-2B-AWQ-4bit"
+    tipo_tarea: "llm-texto"
+    accelerator: "T4"
+    cantidad_gpus: 1
+    replicas: 1
+    tipo_instancia: "Standard_NC4as_T4_v3"
+    puerto: 8007
+    nombre_publico: "sooniverse-qwen3.5"
+    peso_balanceo: 1
+    asignacion_fraccional:
+      habilitado: true
+      gpu_memory_utilization: 0.95
+      max_model_len: 16384
+    runtime_vllm:
+      attention_backend: "TRITON_ATTN"
+      dtype: "half"
+    capacidades:
+      vision: false
+
+  - id: "qwen25-7b-awq-llm"
+    modelo: "qwen2.5-7b-instruct-awq"
+    hf_repo: "Qwen/Qwen2.5-7B-Instruct-AWQ"
+    tipo_tarea: "llm-texto"
+    accelerator: "T4"
+    cantidad_gpus: 1
+    replicas: 1
+    tipo_instancia: "Standard_NC4as_T4_v3"
+    puerto: 8011
+    nombre_publico: "sooniverse-qwen2.5-7b"
+    peso_balanceo: 1
+    asignacion_fraccional:
+      habilitado: true
+      gpu_memory_utilization: 0.90
+      max_model_len: 16384
+    runtime_vllm:
+      attention_backend: "TRITON_ATTN"
+      dtype: "half"
+    capacidades:
+      vision: false
