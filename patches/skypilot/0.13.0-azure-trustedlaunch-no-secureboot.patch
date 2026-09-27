@@ -1,0 +1,28 @@
+--- a/sky/provision/azure/instance.py
++++ b/sky/provision/azure/instance.py
+@@ -300,7 +300,24 @@
+         identity=compute.VirtualMachineIdentity(
+             type='UserAssigned',
+             user_assigned_identities={provider_config['msi']: {}}),
+-        priority=node_config['azure_arm_parameters'].get('priority', None))
++        priority=node_config['azure_arm_parameters'].get('priority', None),
++        # PARCHE SOONIVERSE (temporal, autorizado por el operador): SkyPilot
++        # 0.13.0 no especifica security_profile en absoluto -confirmado
++        # comparando contra el JSON real de una VM Standard_NC4as_T4_v3 que
++        # el operador SI logro aprovisionar a mano en westus3 (Trusted
++        # Launch). Sin esto, "Failed to acquire resources in all zones"
++        # persistio incluso con --retry-until-up durante ~35 min.
++        # secure_boot_enabled=False (segundo parche, tambien autorizado):
++        # con Secure Boot activo, el instalador del driver NVIDIA via
++        # apt/DKMS pide de forma INTERACTIVA una contraseña MOK para firmar
++        # el modulo de kernel -confirmado en un despliegue real: el setup
++        # remoto (sin terminal interactiva) se quedaba en un loop infinito
++        # de ese prompt para siempre, sin ningun timeout que lo cortara.
++        # v_tpm_enabled se deja en True (no interfiere con la instalacion).
++        security_profile=compute.SecurityProfile(
++            security_type='TrustedLaunch',
++            uefi_settings=compute.UefiSettings(
++                secure_boot_enabled=False, v_tpm_enabled=True)))
+     vm_poller = compute_client.virtual_machines.begin_create_or_update(
+         resource_group_name=provider_config['resource_group'],
+         vm_name=vm_name,

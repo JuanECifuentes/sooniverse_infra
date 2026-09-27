@@ -367,7 +367,9 @@ sin salida a Internet.
 ```bash
 # Python 3.11+
 python -m venv venv && source venv/bin/activate     # Windows: venv\Scripts\activate
-pip install pyyaml psycopg2-binary "skypilot[aws]"
+# Versión fijada a propósito: hay un parche local sobre esta versión exacta
+# de la librería (ver más abajo, "Parche local a SkyPilot").
+pip install pyyaml psycopg2-binary "skypilot[aws]==0.13.0"
 pip install -r django_metrics/requirements.txt      # solo para correr el panel en local
 pip install -r requirements-dev.txt                 # pytest + moto, solo para correr tests/
 
@@ -376,13 +378,31 @@ sky check                                            # valida el acceso de SkyPi
 cp .env.example .env                                 # y completar credenciales
 ```
 
+#### 7.0.1 Parche local a SkyPilot (obligatorio para Azure con GPU)
+
+`venv/.../sky/provision/azure/instance.py` necesita un parche que no existe en
+el paquete de PyPI: crea las VM con `security_profile` `TrustedLaunch` y
+**Secure Boot deshabilitado**. Sin esto, el instalador del driver NVIDIA
+(apt/DKMS) queda esperando para siempre una contraseña MOK que nunca llega
+en un setup remoto no interactivo, y el worker T4 nunca termina de aprovisionar.
+Se pierde en cualquier reinstalación de la librería (`pip install
+--force-reinstall`, venv nuevo, `pip install -U skypilot`), así que el parche
+vive versionado en `patches/skypilot/` y se reaplica con:
+
+```bash
+scripts/apply_skypilot_patches.sh    # idempotente: correrlo 2 veces no falla
+```
+
+`generate_infra.py` valida (solo para `cloud: azure`) que el parche esté
+aplicado antes de lanzar nada, y aborta con este mismo comando si no lo está.
+
 ### 7.1 Azure (modo `hosted`, opcional)
 
 Para desplegar con `red_y_aislamiento.cloud: "azure"` (ver `clients/_ejemplo_azure/`)
 hace falta además:
 
 ```bash
-pip install "skypilot[azure]" azure-identity azure-mgmt-network azure-mgmt-resource
+pip install "skypilot[azure]==0.13.0" azure-identity azure-mgmt-network azure-mgmt-resource
 # Además, solo para scripts/azure_check_gpu_quota.py (diagnóstico de cuotas, 7.1.1):
 pip install azure-mgmt-compute azure-mgmt-quota azure-mgmt-subscription
 
@@ -398,11 +418,11 @@ A diferencia de AWS, Azure necesita además una sesión de `az login` activa en 
 máquina que despliega (varias rutas de `azure-identity`/SkyPilot caen de vuelta
 a esa sesión cacheada), y las suscripciones nuevas traen **cuota 0** para
 familias de VM con GPU -pídela en el Portal (o con `scripts/azure_check_gpu_quota.py`,
-ver 7.1.1) antes de intentar levantar workers. Alcance de este primer corte:
-solo modo `hosted` (cuenta propia de Sooniverse), sin dominio propio/TLS real
-(`self-signed` sí funciona), sin `gestion_red: existente`. Ver
-`scripts/azure_network.py` para el detalle completo del mapeo de recursos
-AWS -> Azure.
+ver 7.1.1) antes de intentar levantar workers. Dominio propio con Let's
+Encrypt y modo `byoc` (7.2) ya están implementados y probados; sigue sin
+soportarse `gestion_red: existente` (la VNet siempre la crea
+`AzureNetworkManager`). Ver `scripts/azure_network.py` para el detalle
+completo del mapeo de recursos AWS -> Azure.
 
 #### 7.1.1 GPU: no existe L4/L40S en Azure -qué familia y región pedir
 
@@ -487,6 +507,18 @@ automatizable): reintentar `--request-increase` más tarde, o abrir un ticket
 de soporte desde el Portal (Quotas -> My quotas -> ícono de información ->
 "Create a support request") si el bloqueo persiste.
 
+### 7.2 Azure (modo `byoc`)
+
+`cliente.modo: "byoc"` + `red_y_aislamiento.cloud: "azure"` despliega en la
+**suscripción del cliente**, delegada vía **Azure Lighthouse** -no hay
+AssumeRole cross-tenant en Azure, así que el mecanismo es distinto al de AWS:
+Sooniverse sigue usando SU MISMO Service Principal (el de 7.1), y lo único
+que cambia por cliente es `red_y_aislamiento.azure_subscription_id`. Ver
+`docs/05_MULTICLIENTE.md` §6 para el detalle completo del flujo, y
+`onboarding/azure-byoc-terraform/` (con `MANUAL_ONBOARDING_CLIENTE_AZURE.md`
+para el cliente y `MANUAL_OPERADOR_SOONIVERSE.md` para el lado Sooniverse)
+para el paso a paso de configuración.
+
 ---
 
 ## 8. Notas para agentes de IA
@@ -541,9 +573,9 @@ Para no re-descargar pesos de varios GB en cada reinicio:
 | 6 | nginx como única puerta de entrada + TLS self-signed | ✅ Completa |
 | 7 | Multi-cliente (`clients/<id>/`, aislamiento de CIDR/artefactos/credenciales) | ✅ Completa |
 | 8 | Pruebas (moto + PostgreSQL real + smoke de nginx) y documentación completa (`docs/`) | ✅ Completa |
-| 9 | Modo BYOC real (IAM AssumeRole + External ID) — hook documentado, no implementado | Pendiente |
+| 9 | Modo BYOC en AWS (IAM AssumeRole + External ID, `onboarding/aws-byoc-terraform/`) | ✅ Completa |
 | 10 | Segundo proveedor de nube: Azure, modo `hosted` (`scripts/azure_network.py`) | ✅ Completa (primer corte) |
-| 10.1 | Azure modo BYOC (Service Principal/tenant del cliente) | Pendiente |
+| 10.1 | Azure modo BYOC (Azure Lighthouse, `onboarding/azure-byoc-terraform/`) | ✅ Completa (pendiente de probar en ejecución con cuentas reales) |
 | 10.2 | Tercer proveedor de nube: GCP, modo `hosted` (`scripts/gcp_network.py`) | ⚠️ Teórico, no probado en ejecución (sin cuota de GPU disponible) |
 | 11 | Kubernetes (EKS/GKE + GPU Operator + Karpenter + KubeAI) | Pendiente |
 | 12 | TLS `letsencrypt`/`acm` (hoy solo `self-signed`) | Pendiente |

@@ -205,7 +205,8 @@ def _azure_clients(ctx: VerificationContext):
     from azure.mgmt.network import NetworkManagementClient
     from azure_network import _default_credential
 
-    credential, sub_id = _default_credential()
+    subscription_override = ctx.config["red_y_aislamiento"].get("azure_subscription_id")
+    credential, sub_id = _default_credential(subscription_override)
     return (
         NetworkManagementClient(credential, sub_id),
         ComputeManagementClient(credential, sub_id),
@@ -776,6 +777,11 @@ def build_context(config: Dict[str, Any], config_path: Path) -> VerificationCont
 
     red = config["red_y_aislamiento"]
     cliente = config["cliente"]
+
+    if red.get("cloud", "aws") == "azure" and ctx.sky_available:
+        from azure_network import ensure_azure_cli_subscription
+
+        ensure_azure_cli_subscription(red.get("azure_subscription_id"))
 
     if red.get("gestion_red", "auto") == "auto":
         try:
