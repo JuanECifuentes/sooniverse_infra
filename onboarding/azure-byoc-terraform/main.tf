@@ -11,6 +11,12 @@ terraform {
 provider "azurerm" {
   features {}
   subscription_id = var.subscription_id
+  # El provider registra automáticamente los Resource Providers que sus
+  # recursos necesitan (incluido Microsoft.ManagedServices, requerido por
+  # azurerm_lighthouse_definition). Por eso NO se declara aquí un recurso
+  # azurerm_resource_provider_registration explícito: Terraform lo gestiona
+  # solo, y declararlo a mano provoca un conflicto ("automatically registered
+  # by Terraform").
 }
 
 # -----------------------------------------------------------------------------
@@ -24,12 +30,6 @@ provider "azurerm" {
 # SU tenant), y la suscripción del cliente aparece ahí listada como delegada
 # -exactamente como AWS Organizations muestra las cuentas asumibles.
 # -----------------------------------------------------------------------------
-
-# Registra el proveedor de recursos que Lighthouse necesita (si ya está
-# registrado, esto es un no-op idempotente).
-resource "azurerm_resource_provider_registration" "managed_services" {
-  name = "Microsoft.ManagedServices"
-}
 
 resource "azurerm_lighthouse_definition" "sooniverse" {
   name               = "Sooniverse - Despliegue y gestión de infraestructura de IA"
@@ -52,8 +52,6 @@ resource "azurerm_lighthouse_definition" "sooniverse" {
     role_definition_id     = local.role_managed_services_registration_assignment_delete
     principal_display_name = var.sooniverse_principal_display_name
   }
-
-  depends_on = [azurerm_resource_provider_registration.managed_services]
 }
 
 resource "azurerm_lighthouse_assignment" "sooniverse" {
@@ -68,10 +66,10 @@ locals {
   # ver azure_network.py::ensure_remote_identity -las VM usan una identidad
   # administrada propia, 'remote_identity', para evitar exigir ESE permiso
   # de más alto privilegio), ni acceso a facturación ni a IAM del tenant.
-  role_contributor = "/subscriptions/${var.subscription_id}/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c"
+  role_contributor = "b24988ac-6180-42a0-ab88-20f7382dd24c"
 
   # Permite a Sooniverse eliminar ESTA MISMA delegación (Managed Services
   # Registration Assignment Delete Role) -así puede revocarse su propio
   # acceso al dar de baja al cliente, sin depender de que el cliente lo haga.
-  role_managed_services_registration_assignment_delete = "/subscriptions/${var.subscription_id}/providers/Microsoft.Authorization/roleDefinitions/91c1777a-f3dc-4fae-b103-61d183457e46"
+  role_managed_services_registration_assignment_delete = "91c1777a-f3dc-4fae-b103-61d183457e46"
 }
