@@ -1,0 +1,107 @@
+#!/bin/bash
+set -e
+
+# Todos los parámetros clave se pueden sobreescribir por variable de entorno.
+# Así puedes usar el mismo Dockerfile/imagen para cualquier modelo Qwen3.5
+# sin tener que editar este script ni reconstruir la imagen.
+
+MODEL_NAME="${MODEL_NAME:?Debes definir MODEL_NAME}"
+PORT="${PORT:-8007}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
+# Presupuesto de tokens por paso del planificador. La mitad del contexto: con
+# chunked prefill un prompt largo se parte en varios pasos en vez de monopolizar
+# uno entero y congelar la generación del resto de secuencias.
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-16384}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.92}"
+# Peticiones que el worker atiende A LA VEZ. El default era 2, lo que hacía que
+# el tercer usuario concurrente esperara en cola por mucha VRAM libre que
+# hubiera: era el techo de capacidad real del sistema. Lo fija ahora el contrato
+# (workloads[].concurrencia.max_num_seqs) y lo mide scripts/benchmark_capacity.py.
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}"
+ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
+DTYPE="${DTYPE:-half}"
+KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
+TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
+MM_PROCESSOR_KWARGS="${MM_PROCESSOR_KWARGS:-{\"max_pixels\": 602112}}"
+# Debe cubrir los tamaños de batch que se van a dar de verdad, o los lotes
+# grandes caen fuera del grafo capturado. Se mantiene alineado con MAX_NUM_SEQS.
+# Sin CUDAGRAPH_CAPTURE_SIZES explicito, se genera hasta MAX_NUM_SEQS (1,2,4,8 y
+# luego de 8 en 8 hasta 32, de 16 en 16 despues) para que ningun batch real
+# caiga fuera del grafo capturado aunque el contrato suba max_num_seqs.
+if [ -z "${CUDAGRAPH_CAPTURE_SIZES:-}" ]; then
+  _sizes="1, 2, 4, 8"
+  _n=16
+  while [ "${_n}" -le "${MAX_NUM_SEQS}" ]; do
+    _sizes="${_sizes}, ${_n}"
+    if [ "${_n}" -lt 32 ]; then _n=$((_n + 8)); else _n=$((_n + 16)); fi
+  done
+  CUDAGRAPH_CAPTURE_SIZES="[${_sizes}]"
+fi
+
+# Capacidades declaradas en config_global.yaml (ver scripts/generate_infra.py
+# build_worker() y scripts/test_model_capabilities.py). Solo se le anuncia al
+# cliente (LiteLLM/Open WebUI) lo que este checkpoint realmente soporta -evita
+# el error "auto tool choice requires --enable-auto-tool-choice..." que da
+# vLLM cuando Open WebUI manda tool_choice="auto" a un modelo sin esas
+# banderas, y evita aceptar imágenes en un modelo sin torre de visión.
+ENABLE_VISION="${ENABLE_VISION:-1}"
+ENABLE_TOOL_CALLING="${ENABLE_TOOL_CALLING:-0}"
+TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-}"
+if [ "${ENABLE_VISION}" = "1" ]; then
+  LIMIT_MM_PER_PROMPT="${LIMIT_MM_PER_PROMPT:-{\"image\": 1, \"video\": 0}}"
+else
+  LIMIT_MM_PER_PROMPT="${LIMIT_MM_PER_PROMPT:-{\"image\": 0, \"video\": 0}}"
+fi
+
+# Cuantización: déjalo vacío para que vLLM la auto-detecte (funciona con
+# modelos AWQ/GPTQ ya cuantizados en el repo). Si necesitas forzarla,
+# define QUANTIZATION=awq (o gptq, etc.) al levantar el contenedor.
+EXTRA_ARGS=()
+if [ -n "${QUANTIZATION}" ]; then
+  EXTRA_ARGS+=(--quantization "${QUANTIZATION}")
+fi
+if [ "${ENFORCE_EAGER}" = "1" ]; then
+  EXTRA_ARGS+=(--enforce-eager)
+fi
+# Con un presupuesto de tokens por paso menor que la ventana de contexto, vLLM
+# necesita chunked prefill explícito o rechaza el arranque
+# ("max_num_batched_tokens must be >= max_model_len").
+if [ "${MAX_NUM_BATCHED_TOKENS}" -lt "${MAX_MODEL_LEN}" ]; then
+  EXTRA_ARGS+=(--enable-chunked-prefill)
+fi
+if [ "${ENABLE_TOOL_CALLING}" = "1" ]; then
+  if [ -z "${TOOL_CALL_PARSER}" ]; then
+    echo "ERROR: ENABLE_TOOL_CALLING=1 pero TOOL_CALL_PARSER está vacío (define 'capacidades.tool_call_parser' en config_global.yaml)." >&2
+    exit 1
+  fi
+  EXTRA_ARGS+=(--enable-auto-tool-choice --tool-call-parser "${TOOL_CALL_PARSER}")
+fi
+# CORREGIDO durante la prueba local (Fase 3): en vLLM 0.24.0 la variable de
+# entorno VLLM_ATTENTION_BACKEND ya NO existe -se comprobó en vivo que solo
+# emite "WARNING: Unknown vLLM environment variable detected" y no cambia
+# nada. Se reemplazó por el flag de CLI '--attention-backend'. Además
+# 'XFORMERS' fue RETIRADO del motor V1 (vllm.v1.attention.backends.registry
+# ya no lo registra); el reemplazo para GPUs sin FlashAttention-2 (T4/Turing,
+# SM75) es 'TRITON_ATTN'.
+if [ -n "${VLLM_ATTENTION_BACKEND}" ]; then
+  EXTRA_ARGS+=(--attention-backend "${VLLM_ATTENTION_BACKEND}")
+fi
+
+echo "==> Levantando ${MODEL_NAME}"
+echo "    max-model-len=${MAX_MODEL_LEN} gpu-mem-util=${GPU_MEMORY_UTILIZATION} max-num-seqs=${MAX_NUM_SEQS} tp=${TENSOR_PARALLEL_SIZE}"
+echo "    capacidades: vision=${ENABLE_VISION} tool_calling=${ENABLE_TOOL_CALLING} (parser=${TOOL_CALL_PARSER:-n/a})"
+
+exec vllm serve "${MODEL_NAME}" \
+  --port "${PORT}" \
+  --max-model-len "${MAX_MODEL_LEN}" \
+  --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
+  --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
+  --max-num-seqs "${MAX_NUM_SEQS}" \
+  --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
+  --dtype "${DTYPE}" \
+  --limit-mm-per-prompt "${LIMIT_MM_PER_PROMPT}" \
+  --mm-processor-kwargs "${MM_PROCESSOR_KWARGS}" \
+  --allowed-local-media-path /tmp \
+  --kv-cache-dtype "${KV_CACHE_DTYPE}" \
+  --compilation-config "{\"cudagraph_capture_sizes\": ${CUDAGRAPH_CAPTURE_SIZES}}" \
+  "${EXTRA_ARGS[@]}"
