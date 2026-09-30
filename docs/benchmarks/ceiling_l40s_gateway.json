@@ -1,0 +1,63 @@
+{
+ "label": "l40s-gateway",
+ "base_url": "http://127.0.0.1/v1",
+ "model": "sooniverse-qwen3.5-9b",
+ "inicio_epoch": 1790735809.6751657,
+ "tok_por_palabra": 1.0634278002699056,
+ "decode": [
+  {
+   "concurrencia": 64,
+   "ventana_seg": 45,
+   "peticiones_ok": 153,
+   "errores": 543,
+   "primer_error": "HTTP 429: b'{\"error\":{\"message\":\"No deployments available for selected model, Try again in 30 seconds. All deployments for selected model are in cooldown. Passed '",
+   "cliente_out_tok_s": 1490.5,
+   "cliente_in_tok_s": 501.3,
+   "cliente_rps": 2.911,
+   "tokens_salida_medios": 512.0,
+   "tokens_entrada_medios": 172.3,
+   "ttft_p50_ms": 1110.9,
+   "ttft_p95_ms": 13482.3,
+   "itl_medio_ms": 27.7,
+   "lat_p50_ms": 16638.1,
+   "lat_p95_ms": 22882.1,
+   "lat_p99_ms": 23064.8,
+   "motor_out_tok_s": 994.4,
+   "motor_in_tok_s": 316.8,
+   "motor_running_medio": 14.3,
+   "motor_waiting_max": 0.0,
+   "motor_kv_uso_max_pct": 8.4,
+   "out_tok_s": 994.4,
+   "in_tok_s": 316.8
+  }
+ ],
+ "realistic": [
+  {
+   "concurrencia": 16,
+   "ventana_seg": 150,
+   "peticiones_ok": 112,
+   "errores": 4,
+   "primer_error": "HTTP 429: b'{\"error\":{\"message\":\"No deployments available for selected model, Try again in 30 seconds. All deployments for selected model are in cooldown. Passed '",
+   "cliente_out_tok_s": 546.1,
+   "cliente_in_tok_s": 4392.6,
+   "cliente_rps": 0.533,
+   "tokens_salida_medios": 1024.0,
+   "tokens_entrada_medios": 8236.5,
+   "ttft_p50_ms": 6750.9,
+   "ttft_p95_ms": 10612.0,
+   "itl_medio_ms": 23.2,
+   "lat_p50_ms": 30392.2,
+   "lat_p95_ms": 31585.9,
+   "lat_p99_ms": 31863.4,
+   "motor_out_tok_s": 539.0,
+   "motor_in_tok_s": 4376.5,
+   "motor_running_medio": 13.7,
+   "motor_waiting_max": 11.0,
+   "motor_kv_uso_max_pct": 18.3,
+   "out_tok_s": 539.0,
+   "in_tok_s": 4376.5
+  }
+ ],
+ "prediccion_8k_1k": null,
+ "fin_epoch": 1790736084.9495847
+}

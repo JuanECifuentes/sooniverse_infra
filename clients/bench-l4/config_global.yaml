@@ -1,0 +1,128 @@
+# ==============================================================================
+# BENCHMARK DE TECHO -- Qwen3.5-9B AWQ 4-bit en 1x NVIDIA L4 (g6.xlarge), AWS
+# ==============================================================================
+# Despliegue efimero para medir el techo de tokens/s del modelo y compararlo con
+# la L40S (clients/bench-l40s/). Imagen: docker_images/qwen3.5-9b/ (variante 9B
+# afinada para throughput, max-model-len 32768, vision activa).
+# Sin dominio (HTTP sobre IP publica): no requiere ningun paso manual de DNS.
+# BD: la definida en .env (BD vacia solo con los schemas de despliegue).
+#
+#   python scripts/generate_infra.py --config clients/bench-l4/config_global.yaml --run
+#   python scripts/destroy_infra.py  --config clients/bench-l4/config_global.yaml --yes
+# ==============================================================================
+
+cliente:
+  id: "bench-l4"
+  entorno: "dev"
+  modo: "hosted"
+
+red_y_aislamiento:
+  region: "us-east-1"
+  aws_profile: null
+  image_id: "ami-0d001f8052688dc45"
+  gestion_red: "auto"
+  vpc_name: null
+  vpc_id: null
+  subnet_id: null
+  vpc_cidr: "10.41.0.0/16"
+  azs: 3                            # g6/g6e sufren InsufficientInstanceCapacity en una sola AZ (ver cliente-test-aws)
+  subredes:
+    publicas: null
+    privadas: null
+  nat_gateway:
+    modo: "single"
+    timeout_segundos: 300
+  vpc_endpoints:
+    s3: true
+    ecr: false
+  workers_en_subred_privada: true
+  cidr_permitido_gateway: "0.0.0.0/0"
+  cidr_admin_ssh: "0.0.0.0/0"
+  security_group_workers: null
+  security_group_gateway: null
+  tags_obligatorios:
+    cliente_id: "bench-l4"
+    modo: "hosted"
+    entorno: "dev"
+    gestionado_por: "sooniverse"
+
+gateway:
+  habilitado: true
+  tipo_instancia: "t4g.large"
+  disk_size: 100
+  exponer_puertos_directos: false
+  puertos_publicos:
+    - 4000
+    - 8080
+    - 8000
+  load_balancing_strategy: "latency-based-routing"
+  dominio:
+    habilitado: false
+  tls:
+    habilitado: false
+    modo: "self-signed"
+    dominio: null
+  litellm:
+    master_key_env: "LITELLM_MASTER_KEY"
+    num_retries: 2
+    request_timeout: 900
+    cooldown_time: 30
+    allowed_fails: 2
+  open_webui:
+    habilitado: true
+    signup_habilitado: false
+    tareas_automaticas: "segun_capacidades"
+    code_interpreter: "segun_capacidades"
+  django_metrics:
+    habilitado: true
+    puerto: 8000
+    metrics_refresh_interval: 300
+
+base_de_datos:
+  AUTO_INIT_DB: true
+  auto_refresh_metrics: true
+  schema_dir: "database"
+
+workloads:
+  - id: "qwen35-9b"
+    modelo: "qwen3.5-9b"                       # -> docker_images/qwen3.5-9b/
+    hf_repo: "cyankiwi/Qwen3.5-9B-AWQ-4bit"
+    tipo_tarea: "llm-texto"
+    accelerator: "L4"
+    cantidad_gpus: 1
+    replicas: 1
+    tipo_instancia: "g6.xlarge"
+    puerto: 8007
+    nombre_publico: "sooniverse-qwen3.5-9b"
+    peso_balanceo: 1
+    asignacion_fraccional:
+      habilitado: true
+      gpu_memory_utilization: 0.92
+      max_model_len: 32768
+    # L4 24 GB: ~7 GB de pesos+vision, ~3 GB grafos/activaciones, resto KV + estado
+    # Mamba. 64 secuencias caben con holgura; el benchmark mide si mas ayuda.
+    concurrencia:
+      max_num_seqs: 64
+      max_num_batched_tokens: 16384
+    capacidades:
+      vision: true
+      tool_calling: false
+      tool_call_parser: null
+
+# Rampa del benchmark integrado (fase 'capacidad', persistida en la BD). El
+# barrido completo del techo y la verificacion 8k/1k los hace
+# scripts/benchmark_ceiling.py (ver docs/09_BENCHMARK_TECHO.md).
+capacidad:
+  habilitado: true
+  niveles_concurrencia: [1, 2, 4, 8, 16, 32, 48, 64]
+  segundos_por_nivel: 30
+  warmup_segundos: 15
+  prompt_tokens_objetivo: 512
+  max_tokens: 256
+  presupuesto_segundos: 300
+  umbral_p95_degradacion: 3.0
+  umbral_error_pct: 5.0
+  ganancia_minima_throughput_pct: 10.0
+  factor_usuarios_por_slot: 8
+  api_key_alias: "sooniverse-benchmark"
+  origen: "gateway"
