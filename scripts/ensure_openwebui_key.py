@@ -37,8 +37,20 @@ Best-effort por diseño: cualquier fallo se reporta como [WARNING]/[ERROR] y
 Open WebUI sigue funcionando con la master key mientras tanto -nunca debe
 abortar el despliegue completo por esto.
 
+Hash de correlación: `LiteLLM_SpendLogs.api_key` guarda sha256(key en claro),
+y el ETL (database/004_usage_analytics.sql) une contra
+`api_key_registry.litellm_token_hash`. El campo `token` de la respuesta de
+'/key/generate' es la key EN CLARO (no el hash), así que se calcula aquí el
+mismo sha256 que LiteLLM (`hash_token`) en vez de fiarse de la respuesta
+-guardar `token` dejaba todo el chat como "(sin registro)" en el panel.
+
+Idempotente y auto-reparable: si la key ya existe en `.env`, igual se
+re-sincroniza su fila del registro (corrige registros viejos con el hash
+equivocado o que nunca llegaron a escribirse).
+
 Uso:
     python3 scripts/ensure_openwebui_key.py --env-file .env
+    python3 scripts/ensure_openwebui_key.py --env-file demo/.env.demo --base-url http://proxy
 
 Salida relevante para quien invoca (generate_infra.py, vía GATEWAY_RUN_SCRIPT):
     imprime la línea literal 'SOONIVERSE_OPENWEBUI_KEY_CREATED=1' SOLO cuando
@@ -47,7 +59,9 @@ Salida relevante para quien invoca (generate_infra.py, vía GATEWAY_RUN_SCRIPT):
 """
 
 import argparse
+import hashlib
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -83,7 +97,16 @@ def _http_json(method: str, url: str, body: Optional[Dict[str, Any]] = None,
         return {"error": str(exc)}
 
 
-NGINX_BASE_URL = "http://localhost"
+# Default: nginx publicado en el host del Gateway. El demo (demo/deploy_demo.sh)
+# corre este script DENTRO de la red Docker y lo sobreescribe con
+# '--base-url http://proxy' (o SOONIVERSE_NGINX_BASE_URL).
+NGINX_BASE_URL = os.environ.get("SOONIVERSE_NGINX_BASE_URL", "http://localhost").rstrip("/")
+
+
+def litellm_token_hash(raw_key: str) -> str:
+    """Mismo hash que LiteLLM (`hash_token`): sha256 hex de la key en claro.
+    Es el valor que LiteLLM escribe en `LiteLLM_SpendLogs.api_key`."""
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
 
 def wait_for_litellm() -> bool:
@@ -129,18 +152,103 @@ def _delete_key_by_alias(alias: str, master_key: str) -> None:
         print(f"[WARNING] No se pudo borrar la key huérfana '{alias}': {resp}")
 
 
+
+def _register_key(env_path: Path, alias: str, raw_key: str,
+                  cliente_id: str, entorno: str) -> bool:
+    """Upsert de la fila de la key de Open WebUI en `sooniverse.api_key_registry`
+    con el hash REAL (sha256) que LiteLLM escribe en SpendLogs. Best-effort:
+    devuelve False (con [WARNING]) si la BD no es alcanzable, nunca lanza."""
+    from db_setup import connect, resolve_db_config  # type: ignore[import-not-found]
+
+    token_hash = litellm_token_hash(raw_key)
+    try:
+        conn = connect(resolve_db_config(env_path))
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    # Deja como mucho una fila ACTIVA con este alias: si
+                    # esta corrida acaba de borrar y reemplazar una key
+                    # huérfana, su fila vieja seguía activa en el registro
+                    # -mismo alias, distinto litellm_token_hash (la columna
+                    # UNIQUE real), así que el INSERT de abajo no la pisa por
+                    # sí solo- (confirmado en un despliegue real: quedaban dos
+                    # filas 'sooniverse-openwebui-acme-prod' activas). También
+                    # desactiva la fila vieja que guardó la key EN CLARO en
+                    # vez del hash (bug previo, ver docstring del módulo).
+                    cur.execute(
+                        """
+                        UPDATE sooniverse.api_key_registry
+                        SET is_active = FALSE, deactivated_at = NOW()
+                        WHERE key_alias = %s AND cliente_id = %s AND entorno = %s
+                          AND litellm_token_hash <> %s AND is_active
+                        """,
+                        (alias, cliente_id, entorno, token_hash),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO sooniverse.api_key_registry
+                            (key_alias, litellm_token_hash, key_prefix, cliente_id, entorno,
+                             descripcion, is_active, created_at, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, TRUE, NOW(), NOW())
+                        ON CONFLICT (litellm_token_hash) DO UPDATE SET
+                            key_alias = EXCLUDED.key_alias, updated_at = NOW()
+                        """,
+                        (alias, token_hash, raw_key[:12], cliente_id, entorno,
+                         "Key interna de la interfaz de chat (Open WebUI) hacia LiteLLM. "
+                         "No repartir a clientes ni usuarios finales."),
+                    )
+                    # Re-atribuye el consumo ya ingerido de esta key que quedó
+                    # huérfano (api_key_id NULL) mientras el registro tenía el
+                    # hash equivocado -el ETL solo re-une las últimas 48 h.
+                    cur.execute(
+                        """
+                        UPDATE sooniverse.token_usage_event e
+                        SET api_key_id = reg.id
+                        FROM sooniverse.api_key_registry reg
+                        WHERE reg.litellm_token_hash = %s
+                          AND e.litellm_token_hash = reg.litellm_token_hash
+                          AND e.api_key_id IS NULL
+                        """,
+                        (token_hash,),
+                    )
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - la key ya quedó operativa; el registro es best-effort
+        print(f"[WARNING] Key de Open WebUI operativa pero no se pudo registrar en la BD: {exc}")
+        return False
+    return True
+
+
 def main() -> int:
+    global NGINX_BASE_URL
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", default=".env")
+    parser.add_argument(
+        "--base-url", default=NGINX_BASE_URL,
+        help="URL de nginx del Gateway que proxia /key/* y /health/* a LiteLLM "
+             "(default: $SOONIVERSE_NGINX_BASE_URL o http://localhost)",
+    )
     args = parser.parse_args()
+    NGINX_BASE_URL = args.base_url.rstrip("/")
 
-    from db_setup import connect, parse_env_file, resolve_db_config  # type: ignore[import-not-found]
+    from db_setup import parse_env_file  # type: ignore[import-not-found]
 
     env_path = Path(args.env_file)
     env_vals = parse_env_file(env_path)
 
-    if env_vals.get("OPENWEBUI_LITELLM_API_KEY", "").strip():
-        print("[OK] OPENWEBUI_LITELLM_API_KEY ya existe en .env; nada que hacer.")
+    cliente_id = env_vals.get("CLIENTE_ID", "default")
+    entorno = env_vals.get("ENTORNO", "prod")
+    alias = f"sooniverse-openwebui-{cliente_id}-{entorno}"
+
+    existing_key = env_vals.get("OPENWEBUI_LITELLM_API_KEY", "").strip()
+    if existing_key:
+        # Nada que emitir, pero SÍ se re-sincroniza el registro: repara
+        # despliegues que guardaron la key en claro como hash (o nunca
+        # llegaron a escribir la fila) y por eso veían "(sin registro)".
+        if _register_key(env_path, alias, existing_key, cliente_id, entorno):
+            print(f"[OK] OPENWEBUI_LITELLM_API_KEY ya existe en {env_path}; registro "
+                  f"verificado (alias={alias}).")
         return 0
 
     master_key = env_vals.get("LITELLM_MASTER_KEY", "").strip()
@@ -154,10 +262,6 @@ def main() -> int:
               f"{READY_TIMEOUT_SECONDS}s; se omite el aprovisionamiento de la key de Open WebUI "
               "(reintenta en el próximo despliegue/sync).")
         return 1
-
-    cliente_id = env_vals.get("CLIENTE_ID", "default")
-    entorno = env_vals.get("ENTORNO", "prod")
-    alias = f"sooniverse-openwebui-{cliente_id}-{entorno}"
 
     resp = _generate_key(alias, master_key)
     if resp.get("status") == 400 and "already exists" in str(resp.get("json", "")):
@@ -173,7 +277,6 @@ def main() -> int:
         resp = _generate_key(alias, master_key)
     body = resp.get("json") or {}
     raw_key = body.get("key")
-    token_hash = body.get("token") or body.get("token_id")
     if not raw_key:
         print(f"[WARNING] LiteLLM no emitió la key de Open WebUI (status={resp.get('status')}): "
               f"{body or resp.get('error')}. Seguirá usando la master key.")
@@ -182,46 +285,7 @@ def main() -> int:
     with env_path.open("a", encoding="utf-8") as f:
         f.write(f"\nOPENWEBUI_LITELLM_API_KEY={raw_key}\n")
 
-    if token_hash:
-        try:
-            conn = connect(resolve_db_config(env_path))
-            try:
-                with conn:
-                    with conn.cursor() as cur:
-                        # Deja como mucho una fila ACTIVA con este alias: si
-                        # esta corrida acaba de borrar y reemplazar una key
-                        # huérfana (rama de arriba), su fila vieja seguía
-                        # activa en el registro -mismo alias, distinto
-                        # litellm_token_hash (la columna UNIQUE real), así
-                        # que el INSERT de abajo no la pisa por sí solo-
-                        # (confirmado en un despliegue real: quedaban dos
-                        # filas 'sooniverse-openwebui-acme-prod' activas).
-                        cur.execute(
-                            """
-                            UPDATE sooniverse.api_key_registry
-                            SET is_active = FALSE, deactivated_at = NOW()
-                            WHERE key_alias = %s AND cliente_id = %s AND entorno = %s
-                              AND litellm_token_hash <> %s AND is_active
-                            """,
-                            (alias, cliente_id, entorno, token_hash),
-                        )
-                        cur.execute(
-                            """
-                            INSERT INTO sooniverse.api_key_registry
-                                (key_alias, litellm_token_hash, key_prefix, cliente_id, entorno,
-                                 descripcion, is_active, created_at, updated_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, TRUE, NOW(), NOW())
-                            ON CONFLICT (litellm_token_hash) DO UPDATE SET
-                                key_alias = EXCLUDED.key_alias, updated_at = NOW()
-                            """,
-                            (alias, token_hash, raw_key[:12], cliente_id, entorno,
-                             "Key interna de la interfaz de chat (Open WebUI) hacia LiteLLM. "
-                             "No repartir a clientes ni usuarios finales."),
-                        )
-            finally:
-                conn.close()
-        except Exception as exc:  # noqa: BLE001 - la key ya quedó operativa; el registro es best-effort
-            print(f"[WARNING] Key de Open WebUI creada pero no se pudo registrar en la BD: {exc}")
+    _register_key(env_path, alias, raw_key, cliente_id, entorno)
 
     print(f"[OK] API Key de Open WebUI creada y persistida en {env_path} (alias={alias}).")
     print("SOONIVERSE_OPENWEBUI_KEY_CREATED=1")

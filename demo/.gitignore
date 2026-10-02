@@ -1,0 +1,3 @@
+# Secretos y artefactos generados del demo (ver DESPLIEGUE_DEMO.md).
+.env.demo
+generated/

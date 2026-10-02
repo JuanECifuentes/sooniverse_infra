@@ -38,6 +38,7 @@ Uso:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -436,7 +437,9 @@ def ensure_benchmark_key(gateway_url: str, master_key: str, alias: str,
         return None
     return {
         "key": key,
-        "token_hash": cuerpo.get("token") or cuerpo.get("token_id") or "",
+        # sha256(key) = lo que LiteLLM guarda en SpendLogs.api_key; el campo
+        # 'token' de la respuesta es la key EN CLARO, no el hash.
+        "token_hash": hashlib.sha256(key.encode("utf-8")).hexdigest(),
         "alias": payload["key_alias"],
     }
 

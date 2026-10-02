@@ -7,6 +7,7 @@ Las vistas quedan delgadas; aquí vive el acceso a datos y las llamadas al proxy
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -703,6 +704,13 @@ def refrescar_metricas(since_hours: int = 48, since_days: int = 90) -> Dict[str,
 # =============================================================================
 # CICLO DE VIDA DE API KEYS
 # =============================================================================
+def _litellm_token_hash(key_plaintext: str) -> str:
+    """Mismo hash que LiteLLM (`hash_token`): sha256 hex de la key en claro.
+    Es lo que LiteLLM guarda en `LiteLLM_SpendLogs.api_key` y en
+    `LiteLLM_VerificationToken.token` (ver scripts/ensure_openwebui_key.py)."""
+    return hashlib.sha256(key_plaintext.encode("utf-8")).hexdigest()
+
+
 def _audit(key: Optional[ApiKeyRegistry], action: str, actor: str,
            detalle: Optional[Dict[str, Any]] = None, ip: Optional[str] = None) -> None:
     ApiKeyAudit.objects.create(
@@ -748,7 +756,10 @@ def crear_api_key(
     )
 
     key_plaintext = respuesta.get("key", "")
-    token_hash = respuesta.get("token") or respuesta.get("token_id") or key_plaintext
+    # El campo 'token' de /key/generate es la key EN CLARO, no el hash: el ETL
+    # une contra LiteLLM_SpendLogs.api_key = sha256(key), así que se calcula
+    # aquí (si no, el consumo de la key quedaba como "(sin registro)").
+    token_hash = _litellm_token_hash(key_plaintext) if key_plaintext else respuesta.get("token_id")
 
     ahora = timezone.now()
     registro = ApiKeyRegistry.objects.create(

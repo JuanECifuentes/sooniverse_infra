@@ -1,0 +1,49 @@
+# ==============================================================================
+# Sooniverse Demo - server block para el Nginx DEL HOST (VPS compartido)
+# ==============================================================================
+# Generado por demo/render_demo.py (reemplaza __DEMO_DOMAIN__/__DEMO_HTTP_PORT__).
+#
+# Instalación (ver demo/DESPLIEGUE_DEMO.md, paso 6):
+#   sudo cp demo/generated/nginx-host-__DEMO_DOMAIN__.conf /etc/nginx/sites-available/__DEMO_DOMAIN__.conf
+#   sudo ln -s /etc/nginx/sites-available/__DEMO_DOMAIN__.conf /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+#   sudo certbot --nginx -d __DEMO_DOMAIN__      # añade el bloque 443 + redirección
+#
+# Solo afecta a peticiones con Host: __DEMO_DOMAIN__; los demás sitios del VPS
+# no cambian. El stack del demo solo escucha en 127.0.0.1:__DEMO_HTTP_PORT__.
+# ==============================================================================
+
+map $http_upgrade $sooniverse_demo_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __DEMO_DOMAIN__;
+
+    # Subidas de archivos al chat (RAG) y peticiones grandes a /v1.
+    client_max_body_size 100M;
+
+    location / {
+        proxy_pass http://127.0.0.1:__DEMO_HTTP_PORT__;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+
+        # WebSocket de Open WebUI.
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $sooniverse_demo_connection_upgrade;
+
+        # Streaming de tokens (SSE): sin buffering ni timeouts cortos.
+        proxy_buffering    off;
+        proxy_cache        off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}

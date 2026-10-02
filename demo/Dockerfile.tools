@@ -1,0 +1,12 @@
+# ==============================================================================
+# Sooniverse Demo - contenedor de utilidades (one-shot)
+# ==============================================================================
+# Corre los scripts del repo (render_demo.py, db_setup.py,
+# ensure_openwebui_key.py) DENTRO de la red Docker del demo, donde 'postgres'
+# y 'proxy' resuelven por nombre, sin instalar Python ni dependencias en el
+# host del VPS. El repo se monta en /repo (ver docker-compose.demo.yml).
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir psycopg2-binary==2.9.* PyYAML==6.*
+
+WORKDIR /repo

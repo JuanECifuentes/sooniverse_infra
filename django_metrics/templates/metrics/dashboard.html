@@ -91,7 +91,7 @@
                     {% for k in api_keys %}
                         <label class="sv-multiselect__option">
                             <input type="checkbox" value="{{ k.id }}" {% if k.id in api_key_ids_activos %}checked{% endif %}>
-                            <span>{{ k.key_alias }}{% if not k.is_active %} <span class="sv-muted">(inactiva)</span>{% endif %}</span>
+                            <span>{{ k.key_alias|friendly_key_alias }}{% if not k.is_active %} <span class="sv-muted">(inactiva)</span>{% endif %}</span>
                         </label>
                     {% empty %}
                         <span class="sv-multiselect__empty">Sin API Keys registradas.</span>
