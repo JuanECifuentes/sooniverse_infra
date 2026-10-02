@@ -429,12 +429,19 @@ def build_model_form(model_id: str, caps: Dict[str, Any]) -> Dict[str, Any]:
             # funciona sin soporte real de tool calling en vLLM.
             "function_calling": "native" if caps["effective_tool_calling"] else "legacy",
         },
-        # Lista vacía, NUNCA None: update_model_by_id() reconstruye ModelForm
-        # desde form_data.model_dump() (ver backend/open_webui/routers/models.py),
-        # y access_grants está tipado list[...], no Optional[list] -un None
+        # Lista, NUNCA None: update_model_by_id() reconstruye ModelForm desde
+        # form_data.model_dump() (ver backend/open_webui/routers/models.py), y
+        # access_grants está tipado list[...], no Optional[list] -un None
         # explícito revalida con pydantic y lanza ValidationError -> 500
-        # (confirmado en despliegue real). [] = sin restricciones de acceso.
-        "access_grants": [],
+        # (confirmado en despliegue real).
+        # OJO: en v0.11 una lista VACÍA significa PRIVADO (solo admins/dueño),
+        # no "sin restricciones" -ver backend/open_webui/models/access_grants.py:
+        # lo público es el grant comodín user:'*':read. Con [] cualquier usuario
+        # con rol 'user' (todo el que entra por SSO) veía "No results found" en
+        # el selector de modelos (confirmado en la prueba local del demo).
+        "access_grants": [
+            {"principal_type": "user", "principal_id": "*", "permission": "read"},
+        ],
         "is_active": True,
     }
 

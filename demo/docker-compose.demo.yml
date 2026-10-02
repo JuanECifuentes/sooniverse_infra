@@ -8,7 +8,8 @@
 #     'sooniverse-demo' para no chocar con nada de lo que ya corre en el VPS.
 #   - NO publica 80/443: solo nginx en 127.0.0.1:${DEMO_HTTP_PORT}; el Nginx
 #     del host termina TLS y hace proxy aquí.
-#   - PostgreSQL propio dentro del stack (sin puertos publicados).
+#   - PostgreSQL: propio dentro del stack (profile local-db, sin puertos
+#     publicados) si DB_HOST=postgres; si no, una BD externa existente.
 #
 # No lo levantes a mano: usa ./demo/deploy_demo.sh (orden de arranque, esquema
 # de BD y key virtual del chat). Ver demo/DESPLIEGUE_DEMO.md.
@@ -25,9 +26,11 @@ x-db-env: &db-env
 
 services:
 
+  # Solo con DB_HOST=postgres (deploy_demo.sh activa el profile local-db).
   postgres:
     image: postgres:16-alpine
     container_name: sooniverse-demo-postgres
+    profiles: ["local-db"]
     environment:
       POSTGRES_DB: ${DB_NAME:-sooniverse}
       POSTGRES_USER: ${DB_USER:-sooniverse}
@@ -81,6 +84,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+        # Con BD externa (profile local-db inactivo) la dependencia se ignora.
+        required: false
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:4000/health/liveliness')\" || exit 1"]
       interval: 30s
@@ -208,6 +213,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+        # Con BD externa (profile local-db inactivo) la dependencia se ignora.
+        required: false
     mem_limit: 512m
     networks: [demo_net]
     restart: unless-stopped

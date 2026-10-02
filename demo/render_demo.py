@@ -75,6 +75,14 @@ def build_model_list(env: Dict[str, str]) -> List[Dict[str, Any]]:
             "api_key": "os.environ/DEEPINFRA_API_KEY",
         }
 
+    # Modelos con razonamiento (Qwen3/3.5, etc.): sin esto "piensan" miles de
+    # tokens antes de responder incluso a un saludo -en la prueba local del
+    # demo, Qwen3.5-9B agotó los 4096 max_tokens del chat sin llegar a
+    # contestar-. LiteLLM reenvía 'extra_body' tal cual al proveedor; los que
+    # no conocen 'chat_template_kwargs' lo ignoran.
+    if env.get("DEMO_DISABLE_THINKING", "true").strip().lower() in ("true", "1", "yes", "si", "sí"):
+        litellm_params["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+
     return [{
         "model_name": model_name,
         "litellm_params": litellm_params,
@@ -118,6 +126,11 @@ upstream sooniverse_metrics {{ server metrics:8000;    }}
 server {{
     listen 80;
     server_name _;
+
+    # Redirecciones relativas (Location: /panel/...): este nginx escucha en
+    # :80 en claro detrás del Nginx del host, así que una absoluta saldría
+    # como http://<host>/... sin el https ni el puerto públicos.
+    absolute_redirect off;
 
     # IP real del cliente: el único par que llega aquí es el Nginx del host
     # (el puerto solo se publica en 127.0.0.1 y entra por el bridge de Docker).
