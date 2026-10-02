@@ -7,6 +7,7 @@ _stream_completion, igual que test_model_capabilities_probe.py hace con
 _http_post.
 """
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -303,8 +304,11 @@ def test_ensure_benchmark_key_no_expone_la_key_en_el_hash(monkeypatch):
     monkeypatch.setattr(bc, "_http_json", lambda *a, **k: {
         "status": 200, "json": {"key": "sk-secreta", "token": "hash-abc"}})
     k = bc.ensure_benchmark_key("http://127.0.0.1", "sk-master", "alias", ["m"])
-    assert k["token_hash"] == "hash-abc"
+    # sha256 de la key (lo que LiteLLM escribe en SpendLogs.api_key), nunca el
+    # campo 'token' de la respuesta (que es la key en claro).
+    esperado = hashlib.sha256(b"sk-secreta").hexdigest()
+    assert k["token_hash"] == esperado
     # Lo que se persiste es el hash; la key en claro solo vive en memoria.
     resultado = bc._resumir([nivel(1, [100.0] * 5)], "nivel_maximo", WL, CAP, k, 0.0, 10.0)
-    assert resultado["parametros"]["benchmark_key_hash"] == "hash-abc"
+    assert resultado["parametros"]["benchmark_key_hash"] == esperado
     assert "sk-secreta" not in json.dumps(resultado)

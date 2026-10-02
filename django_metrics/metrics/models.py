@@ -24,7 +24,7 @@ def friendly_key_alias(alias):
     """Traduce el alias técnico de la key de Open WebUI a una etiqueta legible.
     Cualquier otro alias (o None/"") pasa sin cambios."""
     if alias and alias.startswith(OPENWEBUI_KEY_ALIAS_PREFIX):
-        return "Interfaz Chat"
+        return "Interfaz Web"
     return alias
 
 

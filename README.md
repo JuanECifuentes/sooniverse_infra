@@ -284,6 +284,8 @@ python scripts/destroy_infra.py --yes
 
 Guía operativa detallada: **[MANUAL_DESPLIEGUE.md](MANUAL_DESPLIEGUE.md)** · Documentación completa: **[docs/](docs/00_ARQUITECTURA.md)**
 
+Demo sin GPUs (solo Gateway: chat + panel + LiteLLM → DeepInfra) en un VPS ya existente: **[demo/DESPLIEGUE_DEMO.md](demo/DESPLIEGUE_DEMO.md)**
+
 ---
 
 ## 5. Esquema de base de datos
