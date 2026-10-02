@@ -28,7 +28,12 @@ log()  { printf '\n===> %s\n' "$*"; }
 warn() { printf '[WARNING] %s\n' "$*" >&2; }
 die()  { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 
-dc() { docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
+dc() {
+    # PostgreSQL propio del stack solo con DB_HOST=postgres; si no, BD externa.
+    local profiles=()
+    if [ "$(env_get DB_HOST)" = "postgres" ]; then profiles=(--profile local-db); fi
+    docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "${profiles[@]}" "$@"
+}
 
 env_get() {
     # Último valor de KEY en .env.demo (sin comillas), vacío si no existe.
@@ -62,7 +67,9 @@ preflight() {
     [ "${#missing[@]}" -eq 0 ] || die "Variables sin definir en .env.demo: ${missing[*]}"
 
     [[ "$(env_get LITELLM_MASTER_KEY)" == sk-* ]] || die "LITELLM_MASTER_KEY debe empezar por 'sk-'."
-    [ "$(env_get DB_HOST)" = "postgres" ] || warn "DB_HOST no es 'postgres': se usará una BD externa al stack."
+    if [ "$(env_get DB_HOST)" != "postgres" ]; then
+        echo "[INFO] DB_HOST=$(env_get DB_HOST): BD EXTERNA (la base $(env_get DB_NAME) debe existir y ser alcanzable desde Docker)."
+    fi
 
     local port; port="$(env_get DEMO_HTTP_PORT)"
     case "$port" in
@@ -87,9 +94,14 @@ up() {
     preflight
     render
 
-    log "1/6 PostgreSQL + Redis"
-    dc up -d postgres redis
-    wait_healthy sooniverse-demo-postgres 120 || die "PostgreSQL no arrancó (./demo/deploy_demo.sh logs postgres)."
+    if [ "$(env_get DB_HOST)" = "postgres" ]; then
+        log "1/6 PostgreSQL (propio del stack) + Redis"
+        dc up -d postgres redis
+        wait_healthy sooniverse-demo-postgres 120 || die "PostgreSQL no arrancó (./demo/deploy_demo.sh logs postgres)."
+    else
+        log "1/6 Redis (PostgreSQL externo: $(env_get DB_HOST):$(env_get DB_PORT)/$(env_get DB_NAME))"
+        dc up -d redis
+    fi
 
     log "2/6 Esquema de base de datos (scripts/db_setup.py, idempotente)"
     dc --profile tools run --rm tools python scripts/db_setup.py --env-file demo/.env.demo --sql-dir database

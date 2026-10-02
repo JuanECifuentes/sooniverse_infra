@@ -100,6 +100,8 @@ Rellena como mínimo:
 | `DEEPINFRA_API_KEY` | Tu key de DeepInfra |
 | `DEMO_MODEL_ID` | Id del modelo en https://deepinfra.com/models (p.ej. `meta-llama/Meta-Llama-3.1-8B-Instruct`) |
 | `DEMO_MODEL_NAME` | Nombre público que verán el chat y la API (por defecto `sooniverse-demo`) |
+| `DEMO_DISABLE_THINKING` | `true` (recomendado): desactiva el "modo razonamiento" de modelos como Qwen3/Qwen3.5. Sin esto, el modelo puede gastar todos los tokens "pensando" sin llegar a responder (comprobado con `Qwen/Qwen3.5-9B`) |
+| `DB_HOST`… | `postgres` = Postgres propio dentro del stack. Cualquier otro valor = **BD externa existente**; la base `DB_NAME` debe existir y aceptar conexiones desde el servidor. El esquema lo crea el script |
 | `LITELLM_MASTER_KEY` | `sk-` + `openssl rand -hex 32` |
 | `LITELLM_SALT_KEY`, `DB_PASSWORD`, `SECRET_KEY`, `DJANGO_SUPERUSER_PASSWORD`, `OPENWEBUI_BOOTSTRAP_PASSWORD` | `openssl rand -hex 32` cada uno |
 | `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`, `GATEWAY_PUBLIC_URL`, `PUBLIC_BASE_URL`, `CHAT_URL`, `SOONIVERSE_PANEL_URL` | Reemplaza `demo.tudominio.com` por tu subdominio |
@@ -127,6 +129,28 @@ El script es idempotente; puedes repetirlo para actualizar. Hace lo siguiente:
    (`openwebui-bootstrap`).
 
 La primera vez tarda varios minutos, porque construye las imágenes de Open WebUI y del panel.
+
+> **Key del chat y `.env.demo`**: el paso 5 añade `OPENWEBUI_LITELLM_API_KEY` a `.env.demo`.
+> Si la BD ya se inicializó desde otra máquina (por ejemplo, en una prueba local), copia al
+> servidor ese mismo `.env.demo` con la key incluida, para que el chat siga usando la key ya
+> registrada. Si falta, el script borra la key huérfana y emite una nueva con el mismo alias;
+> también funciona.
+
+### Prueba local antes del servidor (opcional)
+
+Con Docker en tu máquina, puedes probar el mismo `.env.demo` sin tocarlo. Sobrescribe solo las
+URLs y el HTTPS con variables de entorno, que tienen prioridad sobre el archivo:
+
+```bash
+HTTPS_ACTIVO=false CSRF_TRUSTED_ORIGINS=http://localhost:8088 \
+GATEWAY_PUBLIC_URL=http://localhost:8088 PUBLIC_BASE_URL=http://localhost:8088 \
+CHAT_URL=http://localhost:8088/ SOONIVERSE_PANEL_URL=http://localhost:8088/panel/ \
+./demo/deploy_demo.sh
+```
+
+Cambia `8088` por tu `DEMO_HTTP_PORT` y abre `http://localhost:<puerto>/`. Si la prueba local
+usa la misma BD externa que el servidor, detén el stack local (`./demo/deploy_demo.sh down`)
+antes de desplegar en el servidor.
 
 ## 6. Conectar el Nginx del host (TLS)
 
@@ -197,7 +221,8 @@ sudo certbot --nginx -d $D --redirect
 | `403 CSRF verification failed` en el panel | `CSRF_TRUSTED_ORIGINS` debe ser exactamente `https://<dominio>` y `ALLOWED_HOSTS` debe incluir el dominio. Tras cambiarlos: `./demo/deploy_demo.sh`. |
 | Login en bucle en el panel | `HTTPS_ACTIVO=true` sin HTTPS real (cookies `Secure`). Completa certbot, o usa `false` solo para pruebas por `http://`. |
 | Consumo del chat como "(sin registro)" | La key del chat no se creó o no se registró. Repite `./demo/deploy_demo.sh`: el paso 4 repara el registro si la key ya existe. Revisa que `.env.demo` tenga `OPENWEBUI_LITELLM_API_KEY`. |
-| El modelo no aparece en el chat | El bootstrap falló. Mira `./demo/deploy_demo.sh logs open-webui` y repite `./demo/deploy_demo.sh`. |
+| El modelo no aparece en el chat ("No results found") | El bootstrap falló o es anterior al fix de visibilidad pública. Repite `./demo/deploy_demo.sh`; vuelve a construir Open WebUI y a publicar el modelo con acceso para todos. Revisa `./demo/deploy_demo.sh logs open-webui`. |
+| El chat se queda en "Thinking…" y no responde | El modelo tiene el razonamiento activo. Pon `DEMO_DISABLE_THINKING=true` y ejecuta `./demo/deploy_demo.sh`. |
 | Error 401/404 desde DeepInfra | Revisa `DEEPINFRA_API_KEY` y que `DEMO_MODEL_ID` exista en DeepInfra. Los detalles están en `./demo/deploy_demo.sh logs litellm`. |
 | El VPS se queda sin memoria | Baja `mem_limit` de `open-webui` o amplía el plan. Revisa con `docker stats`. |
 
